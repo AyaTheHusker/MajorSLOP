@@ -1,0 +1,17 @@
+# MudProxy dependencies
+# Install: pip install -r requirements.txt
+# Or on Arch: sudo pacman -S python-pytorch python-pillow python-numpy python-cairo python-gobject
+
+# Core GUI
+PyGObject
+pycairo
+
+# Image generation (Stable Diffusion / Flux)
+torch
+diffusers
+safetensors
+Pillow
+numpy
+
+# Networking (stdlib asyncio is used, but these may be needed for extensions)
+# requests  # stdlib urllib.request is used instead
