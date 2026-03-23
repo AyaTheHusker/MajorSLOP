@@ -64,6 +64,24 @@ class CharacterWindow(Gtk.Window):
         portrait_drag = self._hold_menu.create_gesture(self._portrait)
         portrait_drag.connect("drag-begin", self._on_portrait_right_drag)
 
+        # 3D portrait checkbox
+        self._3d_check = Gtk.CheckButton(label="3D Portrait")
+        self._3d_check.set_halign(Gtk.Align.CENTER)
+        self._3d_check.set_margin_bottom(8)
+        self._3d_check.connect("toggled", self._on_3d_toggled)
+        self._vbox.append(self._3d_check)
+
+        # 3D portrait state
+        self._3d_enabled = False
+        self._3d_renderer = None       # VulkanDepthRenderer (384x384)
+        self._3d_params = None         # DepthRenderParams (shared with room)
+        self._3d_timer = None          # tick callback id
+        self._3d_start_time = 0.0
+        self._3d_scene_ready = False
+        self._3d_toggled_cb = None     # callback to main app
+        self._portrait_pixbuf = None   # current static portrait pixbuf
+        self._portrait_bytes = None    # raw portrait image bytes for depth processing
+
         # Description text — centered under portrait
         self._desc_label = Gtk.Label(label="")
         self._desc_label.add_css_class("char-desc")
@@ -294,14 +312,17 @@ class CharacterWindow(Gtk.Window):
             self._desc_label.set_text(description)
 
             if portrait_bytes:
+                self._portrait_bytes = portrait_bytes
                 try:
                     loader = GdkPixbuf.PixbufLoader()
                     loader.write(portrait_bytes)
                     loader.close()
                     pixbuf = loader.get_pixbuf()
                     pixbuf = pixbuf.scale_simple(384, 384, GdkPixbuf.InterpType.BILINEAR)
-                    texture = Gdk.Texture.new_for_pixbuf(pixbuf)
-                    self._portrait.set_paintable(texture)
+                    self._portrait_pixbuf = pixbuf
+                    if not self._3d_enabled:
+                        texture = Gdk.Texture.new_for_pixbuf(pixbuf)
+                        self._portrait.set_paintable(texture)
                 except Exception as e:
                     logger.error(f"Failed to load portrait: {e}")
             return False
@@ -309,6 +330,7 @@ class CharacterWindow(Gtk.Window):
 
     def set_portrait(self, png_bytes: bytes) -> None:
         """Update just the portrait image."""
+        self._portrait_bytes = png_bytes
         def _do():
             try:
                 loader = GdkPixbuf.PixbufLoader()
@@ -316,8 +338,10 @@ class CharacterWindow(Gtk.Window):
                 loader.close()
                 pixbuf = loader.get_pixbuf()
                 pixbuf = pixbuf.scale_simple(384, 384, GdkPixbuf.InterpType.BILINEAR)
-                texture = Gdk.Texture.new_for_pixbuf(pixbuf)
-                self._portrait.set_paintable(texture)
+                self._portrait_pixbuf = pixbuf
+                if not self._3d_enabled:
+                    texture = Gdk.Texture.new_for_pixbuf(pixbuf)
+                    self._portrait.set_paintable(texture)
             except Exception as e:
                 logger.error(f"Failed to load portrait: {e}")
             return False
@@ -931,3 +955,81 @@ class CharacterWindow(Gtk.Window):
              lambda: self._ctx_regenerate(item_name)),
         ])
         self._hold_menu.show(items, gesture, start_x, start_y)
+
+    # ── 3D Portrait ──────────────────────────────────────────────
+
+    def _on_3d_toggled(self, button):
+        """Checkbox toggled by user."""
+        enabled = button.get_active()
+        self._3d_enabled = enabled
+        if self._3d_toggled_cb:
+            self._3d_toggled_cb(enabled)
+        if enabled:
+            self._start_3d_animation()
+        else:
+            self._stop_3d_animation()
+
+    def set_3d_toggled_callback(self, cb):
+        """Set callback for when 3D checkbox is toggled: cb(enabled: bool)."""
+        self._3d_toggled_cb = cb
+
+    def set_3d_renderer(self, renderer):
+        """Set the VulkanDepthRenderer for portrait 3D."""
+        self._3d_renderer = renderer
+
+    def set_3d_params(self, params):
+        """Update depth render params (shared with room scene)."""
+        self._3d_params = params
+        # If 3D is on and scene is ready but animation isn't running, start it
+        if self._3d_enabled and self._3d_scene_ready and self._3d_timer is None:
+            self._start_3d_animation()
+
+    def set_3d_scene_ready(self, ready: bool):
+        """Called when depth map has been loaded to GPU."""
+        self._3d_scene_ready = ready
+        if ready and self._3d_enabled and self._3d_timer is None:
+            GLib.idle_add(self._start_3d_animation)
+
+    def _start_3d_animation(self):
+        """Start the 3D parallax render loop."""
+        if self._3d_timer is not None:
+            return
+        if not self._3d_renderer or not self._3d_renderer.available:
+            return
+        if not self._3d_scene_ready:
+            return
+        self._3d_start_time = _time.monotonic()
+        self._3d_timer = self._portrait.add_tick_callback(self._3d_frame_tick)
+
+    def _stop_3d_animation(self):
+        """Stop the 3D parallax render loop and restore static portrait."""
+        if self._3d_timer is not None:
+            self._portrait.remove_tick_callback(self._3d_timer)
+            self._3d_timer = None
+        # Restore static portrait
+        if self._portrait_pixbuf:
+            texture = Gdk.Texture.new_for_pixbuf(self._portrait_pixbuf)
+            self._portrait.set_paintable(texture)
+
+    def _3d_frame_tick(self, widget, frame_clock):
+        """Frame clock callback — render one 3D frame."""
+        if not self._3d_enabled or not self._3d_renderer or not self._3d_params:
+            self._3d_timer = None
+            return False
+        t = _time.monotonic() - self._3d_start_time
+        try:
+            rgba = self._3d_renderer.render_frame(t, self._3d_params)
+            if rgba is None:
+                return True
+            w = self._3d_renderer._width
+            h = self._3d_renderer._height
+            gbytes = GLib.Bytes.new(rgba)
+            pixbuf = GdkPixbuf.Pixbuf.new_from_bytes(
+                gbytes, GdkPixbuf.Colorspace.RGB, True, 8,
+                w, h, w * 4,
+            )
+            texture = Gdk.Texture.new_for_pixbuf(pixbuf)
+            self._portrait.set_paintable(texture)
+        except Exception as e:
+            logger.error(f"3D portrait render error: {e}")
+        return True

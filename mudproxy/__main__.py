@@ -76,6 +76,7 @@ class MudProxyApp:
         )
         self._entity_db.on_status = self._on_entity_status
         self._entity_db.portrait_style = self.config.portrait_style
+        self._entity_db.my_char_name = self.config.character_name or ""
         self._auto_look_queue: list[str] = []
         self._auto_looking = False
         self._look_fail_count: dict[str, int] = {}  # name -> consecutive failures
@@ -103,6 +104,11 @@ class MudProxyApp:
         self._current_room_cache_key: Optional[str] = None
         self._loaded_depth_key: Optional[str] = None  # what's currently on the GPU
         self._last_inventory: Optional[InventoryData] = None  # cache for thumbnail refresh
+
+        # Portrait 3D system (separate renderer, shared params)
+        self._portrait_vulkan: Optional[VulkanDepthRenderer] = None
+        self._portrait_depth_key: Optional[str] = None
+        self._loaded_portrait_depth_key: Optional[str] = None
 
         # Wire parser callbacks
         self.parser.on_room_update = self._on_room_update
@@ -166,6 +172,7 @@ class MudProxyApp:
             self._room_window.set_regenerate_room_callback(self._regenerate_room)
             self._room_window.set_regenerate_entity_callback(self._regenerate_entity)
             self._room_window.set_entity_db(self._entity_db)
+            self._room_window.load_view_config(self.config)
             self._room_window.present()
 
             self._room_window.set_inject_fn(self._gui_inject)
@@ -178,6 +185,8 @@ class MudProxyApp:
             self._char_window.set_application(self.gui)
             self._char_window.set_inject_fn(self._gui_inject)
             self._char_window.set_regenerate_entity_callback(self._regenerate_entity)
+            self._char_window.set_3d_toggled_callback(self._portrait_3d_toggled)
+            self._char_window.set_3d_params(self._depth_params)
             self._room_window.set_character_window(self._char_window)
             # Don't present yet — show when we have character data
         self.gui.connect('activate', _on_activate)
@@ -188,6 +197,8 @@ class MudProxyApp:
         # Cleanup
         if self._vulkan_renderer:
             self._vulkan_renderer.shutdown()
+        if self._portrait_vulkan:
+            self._portrait_vulkan.shutdown()
         self._room_renderer.shutdown()
         asyncio.run_coroutine_threadsafe(self.proxy.stop(), self._loop)
         self._loop.call_soon_threadsafe(self._loop.stop)
@@ -587,6 +598,11 @@ class MudProxyApp:
         # Check if this is our character portrait
         if self._char_window and self._char_name and entity_key.lower() == self._char_name.lower():
             self._char_window.set_portrait(png_bytes)
+            # Re-trigger depth processing if 3D portrait is active
+            if self._char_window._3d_enabled:
+                self._char_window.set_3d_scene_ready(False)
+                self._loaded_portrait_depth_key = None
+                self._trigger_portrait_depth()
 
     def _get_entity_description(self, name: str) -> Optional[str]:
         """Get a known entity's description for the room prompt builder."""
@@ -631,8 +647,11 @@ class MudProxyApp:
             # Fallback: generate prompt from name
             base_prompt = f"a {entity_name}, medieval fantasy RPG character"
             logger.info(f"No base_prompt for {entity_name}, using fallback")
-        # Delete old thumbnail and regenerate prompt from description
-        self._entity_db.delete_thumbnail(entity_name)
+        # Delete old thumbnail by base name (that's how they're stored)
+        self._entity_db.delete_thumbnail(base)
+        # Also delete prefixed variant in case it exists
+        if entity_name.lower() != base.lower():
+            self._entity_db.delete_thumbnail(entity_name)
         if info and info.description:
             # Re-run LLM prompt generation so style changes take effect
             info.base_prompt = ""
@@ -645,10 +664,11 @@ class MudProxyApp:
             # No description, use existing prompt with new seed
             import random
             seed_tag = f"seed:{random.randint(1, 999999)}"
-            style = self._entity_db.portrait_style or "fantasy art"
+            is_self = self._char_name and entity_name.lower() == self._char_name.lower()
+            style = (self._entity_db.portrait_style or "fantasy art") if is_self else "fantasy art"
             if info and info.entity_type == "item":
                 thumb_prompt = (f"{base_prompt}, single object laid flat on dark background, "
-                                f"no person, no mannequin, no figure, item icon, {style}, detailed, {seed_tag}")
+                                f"no person, no mannequin, no figure, item icon, fantasy art, detailed, {seed_tag}")
             else:
                 thumb_prompt = f"{base_prompt}, portrait, square frame, {style}, detailed, {seed_tag}"
             self._room_renderer.generate_thumbnail(entity_name, thumb_prompt, "regen")
@@ -786,6 +806,7 @@ class MudProxyApp:
         logger.info(f"Character name from stat: {full_name} (first: {first_name})")
         self._char_name = first_name
         self._char_full_name = full_name
+        self._entity_db.my_char_name = first_name
         self.config.character_name = first_name
         self.config.save()
 
@@ -1020,12 +1041,6 @@ class MudProxyApp:
                         if desc.endswith(suffix):
                             desc = desc[:-len(suffix)].strip()
 
-                # Check if equipment changed — regenerate portrait if so
-                old_equip = getattr(self, '_last_char_equipment', [])
-                new_equip = info.equipment or []
-                equipment_changed = set(old_equip) != set(new_equip)
-                self._last_char_equipment = new_equip[:]
-
                 # Load existing portrait if available
                 portrait_bytes = self._entity_db.get_thumbnail(info.name)
                 self._char_window.update_character(
@@ -1034,12 +1049,10 @@ class MudProxyApp:
                     portrait_bytes=portrait_bytes,
                 )
 
-                # Regenerate portrait if no portrait or equipment changed
-                if not portrait_bytes or equipment_changed:
+                # Only generate if no portrait exists at all (never auto-regen)
+                if not portrait_bytes:
                     if info.base_prompt or info.description:
-                        logger.info(f"Regenerating character portrait (equip_changed={equipment_changed})")
-                        # Delete old thumbnail and regenerate
-                        self._entity_db.delete_thumbnail(info.name)
+                        logger.info("Generating initial character portrait")
                         import threading
                         threading.Thread(
                             target=self._entity_db._generate_entity_prompt,
@@ -1084,6 +1097,108 @@ class MudProxyApp:
         self.config.portrait_style = style
         self.config.save()
         logger.info(f"Portrait style set to: {style!r}")
+
+    def _portrait_3d_toggled(self, enabled: bool) -> None:
+        """Toggle 3D mode for the character portrait."""
+        logger.info(f"Portrait 3D: {'ON' if enabled else 'OFF'}")
+
+        if enabled and not self._portrait_vulkan:
+            # Create a separate 384x384 Vulkan renderer for the portrait
+            self._portrait_vulkan = VulkanDepthRenderer(width=384, height=384)
+            if self._portrait_vulkan.available:
+                logger.info("Portrait Vulkan renderer initialized (384x384)")
+                self._char_window.set_3d_renderer(self._portrait_vulkan)
+                # Queue depth processing for current portrait
+                self._trigger_portrait_depth()
+            else:
+                logger.warning("Portrait Vulkan renderer not available")
+
+        if enabled and self._portrait_vulkan and self._portrait_vulkan.available:
+            if not self._char_window._3d_renderer:
+                self._char_window.set_3d_renderer(self._portrait_vulkan)
+            self._trigger_portrait_depth()
+
+    def _trigger_portrait_depth(self) -> None:
+        """Queue depth processing for the current portrait image."""
+        if not self._char_window or not self._char_window._portrait_bytes:
+            return
+
+        import hashlib
+        import tempfile
+        portrait_bytes = self._char_window._portrait_bytes
+        key = "portrait_" + hashlib.sha256(portrait_bytes).hexdigest()[:16]
+        self._portrait_depth_key = key
+
+        # Check if already loaded
+        if key == self._loaded_portrait_depth_key:
+            self._char_window.set_3d_scene_ready(True)
+            return
+
+        # Write portrait to a temp file for depth processor
+        tmp = Path(tempfile.gettempdir()) / f"mudproxy_portrait_{key}.webp"
+        if not tmp.exists():
+            tmp.write_bytes(portrait_bytes)
+
+        # Use depth processor with a portrait-specific callback
+        if self._depth_processor.has_depth(key):
+            depth_path, inpaint_path = self._depth_processor.get_cached_paths(key)
+            self._on_portrait_depth_ready(key, str(tmp), depth_path, inpaint_path)
+        else:
+            # Queue — reuse processor but with custom callback wrapper
+            old_cb = self._depth_processor._on_depth_ready
+            def _portrait_cb(rk, cp, dp, ip):
+                if rk.startswith("portrait_"):
+                    self._on_portrait_depth_ready(rk, cp, dp, ip)
+                else:
+                    old_cb(rk, cp, dp, ip)
+            self._depth_processor._on_depth_ready = _portrait_cb
+            self._depth_processor.process_image(key, str(tmp))
+
+    def _on_portrait_depth_ready(self, key: str, color_path: str,
+                                  depth_path: Optional[str],
+                                  inpaint_path: Optional[str]) -> None:
+        """Depth map ready for portrait — upload to portrait GPU."""
+        if not self._portrait_vulkan or not self._portrait_vulkan.available:
+            return
+        if key != self._portrait_depth_key:
+            return
+        if key == self._loaded_portrait_depth_key:
+            return
+
+        try:
+            from PIL import Image
+
+            color_img = Image.open(color_path).convert("RGBA").resize((384, 384))
+            color_rgba = color_img.tobytes()
+
+            depth_img = Image.open(depth_path).convert("L").resize((384, 384))
+            depth_gray = depth_img.tobytes()
+
+            inpaint_rgba = None
+            if inpaint_path:
+                inp_img = Image.open(inpaint_path).convert("RGBA").resize((384, 384))
+                inpaint_rgba = inp_img.tobytes()
+
+            def _upload():
+                # Pause portrait animation during upload
+                if self._char_window._3d_timer is not None:
+                    self._char_window._stop_3d_animation()
+
+                self._portrait_vulkan.load_scene(
+                    color_rgba, 384, 384,
+                    depth_gray, 384, 384,
+                    inpaint_rgba, 384 if inpaint_rgba else 0,
+                    384 if inpaint_rgba else 0,
+                )
+                self._loaded_portrait_depth_key = key
+                logger.info("Portrait depth scene loaded to Vulkan")
+                self._char_window.set_3d_scene_ready(True)
+                return False
+
+            GLib.idle_add(_upload)
+
+        except Exception as e:
+            logger.error(f"Failed to load portrait depth scene: {e}", exc_info=True)
 
     def _gui_chatbot_toggled(self, enabled: bool) -> None:
         """Toggle chatbot mode — blocks FLUX when active."""
@@ -1163,6 +1278,8 @@ class MudProxyApp:
         self.config.save()
         if self._room_window:
             self._room_window.set_3d_params(self._depth_params)
+        if self._char_window:
+            self._char_window.set_3d_params(self._depth_params)
 
     def _is_renderer_idle(self) -> bool:
         """Return True when room renderer has no pending room or thumbnail work."""

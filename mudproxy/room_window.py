@@ -16,7 +16,7 @@ from typing import Optional, Callable
 import gi
 gi.require_version('Gtk', '4.0')
 gi.require_version('Adw', '1')
-from gi.repository import Gtk, Gdk, GLib, GdkPixbuf, Adw, Pango, Gio
+from gi.repository import Gtk, Gdk, GLib, GdkPixbuf, Adw, Pango, Gio, Graphene
 
 from .hold_menu import HoldMenu
 from .combat_effects import CombatEffects
@@ -121,6 +121,30 @@ class RoomWindow(Gtk.Window):
         lock_section.append("Lock Loot Panel", "view.toggle-loot-lock")
         view_menu.append_section(None, lock_section)
 
+        # NPC Display Scale sub-menu
+        npc_scale_menu = Gio.Menu()
+        for pct in ("50%", "75%", "100%", "125%", "150%", "200%"):
+            npc_scale_menu.append(pct, f"view.npc-scale('{pct}')")
+        view_menu.append_submenu("NPC Display Scale", npc_scale_menu)
+
+        # Loot Display Scale sub-menu
+        loot_scale_menu = Gio.Menu()
+        for pct in ("50%", "75%", "100%", "125%", "150%", "200%"):
+            loot_scale_menu.append(pct, f"view.loot-scale('{pct}')")
+        view_menu.append_submenu("Loot Display Scale", loot_scale_menu)
+
+        # Damage Text Scale sub-menu
+        dmg_scale_menu = Gio.Menu()
+        for pct in ("50%", "75%", "100%", "125%", "150%", "200%"):
+            dmg_scale_menu.append(pct, f"view.dmg-scale('{pct}')")
+        view_menu.append_submenu("Damage Text Scale", dmg_scale_menu)
+
+        # Zoomed Damage Text Scale sub-menu
+        zdmg_scale_menu = Gio.Menu()
+        for pct in ("50%", "75%", "100%", "125%", "150%", "200%"):
+            zdmg_scale_menu.append(pct, f"view.zdmg-scale('{pct}')")
+        view_menu.append_submenu("Zoomed Damage Text Scale", zdmg_scale_menu)
+
         view_btn = Gtk.MenuButton(label="View")
         view_btn.set_menu_model(view_menu)
         self._headerbar.pack_start(view_btn)
@@ -200,6 +224,40 @@ class RoomWindow(Gtk.Window):
 
         self._loot_float_x = 0
         self._loot_float_y = 40
+
+        # Thumbnail scale (percentage string → multiplier)
+        self._SCALE_PCTS = {"50%": 0.5, "75%": 0.75, "100%": 1.0, "125%": 1.25, "150%": 1.5, "200%": 2.0}
+        self._NPC_BASE_SIZE = 67
+        self._LOOT_BASE_SIZE = 32
+        self._npc_thumb_scale = "100%"
+        self._npc_thumb_size = 67
+        act_npc_scale = Gio.SimpleAction.new_stateful(
+            "npc-scale", GLib.VariantType.new("s"), GLib.Variant.new_string("100%"))
+        act_npc_scale.connect("change-state", self._on_action_npc_scale)
+        self._view_actions.add_action(act_npc_scale)
+
+        self._loot_thumb_scale = "100%"
+        self._loot_thumb_size = 32
+        act_loot_scale = Gio.SimpleAction.new_stateful(
+            "loot-scale", GLib.VariantType.new("s"), GLib.Variant.new_string("100%"))
+        act_loot_scale.connect("change-state", self._on_action_loot_scale)
+        self._view_actions.add_action(act_loot_scale)
+
+        # Damage text scale
+        self._dmg_scale = "100%"
+        self._dmg_scale_factor = 1.0
+        act_dmg_scale = Gio.SimpleAction.new_stateful(
+            "dmg-scale", GLib.VariantType.new("s"), GLib.Variant.new_string("100%"))
+        act_dmg_scale.connect("change-state", self._on_action_dmg_scale)
+        self._view_actions.add_action(act_dmg_scale)
+
+        # Zoomed damage text scale
+        self._zdmg_scale = "100%"
+        self._zdmg_scale_factor = 1.0
+        act_zdmg_scale = Gio.SimpleAction.new_stateful(
+            "zdmg-scale", GLib.VariantType.new("s"), GLib.Variant.new_string("100%"))
+        act_zdmg_scale.connect("change-state", self._on_action_zdmg_scale)
+        self._view_actions.add_action(act_zdmg_scale)
 
         # Room description stored for Ctrl+hover overlay (no longer shown as label)
         self._current_description = ""
@@ -329,7 +387,24 @@ class RoomWindow(Gtk.Window):
         self._hover_equip_label.set_max_width_chars(35)
         self._hover_equip_label.add_css_class("equip-label")
         popup_box.append(self._hover_equip_label)
-        self._hover_popup.set_child(popup_box)
+
+        # Wrap popup in overlay for floating damage numbers
+        self._hover_overlay = Gtk.Overlay()
+        self._hover_overlay.set_child(popup_box)
+        self._hover_effects_da = Gtk.DrawingArea()
+        self._hover_effects_da.set_can_target(False)
+        self._hover_effects_da.set_hexpand(True)
+        self._hover_effects_da.set_vexpand(True)
+        self._hover_effects_da.set_draw_func(self._on_hover_effects_draw)
+        self._hover_overlay.add_overlay(self._hover_effects_da)
+        self._hover_popup.set_child(self._hover_overlay)
+
+        # Hover state
+        self._hover_damage_numbers: list[dict] = []
+        self._hover_effects_ticking = False
+        self._hover_entity_name = ""  # currently hovered entity name (lowercase)
+        self._hover_shatter_active = False
+        self._hover_img_overlay_center = None  # (x, y) in overlay coords for shatter
 
         # Track thumbnail widgets for cleanup
         self._thumb_widgets: list[Gtk.Widget] = []
@@ -342,6 +417,7 @@ class RoomWindow(Gtk.Window):
         self._item_progress_labels: dict[str, Gtk.Label] = {}
         # Ripple effect: store source pixbuf for distortion
         self._hover_src_pixbuf = None
+        self._hover_src_widget = None  # the thumbnail widget being hovered
 
         # Combat visual effects overlay
         self._combat_effects = CombatEffects(self._root_overlay)
@@ -768,6 +844,7 @@ class RoomWindow(Gtk.Window):
         get_thumb_fn: callable(key) -> Optional[bytes]
         Thread-safe via GLib.idle_add.
         """
+        self._last_npc_update_args = (entities, get_thumb_fn)
         self._get_thumb_fn = get_thumb_fn
         def _do():
             # Shatter any monsters that disappeared since last update (death)
@@ -775,10 +852,15 @@ class RoomWindow(Gtk.Window):
                 new_names = {e["display_name"].lower() for e in entities}
                 for old_name, old_widget in self._thumb_by_name.items():
                     if old_name not in new_names:
-                        pixbuf = self._thumb_pixbufs.get(old_name)
-                        if pixbuf and old_widget.get_mapped():
-                            self._combat_effects.spawn_shatter(old_widget, pixbuf)
+                        # If hovering this monster, do the big shatter instead of thumbnail
+                        if old_name == self._hover_entity_name and self._hover_src_pixbuf:
+                            self._start_hover_shatter()
                             old_widget.set_opacity(0.0)
+                        else:
+                            pixbuf = self._thumb_pixbufs.get(old_name)
+                            if pixbuf and old_widget.get_mapped():
+                                self._combat_effects.spawn_shatter(old_widget, pixbuf)
+                                old_widget.set_opacity(0.0)
                 self._combat_effects.clear_target()
             self._pending_death = False
 
@@ -825,7 +907,8 @@ class RoomWindow(Gtk.Window):
                     png = get_thumb_fn(ent["base_name"])
 
                 # Build thumbnail widget
-                thumb_widget = self._make_thumb_widget(png, display_name, 67)
+                sz = self._npc_thumb_size
+                thumb_widget = self._make_thumb_widget(png, display_name, sz)
                 # Track by name for combat effects
                 name_lower = display_name.lower()
                 self._thumb_by_name[name_lower] = thumb_widget
@@ -836,7 +919,7 @@ class RoomWindow(Gtk.Window):
                         loader.close()
                         pb = loader.get_pixbuf()
                         self._thumb_pixbufs[name_lower] = pb.scale_simple(
-                            67, 67, GdkPixbuf.InterpType.BILINEAR)
+                            sz, sz, GdkPixbuf.InterpType.BILINEAR)
                     except Exception:
                         pass
                 if not png:
@@ -870,6 +953,13 @@ class RoomWindow(Gtk.Window):
                     end = buf.get_end_iter()
                     buf.insert_with_tags_by_name(end, ", ", "npc_sep")
 
+            # Force panel to re-measure after child anchors are laid out
+            def _force_resize():
+                self._thumb_tv.queue_resize()
+                self._npc_panel.queue_resize()
+                return False
+            GLib.timeout_add(50, _force_resize)
+
             return False
 
         GLib.idle_add(_do)
@@ -889,6 +979,7 @@ class RoomWindow(Gtk.Window):
 
     def update_item_thumbnails(self, items: list[dict], get_thumb_fn) -> None:
         """Update the item row: name [thumbnail] pairs inline as paragraph."""
+        self._last_loot_update_args = (items, get_thumb_fn)
         def _do():
             self._item_progress_labels.clear()
             self._item_thumb_widgets.clear()
@@ -930,7 +1021,8 @@ class RoomWindow(Gtk.Window):
                 if item.get("has_thumb"):
                     png = get_thumb_fn(thumb_key)
 
-                thumb_widget = self._make_thumb_widget(png, display_name, 32)
+                loot_sz = self._loot_thumb_size
+                thumb_widget = self._make_thumb_widget(png, display_name, loot_sz)
                 if not png:
                     pct_lbl = self._get_spinner_label(thumb_widget)
                     if pct_lbl:
@@ -1040,6 +1132,8 @@ class RoomWindow(Gtk.Window):
     def _on_thumb_enter(self, controller, x, y, display_name, thumb_key,
                         base_name, get_thumb_fn):
         """Show enlarged thumbnail popup on hover with zoom-in animation."""
+        self._hover_entity_name = display_name.lower()
+        self._hover_src_widget = controller.get_widget()
         # Try prefixed, then base
         png = get_thumb_fn(thumb_key)
         if png is None and base_name:
@@ -1102,6 +1196,24 @@ class RoomWindow(Gtk.Window):
         self._hover_thumb_rect = (thumb_sx, thumb_sy, thumb_w, thumb_h)
         self._hover_final_rect = (popup_x, popup_y, final_w, final_h)
 
+        # Compute popup image center in overlay coords (for combat effects)
+        ok, pt = widget.compute_point(self._root_overlay, Graphene.Point().init(0, 0))
+        if ok:
+            tox = pt.x  # thumbnail left in overlay coords
+            toy = pt.y  # thumbnail top in overlay coords
+            # The popup image (256x256) is centered over the overlay.
+            # Place effects at the center of the overlay for maximum visibility.
+            ow = self._root_overlay.get_width()
+            oh = self._root_overlay.get_height()
+            img_center_x = ow / 2
+            img_center_y = oh / 2 - 40  # slightly above center
+            self._hover_img_overlay_center = (img_center_x, img_center_y)
+            logger.debug(f"Hover overlay center: ({img_center_x:.0f}, {img_center_y:.0f}), "
+                        f"thumb at ({tox:.0f}, {toy:.0f}), overlay {ow}x{oh}")
+        else:
+            self._hover_img_overlay_center = None
+            logger.debug("compute_point failed for hover widget")
+
         # Start zoomed-in from thumbnail: tiny size, low opacity
         self._hover_popup.set_default_size(thumb_w, thumb_h)
         self._hover_popup.set_opacity(0.0)
@@ -1161,6 +1273,10 @@ class RoomWindow(Gtk.Window):
             # set_paintable() redraws from dismissing the popover
             if self._hover_src_pixbuf is not None and not self._ctx_menu_active and self._warp_enabled:
                 self._apply_ripple(t)
+            return True
+
+        elif self._hover_anim_phase == "shatter":
+            # Keep popup visible at full size — shatter is handled by _hover_effects_tick
             return True
 
         elif self._hover_anim_phase == "zoom_out":
@@ -1266,6 +1382,11 @@ class RoomWindow(Gtk.Window):
 
     def _on_thumb_leave(self, controller, *args):
         """Start zoom-out animation back to thumbnail."""
+        if self._hover_shatter_active:
+            # Don't interrupt shatter — it will dismiss the popup when done
+            return
+        self._hover_entity_name = ""
+        self._hover_damage_numbers.clear()
         if self._ctx_menu_active or self._hover_anim_phase == "menu_frozen":
             return
         if self._hover_anim_phase in ("zoom_in", "float"):
@@ -1300,6 +1421,90 @@ class RoomWindow(Gtk.Window):
     def set_entity_db(self, entity_db) -> None:
         """Set entity DB reference for player equipment lookups."""
         self._entity_db = entity_db
+
+    def load_view_config(self, config) -> None:
+        """Load View menu settings from config and apply them."""
+        self._config = config
+
+        self._show_console = config.show_console
+        self._show_monsters = config.show_monsters
+        self._show_items = config.show_items
+        self._scanlines_enabled = config.show_scanlines
+        self._warp_enabled = config.show_warp_zoom
+        self._scanline_thickness = config.scanline_thickness
+        self._npc_location = config.npc_location
+        self._loot_location = config.loot_location
+        self._npc_locked = config.npc_locked
+        self._loot_locked = config.loot_locked
+        self._npc_float_x = config.npc_float_x
+        self._npc_float_y = config.npc_float_y
+        self._loot_float_x = config.loot_float_x
+        self._loot_float_y = config.loot_float_y
+
+        # Sync action states to match loaded config
+        va = self._view_actions
+        va.lookup_action("toggle-console").set_state(GLib.Variant.new_boolean(self._show_console))
+        va.lookup_action("toggle-monsters").set_state(GLib.Variant.new_boolean(self._show_monsters))
+        va.lookup_action("toggle-items").set_state(GLib.Variant.new_boolean(self._show_items))
+        va.lookup_action("toggle-scanlines").set_state(GLib.Variant.new_boolean(self._scanlines_enabled))
+        va.lookup_action("toggle-warp").set_state(GLib.Variant.new_boolean(self._warp_enabled))
+        va.lookup_action("scanline-thickness").set_state(GLib.Variant.new_int32(self._scanline_thickness))
+        va.lookup_action("npc-location").set_state(GLib.Variant.new_string(self._npc_location))
+        va.lookup_action("loot-location").set_state(GLib.Variant.new_string(self._loot_location))
+        va.lookup_action("toggle-npc-lock").set_state(GLib.Variant.new_boolean(self._npc_locked))
+        va.lookup_action("toggle-loot-lock").set_state(GLib.Variant.new_boolean(self._loot_locked))
+
+        # Scale
+        self._npc_thumb_scale = getattr(config, 'npc_thumb_scale', '100%')
+        mult = self._SCALE_PCTS.get(self._npc_thumb_scale, 1.0)
+        self._npc_thumb_size = max(16, int(self._NPC_BASE_SIZE * mult))
+        va.lookup_action("npc-scale").set_state(GLib.Variant.new_string(self._npc_thumb_scale))
+
+        self._loot_thumb_scale = getattr(config, 'loot_thumb_scale', '100%')
+        mult = self._SCALE_PCTS.get(self._loot_thumb_scale, 1.0)
+        self._loot_thumb_size = max(16, int(self._LOOT_BASE_SIZE * mult))
+        va.lookup_action("loot-scale").set_state(GLib.Variant.new_string(self._loot_thumb_scale))
+
+        # Damage text scale
+        self._dmg_scale = getattr(config, 'dmg_text_scale', '100%')
+        self._dmg_scale_factor = self._SCALE_PCTS.get(self._dmg_scale, 1.0)
+        self._combat_effects.set_font_scale(self._dmg_scale_factor)
+        va.lookup_action("dmg-scale").set_state(GLib.Variant.new_string(self._dmg_scale))
+
+        self._zdmg_scale = getattr(config, 'zdmg_text_scale', '100%')
+        self._zdmg_scale_factor = self._SCALE_PCTS.get(self._zdmg_scale, 1.0)
+        va.lookup_action("zdmg-scale").set_state(GLib.Variant.new_string(self._zdmg_scale))
+
+        # Apply visibility
+        self._console_scroll.set_visible(self._show_console)
+        self._status_label.set_visible(self._show_console)
+
+        # Re-place panels with loaded positions
+        self._place_thumb_widgets()
+
+    def _save_view_config(self) -> None:
+        """Persist current View menu settings to config."""
+        if not hasattr(self, '_config') or self._config is None:
+            return
+        self._config.show_console = self._show_console
+        self._config.show_monsters = self._show_monsters
+        self._config.show_items = self._show_items
+        self._config.show_scanlines = self._scanlines_enabled
+        self._config.show_warp_zoom = self._warp_enabled
+        self._config.scanline_thickness = self._scanline_thickness
+        self._config.npc_location = self._npc_location
+        self._config.loot_location = self._loot_location
+        self._config.npc_locked = self._npc_locked
+        self._config.loot_locked = self._loot_locked
+        self._config.npc_float_x = self._npc_float_x
+        self._config.npc_float_y = self._npc_float_y
+        self._config.loot_float_x = self._loot_float_x
+        self._config.loot_float_y = self._loot_float_y
+        self._config.npc_thumb_scale = self._npc_thumb_scale
+        self._config.loot_thumb_scale = self._loot_thumb_scale
+        self._config.dmg_text_scale = self._dmg_scale
+        self._config.zdmg_text_scale = self._zdmg_scale
+        self._config.save()
 
     def set_inject_fn(self, fn: Callable[[str], None]) -> None:
         """Set command injection callback."""
@@ -1342,8 +1547,166 @@ class RoomWindow(Gtk.Window):
                                                   surprise=surprise)
                 # Set as active combat target (glowing border)
                 self._combat_effects.set_target(widget)
+
+                # Also spawn on hover popup if this entity is being hovered
+                if self._hover_entity_name and target_name.lower() == self._hover_entity_name:
+                    self._spawn_hover_damage(damage, color, crit, surprise)
             return False
         GLib.idle_add(_do)
+
+    def _spawn_hover_damage(self, damage: int, color: tuple,
+                            crit: bool, surprise: bool) -> None:
+        """Spawn a scaled-up floating damage number on the hover popup."""
+        import random
+        now = _time.monotonic()
+
+        s = self._zdmg_scale_factor
+        if surprise:
+            font_size = 64 * s
+            label = f"BS {damage}!"
+            duration = 1.6
+            r, g, b = 0.7, 0.2, 1.0
+        elif crit:
+            font_size = 58 * s
+            label = f"CRIT {damage}!"
+            duration = 1.4
+            r, g, b = color
+        else:
+            font_size = (42 + (6 if damage >= 50 else 0)) * s
+            label = str(damage)
+            duration = 1.0
+            r, g, b = color
+
+        # Spawn centered in the 256x256 image area (offset by 12px margin)
+        # Stagger vertically based on active count so numbers don't pile up
+        active_count = len(self._hover_damage_numbers)
+        x = 12 + 128 + random.randint(-60, 60) + (20 if active_count % 2 else -20)
+        y = 12 + 128 + random.randint(-20, 20) - active_count * 24
+
+        self._hover_damage_numbers.append({
+            "label": label, "x": x, "y": y,
+            "vx": random.uniform(-20, 20), "vy": -80 - random.uniform(0, 40),
+            "r": r, "g": g, "b": b,
+            "font_size": font_size, "t0": now, "duration": duration,
+            "crit": crit, "surprise": surprise,
+        })
+
+        if not self._hover_effects_ticking:
+            self._hover_effects_ticking = True
+            GLib.timeout_add(16, self._hover_effects_tick)
+
+    def _hover_effects_tick(self) -> bool:
+        """Animate hover popup damage numbers."""
+        if not self._hover_damage_numbers:
+            self._hover_effects_ticking = False
+            self._hover_effects_da.queue_draw()
+            return False
+        self._hover_effects_da.queue_draw()
+        return True
+
+    def _on_hover_effects_draw(self, da, cr, width, height) -> None:
+        """Cairo draw function for hover popup floating damage numbers."""
+        now = _time.monotonic()
+
+        if not self._hover_damage_numbers:
+            return
+
+        alive = []
+        for num in self._hover_damage_numbers:
+            t = now - num["t0"]
+            if t > num["duration"]:
+                continue
+            alive.append(num)
+
+            frac = t / num["duration"]
+            alpha = 1.0 - frac * frac
+            x = num["x"] + num["vx"] * t
+            y = num["y"] + num["vy"] * t + 40 * t * t
+
+            cr.select_font_face("Sans", 0, 1)  # NORMAL, BOLD
+            cr.set_font_size(num["font_size"])
+            label = num["label"]
+
+            if num["surprise"]:
+                cr.set_source_rgba(0, 0, 0, alpha * 0.8)
+                cr.move_to(x + 3, y + 3)
+                cr.show_text(label)
+                cr.set_source_rgba(num["r"], num["g"], num["b"], alpha)
+                cr.move_to(x, y)
+                cr.show_text(label)
+                cr.set_source_rgba(0.9, 0.6, 1.0, alpha * 0.5)
+                cr.move_to(x, y - 1)
+                cr.show_text(label)
+            elif num["crit"]:
+                import math as _m
+                pulse = 0.6 + 0.4 * _m.sin(t * 12 * _m.pi)
+                cr.set_source_rgba(0, 0, 0, alpha)
+                for dx, dy in [(-2, -2), (2, -2), (-2, 2), (2, 2)]:
+                    cr.move_to(x + dx, y + dy)
+                    cr.show_text(label)
+                cr.set_source_rgba(1.0, 0.85 * pulse, 0.2, alpha)
+                cr.move_to(x, y)
+                cr.show_text(label)
+            else:
+                cr.set_source_rgba(0, 0, 0, alpha)
+                for dx, dy in [(-1, -1), (1, -1), (-1, 1), (1, 1)]:
+                    cr.move_to(x + dx, y + dy)
+                    cr.show_text(label)
+                cr.set_source_rgba(num["r"], num["g"], num["b"], alpha)
+                cr.move_to(x, y)
+                cr.show_text(label)
+
+        self._hover_damage_numbers = alive
+
+    def _start_hover_shatter(self) -> None:
+        """Shatter the hover popup image — hide popup, render on main room overlay."""
+        pb = self._hover_src_pixbuf
+        if pb is None:
+            return
+
+        # Freeze the hover animation — don't zoom out
+        self._hover_anim_phase = "shatter"
+        self._hover_shatter_active = True
+
+        # Hide popup IMMEDIATELY so shatter is visible on the room overlay
+        self._hover_popup.set_visible(False)
+
+        # Use full-res pixbuf for crisp shatter shards
+        shatter_size = 256
+        pb_big = pb.scale_simple(shatter_size, shatter_size, GdkPixbuf.InterpType.BILINEAR)
+
+        # Center the shatter in the middle of the room overlay
+        ow = self._root_overlay.get_width()
+        oh = self._root_overlay.get_height()
+        origin_x = ow / 2 - shatter_size / 2
+        origin_y = oh / 2 - shatter_size / 2
+
+        # Spawn on the main combat effects overlay
+        self._combat_effects.spawn_shatter_at(
+            origin_x, origin_y, shatter_size, shatter_size, pb_big,
+            cols=8, rows=8, speed_range=(120, 350))
+
+        # Schedule cleanup
+        def _finish():
+            self._hover_shatter_active = False
+            self._hover_entity_name = ""
+            self._hover_anim_phase = "idle"
+            if self._hover_anim_timer is not None:
+                GLib.source_remove(self._hover_anim_timer)
+                self._hover_anim_timer = None
+            self._hover_popup_image.set_opacity(1.0)
+            self._hover_popup_image.set_size_request(256, 256)
+            self._hover_popup_image.set_margin_top(12)
+            self._hover_popup.set_default_size(280, 310)
+            return False
+        GLib.timeout_add(1800, _finish)
+
+        if self._hover_anim_timer is not None:
+            GLib.source_remove(self._hover_anim_timer)
+            self._hover_anim_timer = None
+        self._hover_popup_image.set_size_request(256, 256)
+        self._hover_popup_image.set_margin_top(12)
+        self._hover_popup.set_default_size(280, 310)
 
     def notify_xp_gained(self) -> None:
         """Flag that XP was gained — next thumbnail update will shatter missing monsters."""
@@ -1658,18 +2021,21 @@ class RoomWindow(Gtk.Window):
     def _on_action_scanlines(self, action, value) -> None:
         action.set_state(value)
         self._scanlines_enabled = value.get_boolean()
+        self._save_view_config()
         if not self._3d_enabled and self._last_image_bytes:
             self.set_image(self._last_image_bytes)
 
     def _on_action_thickness(self, action, value) -> None:
         action.set_state(value)
         self._scanline_thickness = value.get_int32()
+        self._save_view_config()
         if self._scanlines_enabled and not self._3d_enabled and self._last_image_bytes:
             self.set_image(self._last_image_bytes)
 
     def _on_action_warp(self, action, value) -> None:
         action.set_state(value)
         self._warp_enabled = value.get_boolean()
+        self._save_view_config()
         if hasattr(self, '_char_window') and self._char_window:
             self._char_window.warp_enabled = self._warp_enabled
 
@@ -1678,10 +2044,12 @@ class RoomWindow(Gtk.Window):
         self._show_console = value.get_boolean()
         self._console_scroll.set_visible(self._show_console)
         self._status_label.set_visible(self._show_console)
+        self._save_view_config()
 
     def _on_action_monsters(self, action, value) -> None:
         action.set_state(value)
         self._show_monsters = value.get_boolean()
+        self._save_view_config()
         # Only show if user enabled AND entities exist
         if not self._show_monsters:
             self._thumb_scroll.set_visible(False)
@@ -1691,6 +2059,7 @@ class RoomWindow(Gtk.Window):
     def _on_action_items(self, action, value) -> None:
         action.set_state(value)
         self._show_items = value.get_boolean()
+        self._save_view_config()
         if not self._show_items:
             self._item_thumb_scroll.set_visible(False)
         elif self._item_thumb_widgets:
@@ -1699,11 +2068,13 @@ class RoomWindow(Gtk.Window):
     def _on_action_npc_location(self, action, value) -> None:
         action.set_state(value)
         self._npc_location = value.get_string()
+        self._save_view_config()
         self._place_thumb_widgets()
 
     def _on_action_npc_lock(self, action, value) -> None:
         action.set_state(value)
         self._npc_locked = value.get_boolean()
+        self._save_view_config()
         # Show/hide handle based on lock state and location
         if self._npc_location == "floating":
             self._npc_handle.set_visible(not self._npc_locked)
@@ -1754,15 +2125,48 @@ class RoomWindow(Gtk.Window):
     def _on_action_loot_location(self, action, value) -> None:
         action.set_state(value)
         self._loot_location = value.get_string()
+        self._save_view_config()
         self._place_thumb_widgets()
 
     def _on_action_loot_lock(self, action, value) -> None:
         action.set_state(value)
         self._loot_locked = value.get_boolean()
+        self._save_view_config()
         if self._loot_location == "floating":
             self._loot_handle.set_visible(not self._loot_locked)
         else:
             self._loot_handle.set_visible(False)
+
+    def _on_action_npc_scale(self, action, value) -> None:
+        action.set_state(value)
+        self._npc_thumb_scale = value.get_string()
+        mult = self._SCALE_PCTS.get(self._npc_thumb_scale, 1.0)
+        self._npc_thumb_size = max(16, int(self._NPC_BASE_SIZE * mult))
+        self._save_view_config()
+        if hasattr(self, '_last_npc_update_args') and self._last_npc_update_args:
+            self.update_thumbnails(*self._last_npc_update_args)
+
+    def _on_action_loot_scale(self, action, value) -> None:
+        action.set_state(value)
+        self._loot_thumb_scale = value.get_string()
+        mult = self._SCALE_PCTS.get(self._loot_thumb_scale, 1.0)
+        self._loot_thumb_size = max(16, int(self._LOOT_BASE_SIZE * mult))
+        self._save_view_config()
+        if hasattr(self, '_last_loot_update_args') and self._last_loot_update_args:
+            self.update_item_thumbnails(*self._last_loot_update_args)
+
+    def _on_action_dmg_scale(self, action, value) -> None:
+        action.set_state(value)
+        self._dmg_scale = value.get_string()
+        self._dmg_scale_factor = self._SCALE_PCTS.get(self._dmg_scale, 1.0)
+        self._combat_effects.set_font_scale(self._dmg_scale_factor)
+        self._save_view_config()
+
+    def _on_action_zdmg_scale(self, action, value) -> None:
+        action.set_state(value)
+        self._zdmg_scale = value.get_string()
+        self._zdmg_scale_factor = self._SCALE_PCTS.get(self._zdmg_scale, 1.0)
+        self._save_view_config()
 
     # --- Panel drag helpers ---
 
@@ -1813,6 +2217,7 @@ class RoomWindow(Gtk.Window):
     def _on_npc_drag_end(self, gesture, offset_x, offset_y):
         self._npc_dragging = False
         self._npc_handle.set_cursor_from_name("grab")
+        self._save_view_config()
 
     # --- Loot panel drag ---
 
@@ -1835,6 +2240,7 @@ class RoomWindow(Gtk.Window):
     def _on_loot_drag_end(self, gesture, offset_x, offset_y):
         self._loot_dragging = False
         self._loot_handle.set_cursor_from_name("grab")
+        self._save_view_config()
 
     def set_character_window(self, char_window) -> None:
         """Link the character window so settings can propagate."""

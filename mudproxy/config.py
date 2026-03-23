@@ -53,6 +53,26 @@ class Config:
     depth_inpaint_enabled: bool = True
     portrait_style: str = ""
 
+    # Room window View menu settings
+    show_console: bool = True
+    show_monsters: bool = True
+    show_items: bool = True
+    show_scanlines: bool = False
+    show_warp_zoom: bool = False
+    scanline_thickness: int = 2
+    npc_location: str = "above"
+    loot_location: str = "above"
+    npc_locked: bool = False
+    loot_locked: bool = False
+    npc_float_x: int = 10
+    npc_float_y: int = 50
+    loot_float_x: int = 10
+    loot_float_y: int = 200
+    npc_thumb_scale: str = "100%"
+    loot_thumb_scale: str = "100%"
+    dmg_text_scale: str = "100%"
+    zdmg_text_scale: str = "100%"
+
     def save(self) -> None:
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
         data = asdict(self)

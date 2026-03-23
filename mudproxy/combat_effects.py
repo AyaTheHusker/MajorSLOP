@@ -92,6 +92,9 @@ class CombatEffects:
         self._target_rect: tuple | None = None  # (x, y, w, h) cached position
         self._target_glow_time: float = 0.0  # for pulsing
 
+        # Global font scale for thumbnail damage numbers
+        self._font_scale = 1.0
+
         # Lazy-init DrawingArea overlay on first use
         self._draw: Gtk.DrawingArea | None = None
 
@@ -105,6 +108,10 @@ class CombatEffects:
         self._draw.set_hexpand(True)
         self._draw.set_vexpand(True)
         self._overlay.add_overlay(self._draw)
+
+    def set_font_scale(self, scale: float) -> None:
+        """Set global font scale for thumbnail damage numbers."""
+        self._font_scale = scale
 
     def raise_to_top(self) -> None:
         """Re-add the DrawingArea so it renders above all other overlay children."""
@@ -157,8 +164,8 @@ class CombatEffects:
         # Alternate left/right and offset vertically so they don't stack
         now = time.monotonic()
         active_count = sum(1 for n in self._numbers if n.alive(now))
-        cx += random.uniform(-15, 15) + (12 if active_count % 2 else -12)
-        cy += random.uniform(-6, 6) - active_count * 8
+        cx += random.uniform(-15, 15) + (16 if active_count % 2 else -16)
+        cy += random.uniform(-6, 6) - active_count * 18
 
         if surprise:
             color = (0.7, 0.2, 1.0)  # purple
@@ -174,7 +181,87 @@ class CombatEffects:
             surprise=surprise,
             duration=1.6 if (crit or surprise) else 1.2,
         )
+        num._font_scale = self._font_scale
         self._numbers.append(num)
+        self._ensure_ticking()
+
+    def spawn_damage_at(self, cx: float, cy: float, damage: int,
+                        color: tuple = (1.0, 0.15, 0.1),
+                        crit: bool = False, surprise: bool = False,
+                        font_scale: float = 1.0) -> None:
+        """Spawn a floating damage number at explicit overlay coords."""
+        now = time.monotonic()
+        active_count = sum(1 for n in self._numbers if n.alive(now))
+        cx += random.uniform(-20, 20) + (15 if active_count % 2 else -15)
+        cy += random.uniform(-8, 8) - active_count * 10
+
+        if surprise:
+            color = (0.7, 0.2, 1.0)
+        elif crit:
+            color = (1.0, 0.85, 0.15)
+
+        num = FloatingNumber(
+            x=cx, y=cy, damage=damage,
+            birth=now,
+            drift_x=random.uniform(-25, 25),
+            color=color,
+            crit=crit,
+            surprise=surprise,
+            duration=1.6 if (crit or surprise) else 1.2,
+        )
+        # Scale font via damage field hack — use font_scale stored on the object
+        num._font_scale = font_scale
+        self._numbers.append(num)
+        self._ensure_ticking()
+
+    def spawn_shatter_at(self, origin_x: float, origin_y: float,
+                         w: float, h: float,
+                         pixbuf: GdkPixbuf.Pixbuf,
+                         cols: int = 8, rows: int = 8,
+                         speed_range: tuple = (120, 350)) -> None:
+        """Shatter at an explicit position in overlay coords (for external windows)."""
+        surface = self._pixbuf_to_surface(pixbuf)
+        if not surface:
+            return
+
+        center_x = origin_x + w / 2
+        center_y = origin_y + h / 2
+        shard_w = w / cols
+        shard_h = h / rows
+        src_w = pixbuf.get_width() / cols
+        src_h = pixbuf.get_height() / rows
+
+        shards = []
+        for row in range(rows):
+            for col in range(cols):
+                sx = col * src_w
+                sy = row * src_h
+                px = origin_x + col * shard_w + shard_w / 2
+                py = origin_y + row * shard_h + shard_h / 2
+
+                dx = px - center_x
+                dy = py - center_y
+                dist = math.hypot(dx, dy) or 1.0
+                speed = random.uniform(*speed_range)
+                vx = (dx / dist) * speed + random.uniform(-40, 40)
+                vy = (dy / dist) * speed + random.uniform(-80, -20)
+
+                shard = Shard(
+                    src_x=sx, src_y=sy,
+                    src_w=src_w, src_h=src_h,
+                    x=px, y=py,
+                    vx=vx, vy=vy,
+                    angle=random.uniform(0, math.tau),
+                    angular_vel=random.uniform(-8, 8),
+                )
+                shards.append(shard)
+
+        effect = ShatterEffect(
+            shards=shards,
+            surface=surface,
+            birth=time.monotonic(),
+        )
+        self._shatters.append(effect)
         self._ensure_ticking()
 
     def spawn_shatter(self, widget: Gtk.Widget, pixbuf: GdkPixbuf.Pixbuf) -> None:
@@ -416,7 +503,7 @@ class CombatEffects:
                 elif num.damage >= 50:
                     base_size = 24
 
-            font_size = base_size * scale
+            font_size = base_size * scale * getattr(num, '_font_scale', 1.0)
 
             cr.save()
             cr.select_font_face("Sans", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD)

@@ -81,6 +81,7 @@ class EntityDB:
         self.on_status: Optional[Callable[[str], None]] = None  # status text callback
         # Portrait art style prefix (user-configurable, e.g. "anime style", "photorealistic")
         self.portrait_style: str = ""
+        self.my_char_name: str = ""  # the player's own character name (for style)
         self._entities: dict[str, EntityInfo] = {}  # base_name -> EntityInfo
         self._pending_looks: dict[str, float] = {}  # name -> timestamp of look attempt
         self._look_target: Optional[str] = None  # current look target
@@ -205,13 +206,15 @@ class EntityDB:
                     need_prompts.append(info)
                 continue
             if not self.has_thumbnail(info.name):
+                is_self = self.my_char_name and info.name.lower() == self.my_char_name.lower()
                 if info.entity_type == "item":
-                    style = self.portrait_style or "fantasy art"
                     thumb_prompt = (f"{info.base_prompt}, single object laid flat on dark background, "
-                                   f"no person, no mannequin, no figure, item icon, {style}, detailed")
-                else:
+                                   f"no person, no mannequin, no figure, item icon, fantasy art, detailed")
+                elif is_self:
                     style = self.portrait_style or "fantasy art"
                     thumb_prompt = f"{info.base_prompt}, portrait, square frame, {style}, detailed"
+                else:
+                    thumb_prompt = f"{info.base_prompt}, portrait, square frame, fantasy art, detailed"
                 self.generate_thumbnail_fn(info.name, thumb_prompt, "base")
                 queued += 1
         if queued:
@@ -745,12 +748,15 @@ class EntityDB:
 
                 # Request base thumbnail
                 if self.generate_thumbnail_fn and not self.has_thumbnail(info.name):
-                    style = self.portrait_style or "fantasy art"
+                    is_self = self.my_char_name and info.name.lower() == self.my_char_name.lower()
                     if info.entity_type == "item":
                         thumb_prompt = (f"{response}, single object laid flat on dark background, "
-                                       f"no person, no mannequin, no figure, item icon, {style}, detailed")
-                    else:
+                                       f"no person, no mannequin, no figure, item icon, fantasy art, detailed")
+                    elif is_self:
+                        style = self.portrait_style or "fantasy art"
                         thumb_prompt = f"{response}, portrait, square frame, {style}, detailed"
+                    else:
+                        thumb_prompt = f"{response}, portrait, square frame, fantasy art, detailed"
                     self._update_status(f"Generating: {info.name}...")
                     self.generate_thumbnail_fn(info.name, thumb_prompt, "base")
             else:
