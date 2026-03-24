@@ -30,6 +30,7 @@ class MudProxy:
         self._connected_to_bbs = False
         self._line_buffer = ""
         self._reconnecting = False
+        self._server_read_task: Optional[asyncio.Task] = None
 
         # Telnet option state tracking (RFC 1143 Q Method)
         # State per option: 'NO', 'YES', 'WANTYES', 'WANTNO'
@@ -45,6 +46,13 @@ class MudProxy:
         self.on_raw_line: Optional[Callable[[str], None]] = None
         self.on_connect: Optional[Callable[[], None]] = None
         self.on_disconnect: Optional[Callable[[], None]] = None
+        # Line filter: callback(line) -> True to suppress line from MegaMUD
+        self.line_filter: Optional[Callable[[str], bool]] = None
+        self._filter_ansi_buffer = ''  # buffer for filtering ANSI lines before forwarding
+        # Client command callback: called with each command MegaMUD sends to the server
+        self.on_client_command: Optional[Callable[[str], None]] = None
+        # Filter active callback: returns True only when filtering is needed
+        self.filter_active: Optional[Callable[[], bool]] = None
 
         # Auto-login state
         self._auto_login_active = False
@@ -146,8 +154,17 @@ class MudProxy:
         self.client_reader = reader
         self.client_writer = writer
 
-        # If not already connected to BBS, connect now
-        if not self._connected_to_bbs:
+        # Check if existing BBS connection is actually alive
+        needs_connect = not self._connected_to_bbs
+        if self._connected_to_bbs:
+            # Validate: is the writer dead or is the read task done?
+            if (self.server_writer is None or self.server_writer.is_closing() or
+                    (hasattr(self, '_server_read_task') and self._server_read_task.done())):
+                logger.info("BBS connection stale, reconnecting")
+                await self._close_server_connection()
+                needs_connect = True
+
+        if needs_connect:
             if not await self.connect_to_bbs():
                 writer.close()
                 return
@@ -174,6 +191,12 @@ class MudProxy:
         self._auto_login_index = 0
 
         while self._running and self.config.auto_reconnect:
+            # Don't reconnect if no MegaMud client is connected — avoids
+            # burning through BBS connections in a tight loop
+            if not (self.client_writer and not self.client_writer.is_closing()):
+                logger.info("No client connected, skipping auto-reconnect")
+                self._reconnecting = False
+                return
             logger.info(f"Reconnecting in {self.config.reconnect_delay}s...")
             await asyncio.sleep(self.config.reconnect_delay)
             if await self.connect_to_bbs():
@@ -342,26 +365,68 @@ class MudProxy:
                     await self.server_writer.drain()
                     logger.info("ANSI: Responded to DSR (ESC[6n) with cursor pos 24;80")
 
-            # Forward raw bytes to MegaMud untouched
-            if self.client_writer and not self.client_writer.is_closing():
-                try:
-                    self.client_writer.write(data)
-                    await self.client_writer.drain()
-                except Exception:
-                    pass
-
-            # Parse for our purposes
+            # Parse telnet first (need clean data for filtering)
             clean_data, iac_cmds = self.server_telnet.feed(data)
 
             # Handle telnet negotiation (always, not just when no client)
             if iac_cmds:
                 for cmd in iac_cmds:
-                    # Rate-limit IAC logging to avoid flooding
                     self._iac_log_counts[cmd] = self._iac_log_counts.get(cmd, 0) + 1
                     count = self._iac_log_counts[cmd]
                     if count <= 3 or count % 100 == 0:
                         logger.debug(f"BBS IAC: {cmd} (x{count})")
                 await self._handle_server_iac(iac_cmds)
+
+            # Forward to MegaMUD — with optional line filtering
+            # Only use the buffered filter when actively suppressing something
+            use_filter = (self.line_filter and clean_data and
+                          self.filter_active and self.filter_active())
+            if self.client_writer and not self.client_writer.is_closing():
+                try:
+                    if use_filter:
+                        # Filter using clean_data (post-telnet, no IAC bytes)
+                        # to avoid mangling telnet control sequences
+                        text = clean_data.decode('cp437', errors='replace')
+                        self._filter_ansi_buffer += text
+                        forward_parts = []
+                        while '\r\n' in self._filter_ansi_buffer:
+                            ansi_line, self._filter_ansi_buffer = \
+                                self._filter_ansi_buffer.split('\r\n', 1)
+                            stripped_line = strip_ansi(ansi_line)
+                            if not self.line_filter(stripped_line):
+                                forward_parts.append(ansi_line + '\r\n')
+                        # Flush partial data — but only if it looks safe
+                        # (HP prompts end with ]: which MegaMUD needs to see)
+                        if self._filter_ansi_buffer and '\r\n' not in self._filter_ansi_buffer:
+                            # Check if the partial contains "pro" echo we should suppress
+                            partial_stripped = strip_ansi(self._filter_ansi_buffer).strip()
+                            if partial_stripped.lower() == 'pro' or partial_stripped.lower().endswith(':pro'):
+                                # Hold it — will be filtered as a complete line when \r\n arrives
+                                pass
+                            else:
+                                forward_parts.append(self._filter_ansi_buffer)
+                                self._filter_ansi_buffer = ''
+                        if forward_parts:
+                            forward_text = ''.join(forward_parts)
+                            self.client_writer.write(
+                                forward_text.encode('cp437', errors='replace'))
+                            await self.client_writer.drain()
+                        # Still forward any IAC commands in the raw data
+                        if iac_cmds and not clean_data:
+                            self.client_writer.write(data)
+                            await self.client_writer.drain()
+                    else:
+                        # No filter — forward raw bytes untouched
+                        # Flush any leftover filter buffer first
+                        if self._filter_ansi_buffer:
+                            leftover = self._filter_ansi_buffer.encode(
+                                'cp437', errors='replace')
+                            self._filter_ansi_buffer = ''
+                            self.client_writer.write(leftover)
+                        self.client_writer.write(data)
+                        await self.client_writer.drain()
+                except Exception:
+                    pass
 
             if clean_data:
                 # Decode CP437 to Unicode, then encode as UTF-8 for VTE
@@ -380,7 +445,6 @@ class MudProxy:
                 self._line_buffer += stripped
                 while '\r\n' in self._line_buffer:
                     line, self._line_buffer = self._line_buffer.split('\r\n', 1)
-                    # Extract matching ANSI line
                     ansi_line = ''
                     if '\r\n' in self._ansi_line_buffer:
                         ansi_line, self._ansi_line_buffer = self._ansi_line_buffer.split('\r\n', 1)
@@ -399,6 +463,7 @@ class MudProxy:
             asyncio.create_task(self._auto_reconnect())
 
     async def _forward_client_to_server(self) -> None:
+        client_buffer = ''
         while self._running and self.client_reader:
             try:
                 data = await self.client_reader.read(4096)
@@ -412,3 +477,17 @@ class MudProxy:
                     await self.server_writer.drain()
                 except Exception:
                     break
+            # Parse client commands for look detection etc.
+            if self.on_client_command:
+                try:
+                    client_buffer += data.decode('ascii', errors='replace')
+                    while '\r' in client_buffer or '\n' in client_buffer:
+                        for sep in ('\r\n', '\r', '\n'):
+                            if sep in client_buffer:
+                                cmd, client_buffer = client_buffer.split(sep, 1)
+                                cmd = cmd.strip()
+                                if cmd:
+                                    self.on_client_command(cmd)
+                                break
+                except Exception:
+                    pass

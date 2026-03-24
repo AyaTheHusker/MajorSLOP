@@ -25,6 +25,8 @@ from .entity_db import EntityDB
 from .ansi import strip_ansi
 from .depth_processor import DepthProcessor
 from .vulkan_renderer import VulkanDepthRenderer, DepthRenderParams
+from .gamedata import GameData
+from .hp_tracker import HPTracker
 
 logging.basicConfig(
     level=logging.DEBUG,
@@ -70,6 +72,10 @@ class MudProxyApp:
 
         # Entity database for creature/NPC/player thumbnails
         # (renderer is created above, so we can set get_entity_description after)
+        # Load game database (monsters, items, rooms, spells from MDB export)
+        self._gamedata = GameData()
+        self._gamedata.load()
+
         self._entity_db = EntityDB(
             generate_thumbnail_fn=self._room_renderer.generate_thumbnail,
             on_look_complete=self._on_look_complete,
@@ -77,6 +83,10 @@ class MudProxyApp:
         self._entity_db.on_status = self._on_entity_status
         self._entity_db.portrait_style = self.config.portrait_style
         self._entity_db.my_char_name = self.config.character_name or ""
+        self._entity_db.gamedata = self._gamedata
+
+        # HP tracker for monster health bars
+        self._hp_tracker = HPTracker(self._gamedata)
         self._auto_look_queue: list[str] = []
         self._auto_looking = False
         self._look_fail_count: dict[str, int] = {}  # name -> consecutive failures
@@ -120,6 +130,21 @@ class MudProxyApp:
         self.parser.on_who_list = self._on_who_list
         self.parser.on_char_name = self._on_char_name
         self.parser.on_chat = self._on_chat
+        self.parser.on_pro = self._on_pro
+
+        # Player location from pro command
+        self._player_location: tuple[int, int] | None = None
+        self._auto_pro_pending = False  # True when proxy sent auto-pro (suppress output)
+        self._pro_filter_lines = 0  # countdown of pro output lines to suppress
+        self._auto_pro_timer = None  # GLib timer for periodic auto-pro
+
+        # Line filter for suppressing auto-pro output and room descriptions from MegaMUD
+        self.proxy.line_filter = self._line_filter
+        self.proxy.filter_active = self._filter_active
+        self.proxy.on_client_command = self._on_client_command
+        self._suppress_room_desc = False  # hide room descriptions from MegaMUD (off by default)
+        self._in_room_desc = False  # currently inside a room description block
+        self._user_sent_look = False  # user manually typed look/l/lo/loo
 
         # Chat AI state
         self._chat_enabled = False
@@ -172,6 +197,8 @@ class MudProxyApp:
             self._room_window.set_regenerate_room_callback(self._regenerate_room)
             self._room_window.set_regenerate_entity_callback(self._regenerate_entity)
             self._room_window.set_entity_db(self._entity_db)
+            self._room_window.set_gamedata(self._gamedata)
+            self._room_window.set_hp_tracker(self._hp_tracker)
             self._room_window.load_view_config(self.config)
             self._room_window.present()
 
@@ -227,7 +254,10 @@ class MudProxyApp:
         await self._cmd_api.start()
         logger.info(f"Proxy ready on {self.config.proxy_host}:{self.config.proxy_port}")
 
-        # Queue any entities that have prompts but missing thumbnails
+        # Clean up entities not found in game database, then queue missing thumbnails
+        cleaned = self._entity_db.cleanup_invalid_entities()
+        if cleaned:
+            logger.info(f"Cleaned up {cleaned} invalid entities on startup")
         self._entity_db.queue_missing_thumbnails_on_startup()
 
     # --- GUI -> Proxy (main thread -> asyncio thread) ---
@@ -331,6 +361,15 @@ class MudProxyApp:
                 self._combat_target_hint = target
                 self._room_window.set_combat_target(target)
 
+        # Detect inventory changes — refresh inventory with cooldown
+        sl = stripped.lower()
+        if (sl.startswith("you dropped ") or sl.startswith("you get ") or
+                sl.startswith("you picked up ")):
+            self._schedule_inventory_refresh()
+        # Anyone dropping/getting items changes what's on the ground — send enter to refresh
+        if " dropped " in sl or " picked up " in sl:
+            self._schedule_ground_refresh()
+
         self.parser.feed_line(line, ansi_line)
         self._autogrind.feed_line(line)
 
@@ -341,11 +380,24 @@ class MudProxyApp:
         # Schedule initial stat + who after a delay (wait for login)
         async def _delayed_init():
             await asyncio.sleep(10)  # wait for login to complete
-            if self.proxy.connected:
+            if self.proxy.connected and self.parser._in_game:
                 # stat gives us our character name via "Name:" line
                 await self.proxy.inject_command("stat")
                 await asyncio.sleep(3)
                 await self.proxy.inject_command("who")
+                await asyncio.sleep(2)
+                self._auto_pro_pending = True
+                await self.proxy.inject_command("pro")
+            elif self.proxy.connected:
+                # Not in game yet — retry after another 15s
+                await asyncio.sleep(15)
+                if self.proxy.connected and self.parser._in_game:
+                    await self.proxy.inject_command("stat")
+                    await asyncio.sleep(3)
+                    await self.proxy.inject_command("who")
+                    await asyncio.sleep(2)
+                    self._auto_pro_pending = True
+                    await self.proxy.inject_command("pro")
 
         if self._loop:
             asyncio.run_coroutine_threadsafe(_delayed_init(), self._loop)
@@ -364,15 +416,29 @@ class MudProxyApp:
             return True
         self._inventory_timer = GLib.timeout_add_seconds(30, _inv_tick)
 
+        # Periodic auto-pro every 60 seconds for location tracking
+        def _pro_tick():
+            if self.proxy.connected and not self._auto_looking:
+                self._send_auto_pro()
+            return True
+        self._auto_pro_timer = GLib.timeout_add_seconds(60, _pro_tick)
+
     def _on_proxy_disconnect(self) -> None:
         self.gui.set_connected_state(False)
         self.gui.update_status("Disconnected")
+        self.parser._in_game = False  # reset game state on disconnect
+        self._auto_pro_pending = False
+        self._pro_filter_lines = 0
+        self._in_room_desc = False
         if self._who_timer:
             GLib.source_remove(self._who_timer)
             self._who_timer = None
         if self._inventory_timer:
             GLib.source_remove(self._inventory_timer)
             self._inventory_timer = None
+        if self._auto_pro_timer:
+            GLib.source_remove(self._auto_pro_timer)
+            self._auto_pro_timer = None
 
     # --- Parser callbacks ---
 
@@ -399,6 +465,14 @@ class MudProxyApp:
     def _on_room_update(self, room: RoomData) -> None:
         self._current_room = room.name
         self._look_fail_count.clear()  # reset failures on room change
+        self._hp_tracker.on_room_change()  # clear HP tracking on room change
+        # Auto-pro on room change to update location for monster disambiguation
+        if not self._auto_pro_pending:
+            self._send_auto_pro()
+        # Start filtering room description (next lines until Also here/exits)
+        if self._suppress_room_desc and room.description:
+            self._in_room_desc = True
+        self._user_sent_look = False  # reset look flag
         logger.info(f"Room: {room.name} | Exits: {room.exits} | Monsters: {room.monsters}")
         self.gui.update_room(
             name=room.name,
@@ -658,7 +732,7 @@ class MudProxyApp:
             self._entity_db._save_entity(info)
             import threading
             def _regen():
-                self._entity_db._generate_entity_prompt(info)
+                self._entity_db._generate_entity_prompt(info, bypass_validation=True)
             threading.Thread(target=_regen, daemon=True).start()
         else:
             # No description, use existing prompt with new seed
@@ -1081,6 +1155,34 @@ class MudProxyApp:
             self.proxy.inject_command("i"), self._loop
         )
 
+    _inv_refresh_timer = None
+
+    def _schedule_inventory_refresh(self) -> None:
+        """Schedule an inventory refresh — resets the timer each call so it
+        waits for activity to settle before sending 'i'."""
+        # Cancel any pending timer and restart the 1.5s wait
+        if self._inv_refresh_timer is not None:
+            GLib.source_remove(self._inv_refresh_timer)
+        def _do_refresh():
+            self._inv_refresh_timer = None
+            self._request_inventory()
+            return False
+        self._inv_refresh_timer = GLib.timeout_add(1500, _do_refresh)
+
+    _ground_refresh_timer = None
+
+    def _schedule_ground_refresh(self) -> None:
+        """Send enter to refresh room contents — debounced."""
+        if self._ground_refresh_timer is not None:
+            GLib.source_remove(self._ground_refresh_timer)
+        def _do():
+            self._ground_refresh_timer = None
+            if self._loop and self.proxy.connected and self.parser._in_game:
+                asyncio.run_coroutine_threadsafe(
+                    self.proxy.inject_command(""), self._loop)
+            return False
+        self._ground_refresh_timer = GLib.timeout_add(1500, _do)
+
     def _request_who(self) -> None:
         """Send 'who' to refresh player list."""
         if not self._loop or not self.proxy.connected:
@@ -1400,6 +1502,10 @@ class MudProxyApp:
                     self._room_window.show_damage(target, amount,
                                                   crit=bool(crit),
                                                   surprise=bool(surprise))
+                # Update HP tracker and health bar
+                frac = self._hp_tracker.record_damage(target, amount)
+                if frac is not None:
+                    self._room_window.update_hp_bar(target, frac)
 
             # Death detection handled by XP gain → room update comparison
 
@@ -1439,6 +1545,13 @@ class MudProxyApp:
             self._room_window.set_combat_target(self._combat_target_hint)
 
     def _on_hp_update(self, hp: int, max_hp: int, mana: int, max_mana: int) -> None:
+        # Detect rest tick: HP or Mana increased since last prompt = regen tick
+        # Monsters regen on the same ticks — but only when NOT in combat
+        # (Song of Life heals during combat, that's NOT a rest tick)
+        if (hp > self._hp or mana > self._mana) and self._hp > 0 and not self._combat_target_hint:
+            updated = self._hp_tracker.on_rest_tick()
+            if updated and self._room_window:
+                self._room_window.update_all_hp_bars(updated)
         self._hp = hp
         self._mana = mana
         self.gui.update_status(f"Connected | HP: {hp}/{max_hp} | Mana: {mana}/{max_mana}")
@@ -1452,6 +1565,110 @@ class MudProxyApp:
         # Flag that a monster died — next room update will shatter the missing thumbnail
         if self._room_window:
             self._room_window.notify_xp_gained()
+
+    def _on_pro(self, pro_data: dict) -> None:
+        """Handle parsed 'pro' command output."""
+        map_num = pro_data.get("map_num")
+        room_num = pro_data.get("room_num")
+        if map_num is not None and room_num is not None:
+            self._player_location = (map_num, room_num)
+            self._gamedata.current_map = map_num
+            self._gamedata.current_room = room_num
+            logger.info(f"Player location from pro: map={map_num}, room={room_num}")
+            if self._gamedata.is_loaded:
+                room = self._gamedata.get_room(map_num, room_num)
+                if room:
+                    logger.info(f"Room data: {room.get('Name', '?')} "
+                                f"(lair={room.get('Lair', 'none')})")
+
+        deaths = pro_data.get("recent_deaths", [])
+        if deaths:
+            logger.info(f"Recent deaths: {deaths}")
+
+    def _send_auto_pro(self) -> None:
+        """Send 'pro' command silently (filtered from MegaMUD display)."""
+        if self._loop and self.proxy and self.proxy.connected and self.parser._in_game:
+            self._auto_pro_pending = True
+            self._auto_pro_sent_time = time.monotonic()
+            asyncio.run_coroutine_threadsafe(
+                self.proxy.inject_command("pro"),
+                self._loop,
+            )
+            logger.debug("Sent auto-pro command")
+
+    def _filter_active(self) -> bool:
+        """Line filtering disabled — was causing MegaMUD stalls."""
+        return False
+
+    def _on_client_command(self, cmd: str) -> None:
+        """Handle commands sent by MegaMUD to detect user look, pro, etc."""
+        cmd_lower = cmd.strip().lower()
+        # Detect look commands: l, lo, loo, look, look <target>
+        if cmd_lower in ("l", "lo", "loo", "look") or cmd_lower.startswith("look ") or \
+           cmd_lower.startswith("l ") or cmd_lower.startswith("lo ") or cmd_lower.startswith("loo "):
+            self._user_sent_look = True
+            logger.debug(f"User look detected: {cmd}")
+        # Detect user-typed pro (not our auto-pro)
+        if cmd_lower == "pro" and not self._auto_pro_pending:
+            self._user_sent_look = True  # reuse look flag to not filter pro output
+            logger.debug("User pro detected, will not filter")
+
+    def _line_filter(self, line: str) -> bool:
+        """Filter callback for proxy — return True to suppress a line from MegaMUD.
+        Called when _filter_active() returns True."""
+        if not self.parser._in_game:
+            return False
+
+        stripped = line.strip()
+
+        # Actively suppressing pro output lines (countdown)
+        if self._pro_filter_lines > 0:
+            self._pro_filter_lines -= 1
+            # Stop filtering at HP prompt — let it through and send CR/LF to resync
+            if self.parser.RE_HP_PROMPT.search(stripped):
+                self._pro_filter_lines = 0
+                self._auto_pro_pending = False
+                # Send a CR/LF to MegaMUD to force it to see the HP prompt
+                if self._loop and self.proxy.client_writer and not self.proxy.client_writer.is_closing():
+                    try:
+                        self.proxy.client_writer.write(b'\r\n')
+                    except Exception:
+                        pass
+                return False  # let HP prompt through
+            return True  # suppress this pro output line
+
+        # Waiting for auto-pro response — catch echo and start of pro output
+        if self._auto_pro_pending:
+            # Suppress the "pro" echo line (just the word "pro" alone)
+            if stripped.lower() == "pro":
+                return True
+            # Suppress HP prompt + pro echo: "[HP=83/MA=21]:pro"
+            hp_match = self.parser.RE_HP_PROMPT.search(stripped)
+            if hp_match and stripped[hp_match.end():].strip().lower() == "pro":
+                return True
+            # Detect start of pro output — suppress everything until next HP prompt
+            if stripped.startswith("Player ID:"):
+                self._pro_filter_lines = 50
+                return True
+            # Not pro-related — let it through (combat, movement, etc.)
+            return False
+
+        # Suppress room descriptions from MegaMUD (optional, acts like brief mode)
+        # Room descriptions are the paragraph between the room name and "Also here"/"Obvious exits"
+        if self._suppress_room_desc and not self._user_sent_look:
+            if self._in_room_desc:
+                # End of description: "Also here:", "Obvious exits:", "Obvious paths:",
+                # or "[" (HP prompt)
+                if (stripped.startswith("Also here:") or
+                    stripped.startswith("Obvious exits:") or
+                    stripped.startswith("Obvious paths:") or
+                    stripped.startswith("You notice:") or
+                    self.parser.RE_HP_PROMPT.search(stripped)):
+                    self._in_room_desc = False
+                    return False  # don't suppress the trigger line
+                return True  # suppress description line
+
+        return False
 
 
 def main():

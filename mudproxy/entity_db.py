@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Optional, Callable
 
 from .ansi import strip_ansi
+from .gamedata import GameData
 
 logger = logging.getLogger(__name__)
 
@@ -23,11 +24,8 @@ ENTITY_DIR = CACHE_BASE / "entities"
 NPC_THUMB_DIR = CACHE_BASE / "npc"
 ITEM_THUMB_DIR = CACHE_BASE / "item"
 
-# Prefixes that modify a base creature name
-CREATURE_PREFIXES = [
-    "thin", "fat", "large", "small", "angry", "fierce", "happy",
-    "old", "young", "huge", "tiny", "scarred", "pale", "dark",
-]
+# MajorMUD random spawn prefixes — server adds these at spawn time
+CREATURE_PREFIXES = {"large", "small", "big", "short", "fat", "fierce", "nasty", "thin", "angry", "happy"}
 
 # LLM config for generating image prompts from descriptions
 OLLAMA_URL = "http://localhost:11434/api/generate"
@@ -82,6 +80,7 @@ class EntityDB:
         # Portrait art style prefix (user-configurable, e.g. "anime style", "photorealistic")
         self.portrait_style: str = ""
         self.my_char_name: str = ""  # the player's own character name (for style)
+        self.gamedata: Optional[GameData] = None  # game database for entity validation
         self._entities: dict[str, EntityInfo] = {}  # base_name -> EntityInfo
         self._pending_looks: dict[str, float] = {}  # name -> timestamp of look attempt
         self._look_target: Optional[str] = None  # current look target
@@ -316,7 +315,8 @@ class EntityDB:
 
     def get_look_targets(self, also_here: list[str]) -> list[str]:
         """Given 'Also here' list, return full names we need to look at.
-        Deduplicates by base creature name. Retries after 30s if a previous look didn't complete."""
+        Deduplicates by base creature name. Retries after 30s if a previous look didn't complete.
+        Validates against gamedata if available — skips entities not in the database."""
         now = time.time()
         targets = []
         seen_bases = set()
@@ -328,6 +328,15 @@ class EntityDB:
             if base_lower in seen_bases:
                 continue
             seen_bases.add(base_lower)
+            # Validate against gamedata — skip unknown monsters
+            # Try full name first (e.g. "nasty looking man" is a real monster)
+            # then base name after prefix strip
+            if self.gamedata and self.gamedata.is_loaded:
+                if (not self.gamedata.is_valid_monster(name) and
+                    not self.gamedata.is_valid_monster(base) and
+                    not self.is_known_player(name)):
+                    logger.debug(f"Skipping unknown entity (not in gamedata): {name}")
+                    continue
             needs_verify = base_lower in self._candidate_descriptions
             if self.has_description(base) and not needs_verify:
                 continue
@@ -706,8 +715,50 @@ class EntityDB:
         if self.on_status:
             self.on_status(text)
 
-    def _generate_entity_prompt(self, info: EntityInfo) -> None:
+    def cleanup_invalid_entities(self) -> int:
+        """Remove cached entities and thumbnails that don't exist in the game database.
+        Returns the number of entities removed."""
+        if not self.gamedata or not self.gamedata.is_loaded:
+            return 0
+        removed = 0
+        to_remove = []
+        for key, info in self._entities.items():
+            if info.entity_type == "player":
+                continue  # never remove players
+            if info.entity_type == "item":
+                if not self.gamedata.is_valid_item(info.name):
+                    to_remove.append(key)
+            else:
+                if not self.gamedata.is_valid_monster(info.name) and not self.is_known_player(info.name):
+                    to_remove.append(key)
+        for key in to_remove:
+            info = self._entities.pop(key, None)
+            if info:
+                # Delete entity JSON
+                ef = self._entity_file(info.name)
+                if ef.exists():
+                    ef.unlink()
+                # Delete thumbnail
+                tf = self._thumb_file(info.name)
+                if tf.exists():
+                    tf.unlink()
+                logger.info(f"Cleaned up invalid entity: {info.name}")
+                removed += 1
+        if removed:
+            logger.info(f"Cleaned up {removed} invalid entities not found in gamedata")
+        return removed
+
+    def _generate_entity_prompt(self, info: EntityInfo, bypass_validation: bool = False) -> None:
         """Use LLM to convert entity description to image prompt, then request thumbnail."""
+        # Validate against gamedata before wasting API calls (skip if user-requested regen)
+        if not bypass_validation and self.gamedata and self.gamedata.is_loaded:
+            if info.entity_type == "item" and not self.gamedata.is_valid_item(info.name):
+                logger.info(f"Skipping prompt generation for unknown item: {info.name}")
+                return
+            if info.entity_type not in ("item", "player") and not self.gamedata.is_valid_monster(info.name):
+                if not self.is_known_player(info.name):
+                    logger.info(f"Skipping prompt generation for unknown entity: {info.name}")
+                    return
         try:
             self._update_status(f"LLM prompt: {info.name}...")
             system = PORTRAIT_SYSTEM_PROMPT if info.entity_type != "item" else ITEM_SYSTEM_PROMPT

@@ -139,6 +139,10 @@ class MudParser:
         self._char_name_lower = ""  # first name, lowercase, for filtering own echoes
         self._room_has_exits = False  # True once "Obvious exits/paths" seen for current room
 
+        # Pro command collection state
+        self._collecting_pro = False
+        self._pro_lines: list[str] = []
+
         self.on_room_update: Optional[Callable[[RoomData], None]] = None
 
     @staticmethod
@@ -220,6 +224,8 @@ class MudParser:
                 self._finalize_inventory()
             if self._collecting_who:
                 self._finalize_who()
+            if self._collecting_pro:
+                self._finalize_pro()
             self.state = ParserState.IDLE
             # Check for text after HP prompt (e.g. "[HP=88/MA=27]:Room Name")
             remainder = line[hp_match.end():].strip()
@@ -255,20 +261,45 @@ class MudParser:
             if not line.strip():
                 self._finalize_inventory()
                 return
-            self._inventory_lines.append(line)
-            return
+            # HP prompt means inventory output ended
+            if self.RE_HP_PROMPT.match(line):
+                self._finalize_inventory()
+                # Fall through to process HP line normally
+            else:
+                self._inventory_lines.append(line)
+                return
 
         # Collecting who list
         if self._collecting_who:
             if not line.strip() and self._who_seen_dashes:
                 self._finalize_who()
                 return
-            if '---' in line:
+            # HP prompt means WHO output ended (no trailing blank line)
+            if self.RE_HP_PROMPT.match(line):
+                self._finalize_who()
+                # Fall through to process the HP line normally
+            elif '---' in line:
                 self._who_seen_dashes = True
                 return
-            if self._who_seen_dashes and line.strip():
+            elif self._who_seen_dashes and line.strip():
                 self._who_lines.append(line.strip())
-            return
+                return
+            else:
+                return
+
+        # Detect leaving MajorMUD (back to BBS menu, relog, etc.)
+        if self._in_game:
+            stripped_lower = line.strip().lower()
+            if (stripped_lower.startswith("enter your selection") or
+                stripped_lower.startswith("please make a selection") or
+                stripped_lower.startswith("enter your name") or
+                stripped_lower.startswith("enter your password") or
+                stripped_lower == "goodbye" or
+                stripped_lower.startswith("re-enter the game")):
+                self._in_game = False
+                import logging
+                logging.getLogger('mudproxy.parser').info(
+                    f"Left game detected: {line.strip()!r}")
 
         # Detect character name from stat output: "Name: Bisquent Souleb"
         if line.strip().startswith("Name:"):
@@ -292,6 +323,26 @@ class MudParser:
             self._who_lines = []
             self._who_seen_dashes = False
             return
+
+        # Start pro command collection
+        if line.strip().startswith("Player ID:"):
+            self._collecting_pro = True
+            self._pro_lines = [line.strip()]
+            return
+
+        # Continue pro collection
+        if self._collecting_pro:
+            stripped = line.strip()
+            if not stripped:
+                self._finalize_pro()
+                return
+            # HP prompt means pro output ended
+            if self.RE_HP_PROMPT.match(line):
+                self._finalize_pro()
+                # Fall through to process HP line normally
+            else:
+                self._pro_lines.append(stripped)
+                return
 
         # Check for multi-line "Also here:" continuation
         if self._also_here_partial:
@@ -650,3 +701,63 @@ class MudParser:
 
         if players and self.on_who_list:
             self.on_who_list(players)
+
+    def _finalize_pro(self) -> None:
+        """Parse collected pro command output into a structured dict."""
+        self._collecting_pro = False
+        if not self._pro_lines:
+            return
+
+        pro_data = {}
+        recent_deaths = []
+        in_deaths = False
+
+        for line in self._pro_lines:
+            if line.startswith("Recent Deaths:"):
+                in_deaths = True
+                continue
+            if in_deaths:
+                # Death lines: "3/22/2026 11:22 PM - thief - 9/150"
+                recent_deaths.append(line)
+                continue
+
+            # Key: Value parsing
+            if ':' in line:
+                key, _, val = line.partition(':')
+                key = key.strip()
+                val = val.strip()
+                if key == "Player ID":
+                    pro_data["player_id"] = int(val) if val.isdigit() else val
+                elif key == "Location":
+                    # "9,13" or "Silvermere, Town Square (9,13)"
+                    import re
+                    loc_match = re.search(r'(\d+),(\d+)', val)
+                    if loc_match:
+                        pro_data["map_num"] = int(loc_match.group(1))
+                        pro_data["room_num"] = int(loc_match.group(2))
+                    pro_data["location_raw"] = val
+                elif key == "Regen Time":
+                    pro_data["regen_time"] = val
+                elif key == "Room Illu":
+                    pro_data["room_illumination"] = val
+                elif key == "EPs":
+                    pro_data["eps"] = val
+                elif key == "Min. EPs":
+                    pro_data["min_eps"] = val
+                elif key == "Display Mode":
+                    pro_data["display_mode"] = val
+                elif key == "Statusline":
+                    pro_data["statusline"] = val
+                elif key == "Broadcast Channel":
+                    pro_data["broadcast_channel"] = val
+                elif key == "Style":
+                    pro_data["style"] = val
+                else:
+                    # Store anything else with normalized key
+                    pro_data[key.lower().replace(' ', '_')] = val
+
+        if recent_deaths:
+            pro_data["recent_deaths"] = recent_deaths
+
+        if pro_data and hasattr(self, 'on_pro') and self.on_pro:
+            self.on_pro(pro_data)

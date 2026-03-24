@@ -50,6 +50,12 @@ class RoomWindow(Gtk.Window):
         self._vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         self._root_overlay.set_child(self._vbox)
 
+        # Floating panel drag state — pending position applied once per frame
+        self._drag_pending_panel = None
+        self._drag_pending_x = 0
+        self._drag_pending_y = 0
+        self._drag_tick_id = None
+
         # Hold-right-click context menu
         self._hold_menu = HoldMenu(self._root_overlay)
         self._hold_menu.on_menu_open = self._on_hold_menu_open
@@ -198,9 +204,9 @@ class RoomWindow(Gtk.Window):
         act_npc_loc.connect("change-state", self._on_action_npc_location)
         self._view_actions.add_action(act_npc_loc)
 
-        self._npc_locked = True
+        self._npc_locked = False
         act_npc_lock = Gio.SimpleAction.new_stateful(
-            "toggle-npc-lock", None, GLib.Variant.new_boolean(True))
+            "toggle-npc-lock", None, GLib.Variant.new_boolean(False))
         act_npc_lock.connect("change-state", self._on_action_npc_lock)
         self._view_actions.add_action(act_npc_lock)
 
@@ -216,9 +222,9 @@ class RoomWindow(Gtk.Window):
         act_loot_loc.connect("change-state", self._on_action_loot_location)
         self._view_actions.add_action(act_loot_loc)
 
-        self._loot_locked = True
+        self._loot_locked = False
         act_loot_lock = Gio.SimpleAction.new_stateful(
-            "toggle-loot-lock", None, GLib.Variant.new_boolean(True))
+            "toggle-loot-lock", None, GLib.Variant.new_boolean(False))
         act_loot_lock.connect("change-state", self._on_action_loot_lock)
         self._view_actions.add_action(act_loot_lock)
 
@@ -314,8 +320,8 @@ class RoomWindow(Gtk.Window):
         npc_drag.connect("drag-update", self._on_npc_drag_update)
         npc_drag.connect("drag-end", self._on_npc_drag_end)
         self._npc_panel.add_controller(npc_drag)
-        self._npc_drag_start_x = 0
-        self._npc_drag_start_y = 0
+        self._npc_drag_start_x = 0.0
+        self._npc_drag_start_y = 0.0
         self._npc_dragging = False
 
         # Loot panel: items + drag handle (separate from NPC panel)
@@ -336,8 +342,8 @@ class RoomWindow(Gtk.Window):
         loot_drag.connect("drag-update", self._on_loot_drag_update)
         loot_drag.connect("drag-end", self._on_loot_drag_end)
         self._loot_panel.add_controller(loot_drag)
-        self._loot_drag_start_x = 0
-        self._loot_drag_start_y = 0
+        self._loot_drag_start_x = 0.0
+        self._loot_drag_start_y = 0.0
         self._loot_dragging = False
 
         # Exits box created here but appended after image below
@@ -388,6 +394,31 @@ class RoomWindow(Gtk.Window):
         self._hover_equip_label.add_css_class("equip-label")
         popup_box.append(self._hover_equip_label)
 
+        # Monster stats label (shown below name for monsters with gamedata)
+        self._hover_stats_label = Gtk.Label(label="")
+        self._hover_stats_label.set_wrap(True)
+        self._hover_stats_label.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
+        self._hover_stats_label.set_halign(Gtk.Align.START)
+        self._hover_stats_label.set_margin_start(12)
+        self._hover_stats_label.set_margin_end(12)
+        self._hover_stats_label.set_max_width_chars(35)
+        self._hover_stats_label.set_visible(False)
+        self._hover_stats_label.add_css_class("stats-label")
+        popup_box.append(self._hover_stats_label)
+
+        # Monster drop table label
+        self._hover_drops_label = Gtk.Label(label="")
+        self._hover_drops_label.set_wrap(True)
+        self._hover_drops_label.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
+        self._hover_drops_label.set_halign(Gtk.Align.START)
+        self._hover_drops_label.set_margin_start(12)
+        self._hover_drops_label.set_margin_end(12)
+        self._hover_drops_label.set_margin_bottom(12)
+        self._hover_drops_label.set_max_width_chars(35)
+        self._hover_drops_label.set_visible(False)
+        self._hover_drops_label.add_css_class("drops-label")
+        popup_box.append(self._hover_drops_label)
+
         # Wrap popup in overlay for floating damage numbers
         self._hover_overlay = Gtk.Overlay()
         self._hover_overlay.set_child(popup_box)
@@ -412,6 +443,8 @@ class RoomWindow(Gtk.Window):
         self._thumb_by_name: dict[str, Gtk.Widget] = {}
         # Map entity display_name (lowercase) -> pixbuf for shatter effect
         self._thumb_pixbufs: dict[str, GdkPixbuf.Pixbuf] = {}
+        # Map entity display_name (lowercase) -> HP bar DrawingArea
+        self._hp_bar_widgets: dict[str, Gtk.DrawingArea] = {}
         # Map entity_key -> placeholder label for live progress updates
         self._thumb_progress_labels: dict[str, Gtk.Label] = {}
         self._item_progress_labels: dict[str, Gtk.Label] = {}
@@ -550,6 +583,10 @@ class RoomWindow(Gtk.Window):
 
         # Entity DB reference for player equipment lookups
         self._entity_db = None
+        # Game data reference for monster stats/drops
+        self._gamedata = None
+        # HP tracker reference
+        self._hp_tracker = None
 
         # Save references for thumbnails (set by update_thumbnails/update_item_thumbnails)
         self._get_thumb_fn: Optional[Callable] = None
@@ -852,6 +889,9 @@ class RoomWindow(Gtk.Window):
                 new_names = {e["display_name"].lower() for e in entities}
                 for old_name, old_widget in self._thumb_by_name.items():
                     if old_name not in new_names:
+                        # Notify HP tracker of death
+                        if self._hp_tracker:
+                            self._hp_tracker.on_monster_death(old_name)
                         # If hovering this monster, do the big shatter instead of thumbnail
                         if old_name == self._hover_entity_name and self._hover_src_pixbuf:
                             self._start_hover_shatter()
@@ -869,13 +909,16 @@ class RoomWindow(Gtk.Window):
             self._thumb_widgets.clear()
             self._thumb_by_name.clear()
             self._thumb_pixbufs.clear()
+            self._hp_bar_widgets.clear()
             buf = self._thumb_tv.get_buffer()
             buf.set_text("")
 
             if not entities:
                 self._thumb_scroll.set_visible(False)
+                self._npc_panel.set_visible(False)
                 return False
 
+            self._npc_panel.set_visible(True)
             self._thumb_scroll.set_visible(self._show_monsters)
 
             # Create text tags for this buffer
@@ -953,6 +996,12 @@ class RoomWindow(Gtk.Window):
                     end = buf.get_end_iter()
                     buf.insert_with_tags_by_name(end, ", ", "npc_sep")
 
+            # Show full green HP bars for all monsters on room entry
+            for key, bar in self._hp_bar_widgets.items():
+                bar._hp_fraction = 1.0
+                bar.set_visible(True)
+                bar.queue_draw()
+
             # Force panel to re-measure after child anchors are laid out
             def _force_resize():
                 self._thumb_tv.queue_resize()
@@ -988,8 +1037,10 @@ class RoomWindow(Gtk.Window):
 
             if not items:
                 self._item_thumb_scroll.set_visible(False)
+                self._loot_panel.set_visible(False)
                 return False
 
+            self._loot_panel.set_visible(True)
             self._item_thumb_scroll.set_visible(self._show_items)
 
             # Create text tags for this buffer
@@ -1052,6 +1103,12 @@ class RoomWindow(Gtk.Window):
                 hover.connect("leave", self._on_thumb_leave)
                 final_widget.add_controller(hover)
 
+                # Double-click to pick up item (sends "get <item>")
+                dblclick = Gtk.GestureClick()
+                dblclick.set_button(1)  # left button
+                dblclick.connect("released", self._on_item_double_click, display_name)
+                final_widget.add_controller(dblclick)
+
                 # Right-click hold menu
                 drag = self._hold_menu.create_gesture(final_widget)
                 drag.connect("drag-begin", self._on_item_right_drag, display_name, thumb_key)
@@ -1085,7 +1142,7 @@ class RoomWindow(Gtk.Window):
         tv.set_cursor_from_name("default")
 
     def _make_thumb_widget(self, png: bytes | None, display_name: str, size: int) -> Gtk.Widget:
-        """Create a square thumbnail widget (Frame with image or spinner)."""
+        """Create a square thumbnail widget (Frame with image or spinner), with HP bar overlay."""
         frame = Gtk.Frame()
         frame.set_size_request(size, size)
         if png:
@@ -1116,13 +1173,38 @@ class RoomWindow(Gtk.Window):
             pct_lbl.add_css_class("dim-label")
             placeholder.append(pct_lbl)
             frame.set_child(placeholder)
-        frame.set_tooltip_text(display_name)
-        return frame
+
+        # Wrap in overlay for HP bar
+        overlay = Gtk.Overlay()
+        overlay.set_child(frame)
+        overlay.set_size_request(size, size)
+        overlay.set_tooltip_text(display_name)
+
+        # Add HP bar drawing area at bottom
+        hp_bar = Gtk.DrawingArea()
+        hp_bar.set_size_request(size, 8)
+        hp_bar.set_valign(Gtk.Align.END)
+        hp_bar.set_can_target(False)
+        hp_bar._hp_fraction = None  # will be set when we know HP
+        hp_bar.set_draw_func(self._draw_hp_bar, None)
+        hp_bar.set_visible(False)
+        overlay.add_overlay(hp_bar)
+
+        # Store reference for updates
+        name_key = display_name.strip().lower()
+        self._hp_bar_widgets[name_key] = hp_bar
+
+        return overlay
 
     @staticmethod
-    def _get_spinner_label(frame: Gtk.Frame) -> Gtk.Label | None:
-        """Extract the progress label from a spinner placeholder frame."""
-        child = frame.get_child()
+    def _get_spinner_label(widget: Gtk.Widget) -> Gtk.Label | None:
+        """Extract the progress label from a spinner placeholder widget."""
+        # If wrapped in overlay, unwrap to get the frame
+        if isinstance(widget, Gtk.Overlay):
+            widget = widget.get_child()
+        if not isinstance(widget, Gtk.Frame):
+            return None
+        child = widget.get_child()
         if isinstance(child, Gtk.Box):
             c = child.get_last_child()
             if isinstance(c, Gtk.Label):
@@ -1166,8 +1248,50 @@ class RoomWindow(Gtk.Window):
         self._hover_equip_label.set_text(equip_text)
         self._hover_equip_label.set_visible(bool(equip_text))
 
-        # Final popup size
-        final_h = 450 if equip_text else 310
+        # Show monster stats and drops from gamedata
+        stats_text = ""
+        drops_text = ""
+        if self._gamedata and not (self._entity_db and self._entity_db.is_known_player(display_name)):
+            stats = self._gamedata.get_monster_stats(base_name or display_name)
+            if stats:
+                hp_line = f"HP: {stats['hp']}"
+                # Show current estimated HP if tracked
+                if self._hp_tracker:
+                    frac = self._hp_tracker.get_hp_fraction(display_name)
+                    if frac is not None:
+                        est_hp = int(frac * stats['hp'])
+                        hp_line = f"HP: ~{est_hp}/{stats['hp']}"
+                lines = [
+                    hp_line,
+                    f"EXP: {stats['exp']:.0f}" if stats['exp'] else None,
+                    f"AC: {stats['ac']}  DR: {stats['dr']}  MR: {stats['mr']}",
+                    f"Dodge: {stats['dodge']}" if stats['dodge'] else None,
+                    f"Regen: {stats['regen']}/tick" if stats['regen'] else None,
+                    f"Avg Dmg: {stats['avg_dmg']:.0f}" if stats['avg_dmg'] else None,
+                    "Undead" if stats['undead'] else None,
+                ]
+                stats_text = "\n".join(l for l in lines if l)
+
+            drops = self._gamedata.get_monster_drops(base_name or display_name)
+            if drops:
+                drop_lines = [f"  {d['name']} ({d['chance']}%)" for d in drops]
+                drops_text = "Drops:\n" + "\n".join(drop_lines)
+
+        self._hover_stats_label.set_markup(
+            f"<span font_desc='monospace 8'>{stats_text}</span>" if stats_text else "")
+        self._hover_stats_label.set_visible(bool(stats_text))
+        self._hover_drops_label.set_markup(
+            f"<span font_desc='monospace 8'>{drops_text}</span>" if drops_text else "")
+        self._hover_drops_label.set_visible(bool(drops_text))
+
+        # Final popup size — grow to fit content
+        final_h = 310
+        if equip_text:
+            final_h = 450
+        if stats_text:
+            final_h += 14 * stats_text.count("\n") + 30
+        if drops_text:
+            final_h += 14 * drops_text.count("\n") + 30
         final_w = 280
 
         # Get thumbnail screen position for zoom origin
@@ -1403,24 +1527,75 @@ class RoomWindow(Gtk.Window):
     def _on_hold_menu_open(self):
         """Called when hold-right-click menu opens."""
         self._ctx_menu_active = True
-        # Freeze ripple animation but keep popup visible
+        # Freeze ripple animation and hide hover popup so it doesn't cover the menu
         if self._hover_anim_timer is not None:
             GLib.source_remove(self._hover_anim_timer)
             self._hover_anim_timer = None
         self._hover_anim_phase = "menu_frozen"
+        self._hover_popup.set_visible(False)
 
     def _on_hold_menu_close(self):
         """Called when hold-right-click menu closes."""
         self._ctx_menu_active = False
-        # Zoom-out the hover popup
-        self._hover_anim_phase = "zoom_out"
-        self._hover_anim_start = _time.monotonic()
-        if self._hover_anim_timer is None:
-            self._hover_anim_timer = GLib.timeout_add(16, self._hover_anim_tick)
+        # Popup was hidden when menu opened — reset state cleanly
+        self._hover_popup.set_visible(False)
+        self._hover_anim_phase = None
+        self._hover_popup_image.set_size_request(256, 256)
+        self._hover_popup_image.set_margin_top(12)
+        self._hover_popup.set_default_size(280, 310)
+        self._hover_entity_key = None
+
+    @staticmethod
+    def _draw_hp_bar(da, cr, width, height, _user_data):
+        """Draw a health bar on a DrawingArea. Color goes green->yellow->red."""
+        frac = getattr(da, '_hp_fraction', None)
+        if frac is None:
+            return
+        # Background (dark)
+        cr.set_source_rgba(0, 0, 0, 0.6)
+        cr.rectangle(0, 0, width, height)
+        cr.fill()
+        # Health bar color: green (1.0) -> yellow (0.5) -> red (0.0)
+        if frac > 0.5:
+            t = (frac - 0.5) * 2  # 1.0 at full, 0.0 at half
+            r, g = 1.0 - t, 1.0
+        else:
+            t = frac * 2  # 1.0 at half, 0.0 at empty
+            r, g = 1.0, t
+        cr.set_source_rgba(r, g, 0, 0.9)
+        cr.rectangle(0, 0, width * frac, height)
+        cr.fill()
+
+    def update_hp_bar(self, name: str, fraction: float) -> None:
+        """Update the HP bar for a monster thumbnail."""
+        key = name.strip().lower()
+        bar = self._hp_bar_widgets.get(key)
+        if bar is None:
+            # Try without prefix
+            from .gamedata import _strip_prefix
+            stripped = _strip_prefix(name).strip().lower()
+            bar = self._hp_bar_widgets.get(stripped)
+        if bar:
+            bar._hp_fraction = fraction
+            bar.set_visible(True)
+            bar.queue_draw()
+
+    def update_all_hp_bars(self, fractions: dict[str, float]) -> None:
+        """Update all HP bars from a dict of {name: fraction}."""
+        for name, frac in fractions.items():
+            self.update_hp_bar(name, frac)
 
     def set_entity_db(self, entity_db) -> None:
         """Set entity DB reference for player equipment lookups."""
         self._entity_db = entity_db
+
+    def set_gamedata(self, gamedata) -> None:
+        """Set game data reference for monster stats/drops."""
+        self._gamedata = gamedata
+
+    def set_hp_tracker(self, hp_tracker) -> None:
+        """Set HP tracker reference for health bars."""
+        self._hp_tracker = hp_tracker
 
     def load_view_config(self, config) -> None:
         """Load View menu settings from config and apply them."""
@@ -1916,6 +2091,12 @@ class RoomWindow(Gtk.Window):
             self._status_label.set_text(f"Regenerating {name}...")
             self._on_regenerate_entity(name)
 
+    def _on_item_double_click(self, gesture, n_press, x, y, item_name):
+        """Double-click on item thumbnail to pick it up."""
+        if n_press == 2 and self._inject_fn:
+            self._inject_fn(f"get {item_name}")
+            GLib.timeout_add(500, lambda: self._inject_fn("i") or False)
+
     def _on_item_right_drag(self, gesture, start_x, start_y, item_name, thumb_key=""):
         """Hold-right-click on item thumbnail."""
         tk = thumb_key or item_name
@@ -1964,7 +2145,7 @@ class RoomWindow(Gtk.Window):
         """Send a command then refresh inventory."""
         if self._inject_fn:
             self._inject_fn(cmd)
-            GLib.timeout_add(1500, lambda: self._inject_fn("i") or False)
+            GLib.timeout_add(500, lambda: self._inject_fn("i") or False)
 
     # --- 3D Depth Parallax ---
 
@@ -2110,8 +2291,8 @@ class RoomWindow(Gtk.Window):
             panel.add_css_class("npc-panel-floating")
             panel.set_halign(Gtk.Align.START)
             panel.set_valign(Gtk.Align.START)
-            panel.set_margin_start(float_x)
-            panel.set_margin_top(float_y)
+            panel.set_margin_start(int(float_x))
+            panel.set_margin_top(int(float_y))
             handle.set_visible(not locked)
             self._root_overlay.add_overlay(panel)
         elif location == "below":
@@ -2171,19 +2352,22 @@ class RoomWindow(Gtk.Window):
     # --- Panel drag helpers ---
 
     def _panel_drag_begin(self, gesture, panel, location, locked, float_x, float_y):
-        if location != "floating":
+        if location != "floating" or locked:
             gesture.reset()
             return False
-        state = gesture.get_current_event_state()
-        ctrl = bool(state & Gdk.ModifierType.CONTROL_MASK)
-        if locked and not ctrl:
-            gesture.reset()
-            return False
+        # Record pointer position at drag start (in panel-local coords)
+        # and the panel's current position
+        self._drag_panel = panel
+        self._drag_start_panel_x = float_x
+        self._drag_start_panel_y = float_y
         return True
 
-    def _panel_drag_update(self, panel, start_x, start_y, offset_x, offset_y):
-        new_x = max(0, start_x + int(offset_x))
-        new_y = max(0, start_y + int(offset_y))
+    def _panel_drag_move(self, panel, start_x, start_y, offset_x, offset_y):
+        """Move panel by offset from its start position.
+        Defers the actual margin update to a frame tick to avoid multiple
+        reflows per frame."""
+        new_x = max(0, start_x + offset_x)
+        new_y = max(0, start_y + offset_y)
         win_w = self.get_width()
         win_h = self.get_height()
         panel_w = panel.get_width()
@@ -2192,9 +2376,24 @@ class RoomWindow(Gtk.Window):
             new_x = min(new_x, win_w - min(panel_w, 80))
         if win_h > 0 and panel_h > 0:
             new_y = min(new_y, win_h - min(panel_h, 30))
-        panel.set_margin_start(new_x)
-        panel.set_margin_top(new_y)
+        # Store pending position and schedule a tick callback if not already pending
+        self._drag_pending_panel = panel
+        self._drag_pending_x = int(new_x)
+        self._drag_pending_y = int(new_y)
+        if self._drag_tick_id is None:
+            self._drag_tick_id = self.add_tick_callback(self._drag_tick)
         return new_x, new_y
+
+    def _drag_tick(self, widget, frame_clock):
+        """Apply pending drag position once per frame."""
+        if self._drag_pending_panel:
+            self._drag_pending_panel.set_margin_start(self._drag_pending_x)
+            self._drag_pending_panel.set_margin_top(self._drag_pending_y)
+        # Keep running while dragging
+        if self._npc_dragging or self._loot_dragging:
+            return True  # GLib.SOURCE_CONTINUE
+        self._drag_tick_id = None
+        return False  # GLib.SOURCE_REMOVE
 
     # --- NPC panel drag ---
 
@@ -2205,18 +2404,21 @@ class RoomWindow(Gtk.Window):
             self._npc_dragging = True
             self._npc_drag_start_x = self._npc_float_x
             self._npc_drag_start_y = self._npc_float_y
-            self._npc_handle.set_cursor_from_name("grabbing")
 
     def _on_npc_drag_update(self, gesture, offset_x, offset_y):
         if not self._npc_dragging:
             return
-        self._npc_float_x, self._npc_float_y = self._panel_drag_update(
+        self._npc_float_x, self._npc_float_y = self._panel_drag_move(
             self._npc_panel, self._npc_drag_start_x, self._npc_drag_start_y,
             offset_x, offset_y)
 
     def _on_npc_drag_end(self, gesture, offset_x, offset_y):
         self._npc_dragging = False
-        self._npc_handle.set_cursor_from_name("grab")
+        # Apply final position immediately
+        if self._drag_pending_panel:
+            self._drag_pending_panel.set_margin_start(self._drag_pending_x)
+            self._drag_pending_panel.set_margin_top(self._drag_pending_y)
+            self._drag_pending_panel = None
         self._save_view_config()
 
     # --- Loot panel drag ---
@@ -2228,18 +2430,20 @@ class RoomWindow(Gtk.Window):
             self._loot_dragging = True
             self._loot_drag_start_x = self._loot_float_x
             self._loot_drag_start_y = self._loot_float_y
-            self._loot_handle.set_cursor_from_name("grabbing")
 
     def _on_loot_drag_update(self, gesture, offset_x, offset_y):
         if not self._loot_dragging:
             return
-        self._loot_float_x, self._loot_float_y = self._panel_drag_update(
+        self._loot_float_x, self._loot_float_y = self._panel_drag_move(
             self._loot_panel, self._loot_drag_start_x, self._loot_drag_start_y,
             offset_x, offset_y)
 
     def _on_loot_drag_end(self, gesture, offset_x, offset_y):
         self._loot_dragging = False
-        self._loot_handle.set_cursor_from_name("grab")
+        if self._drag_pending_panel:
+            self._drag_pending_panel.set_margin_start(self._drag_pending_x)
+            self._drag_pending_panel.set_margin_top(self._drag_pending_y)
+            self._drag_pending_panel = None
         self._save_view_config()
 
     def set_character_window(self, char_window) -> None:

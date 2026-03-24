@@ -15,7 +15,7 @@ class AutoLoginTrigger:
 
 @dataclass
 class Config:
-    bbs_host: str = "sos-bbs.net"
+    bbs_host: str = "paramud.mudinfo.net"
     bbs_port: int = 23
     proxy_host: str = "127.0.0.1"
     proxy_port: int = 9999

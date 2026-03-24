@@ -87,7 +87,7 @@ class MudProxyGUI(Adw.Application):
 
         conn_box.append(Gtk.Label(label="Host:"))
         self._host_entry = Gtk.Entry()
-        self._host_entry.set_text("sos-bbs.net")
+        self._host_entry.set_text("paramud.mudinfo.net")
         self._host_entry.set_width_chars(20)
         conn_box.append(self._host_entry)
 

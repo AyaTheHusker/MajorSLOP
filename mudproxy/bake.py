@@ -35,13 +35,28 @@ DEPTH_CACHE_DIR = CACHE_BASE / "depth"
 SLOP_DIR = CACHE_BASE / "slop"
 
 OLLAMA_URL = "http://localhost:11434/api/generate"
-OLLAMA_MODEL = "qwen2.5:3b"
+OLLAMA_MODEL = "llama3.2:3b"
+
+OLLAMA_MODELS = [
+    "llama3.2:3b",
+    "llama3.2:1b",
+    "llama3.1:8b",
+    "phi3:mini",
+    "gemma2:2b",
+    "gemma2:9b",
+    "mistral:7b",
+    "qwen2.5:3b",
+    "qwen2.5:7b",
+    "deepseek-r1:8b",
+    "deepseek-v2:16b",
+]
 
 PORTRAIT_SYSTEM_PROMPT = (
     "You convert a text-game character/creature description into a concise portrait prompt "
     "for a fantasy art AI. Focus on: physical appearance, clothing, armor, weapons, "
     "facial features, body type, coloring. Output ONLY the portrait prompt as a single "
-    "short paragraph. No thinking tags, no explanation."
+    "short paragraph. RESPOND IN ENGLISH ONLY. No thinking tags, no explanation, no Chinese, "
+    "no other languages."
 )
 
 ITEM_SYSTEM_PROMPT = (
@@ -54,11 +69,17 @@ ITEM_SYSTEM_PROMPT = (
     "NEVER describe a person, figure, mannequin, or anyone wearing/holding it. "
     "For clothing/armor: describe the garment laid out flat as if on a table. "
     "Output ONLY the image prompt as a single short paragraph. "
-    "No thinking tags, no explanation."
+    "RESPOND IN ENGLISH ONLY. No thinking tags, no explanation, no Chinese, no other languages."
 )
 
 # Available models for baking (high quality, uses full VRAM)
 MODELS = {
+    "flux-klein-4b": {
+        "name": "FLUX.2 Klein 4B",
+        "repo": "black-forest-labs/FLUX.2-klein-4B",
+        "guidance": 0.0,
+        "steps": 4,
+    },
     "flux-klein-9b": {
         "name": "FLUX.2 Klein 9B",
         "repo": "black-forest-labs/FLUX.2-klein-9B",
@@ -95,6 +116,9 @@ ASSET_ITEM_THUMB = 1
 ASSET_PLAYER_THUMB = 2
 ASSET_ROOM_IMAGE = 3
 ASSET_DEPTH_MAP = 4
+ASSET_PROMPT = 5
+ASSET_METADATA = 6
+ASSET_INPAINT = 7
 
 
 def write_slop(path: Path, entries: dict[str, tuple[int, bytes]]) -> None:
@@ -208,7 +232,8 @@ class BakeApp(Gtk.Application):
             .bake-error { color: #f44336; }
             .bake-active { color: #ffb74d; }
             window { background: #16162a; }
-            .bake-combo { min-width: 200px; }
+            .bake-combo { min-width: 150px; }
+            .bake-combo-sm { min-width: 120px; }
         """)
         Gtk.StyleContext.add_provider_for_display(
             Gdk.Display.get_default(), css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
@@ -230,33 +255,47 @@ class BakeApp(Gtk.Application):
         header.append(subtitle)
         root.append(header)
 
-        # ── Controls ──
-        controls = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        controls.add_css_class("bake-controls")
+        # ── Controls row 1: Image model + steps + style ──
+        controls1 = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        controls1.add_css_class("bake-controls")
 
-        # Model selector
-        controls.append(Gtk.Label(label="Model:"))
+        controls1.append(Gtk.Label(label="Image:"))
         self._model_combo = Gtk.DropDown.new_from_strings(
             [m["name"] for m in MODELS.values()]
         )
         self._model_combo.set_selected(0)
         self._model_combo.add_css_class("bake-combo")
-        controls.append(self._model_combo)
+        controls1.append(self._model_combo)
 
-        # Steps
-        controls.append(Gtk.Label(label="Steps:"))
+        controls1.append(Gtk.Label(label="Steps:"))
         self._steps_spin = Gtk.SpinButton.new_with_range(1, 50, 1)
         self._steps_spin.set_value(4)
-        controls.append(self._steps_spin)
+        controls1.append(self._steps_spin)
 
-        # Style
-        controls.append(Gtk.Label(label="Style:"))
+        controls1.append(Gtk.Label(label="Style:"))
         self._style_entry = Gtk.Entry()
         self._style_entry.set_text("fantasy art")
         self._style_entry.set_hexpand(True)
-        controls.append(self._style_entry)
+        controls1.append(self._style_entry)
 
-        root.append(controls)
+        root.append(controls1)
+
+        # ── Controls row 2: Ollama prompt model ──
+        controls2 = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        controls2.add_css_class("bake-controls")
+
+        controls2.append(Gtk.Label(label="Prompt LLM:"))
+        self._ollama_combo = Gtk.DropDown.new_from_strings(OLLAMA_MODELS)
+        default_idx = OLLAMA_MODELS.index(OLLAMA_MODEL) if OLLAMA_MODEL in OLLAMA_MODELS else 0
+        self._ollama_combo.set_selected(default_idx)
+        self._ollama_combo.add_css_class("bake-combo-sm")
+        controls2.append(self._ollama_combo)
+
+        self._chk_regen_prompts = Gtk.CheckButton(label="Regenerate all prompts")
+        self._chk_regen_prompts.set_active(False)
+        controls2.append(self._chk_regen_prompts)
+
+        root.append(controls2)
 
         # ── Filter checkboxes ──
         filter_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
@@ -331,7 +370,24 @@ class BakeApp(Gtk.Application):
         self._save_btn.set_sensitive(False)
         btn_box.append(self._save_btn)
 
+        self._merge_btn = Gtk.Button(label="Merge .slop Files")
+        self._merge_btn.connect("clicked", self._on_merge_slop)
+        btn_box.append(self._merge_btn)
+
         root.append(btn_box)
+
+        # ── Slop file selector ──
+        slop_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        slop_box.add_css_class("bake-controls")
+        slop_box.append(Gtk.Label(label="Output .slop:"))
+        self._slop_entry = Gtk.Entry()
+        self._slop_entry.set_hexpand(True)
+        self._slop_entry.set_placeholder_text("Auto-generated filename")
+        slop_box.append(self._slop_entry)
+        browse_btn = Gtk.Button(label="Browse...")
+        browse_btn.connect("clicked", self._on_browse_slop)
+        slop_box.append(browse_btn)
+        root.append(slop_box)
 
         self._window = win
         win.present()
@@ -461,13 +517,23 @@ class BakeApp(Gtk.Application):
         self._steps = int(self._steps_spin.get_value())
         self._portrait_style = self._style_entry.get_text().strip() or "fantasy art"
 
+        # Ollama model selection
+        ollama_idx = self._ollama_combo.get_selected()
+        self._ollama_model = OLLAMA_MODELS[ollama_idx]
+
+        # Regenerate all prompts checkbox — clear existing prompts to force regen
+        if self._chk_regen_prompts.get_active():
+            for job in self._jobs:
+                job.prompt = ""
+
         self._start_btn.set_sensitive(False)
         self._scan_btn.set_sensitive(False)
         self._cancel_btn.set_sensitive(True)
         self._save_btn.set_sensitive(False)
 
         self._log(f"Starting bake with {MODELS[self._model_key]['name']}, "
-                  f"{self._steps} steps, style='{self._portrait_style}'")
+                  f"{self._steps} steps, style='{self._portrait_style}', "
+                  f"prompt LLM={self._ollama_model}")
 
         self._thread = threading.Thread(target=self._bake_worker, daemon=True)
         self._thread.start()
@@ -479,11 +545,27 @@ class BakeApp(Gtk.Application):
 
     def _on_save_slop(self, _btn) -> None:
         """Save completed jobs to a .slop file."""
-        SLOP_DIR.mkdir(parents=True, exist_ok=True)
-        timestamp = time.strftime("%Y%m%d_%H%M%S")
-        slop_path = SLOP_DIR / f"bake_{timestamp}.slop"
+        # Use user-selected path or auto-generate
+        user_path = self._slop_entry.get_text().strip()
+        if user_path:
+            slop_path = Path(user_path)
+            slop_path.parent.mkdir(parents=True, exist_ok=True)
+        else:
+            SLOP_DIR.mkdir(parents=True, exist_ok=True)
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            slop_path = SLOP_DIR / f"bake_{timestamp}.slop"
 
         entries = {}
+
+        # If appending to an existing file, load its entries first
+        if slop_path.exists():
+            try:
+                existing = read_slop(slop_path)
+                entries.update(existing)
+                self._log(f"Appending to existing {slop_path.name} ({len(existing)} entries)")
+            except Exception as e:
+                self._log(f"Warning: could not read existing file: {e}")
+
         for job in self._jobs:
             if job.done and job.image_bytes:
                 entries[job.key] = (job.asset_type, job.image_bytes)
@@ -495,6 +577,9 @@ class BakeApp(Gtk.Application):
         write_slop(slop_path, entries)
         self._log(f"Saved {len(entries)} assets to {slop_path}")
         self._log(f"File size: {slop_path.stat().st_size / 1024 / 1024:.1f} MB")
+
+        # Update the entry field to show where we saved
+        self._slop_entry.set_text(str(slop_path))
 
         # Also install thumbnails to the regular cache directories
         installed = 0
@@ -511,6 +596,123 @@ class BakeApp(Gtk.Application):
 
         self._log(f"Installed {installed} thumbnails to cache directories")
 
+    def _on_browse_slop(self, _btn) -> None:
+        """Open file chooser for .slop output path."""
+        dialog = Gtk.FileDialog()
+        dialog.set_title("Choose .slop file")
+        dialog.set_initial_folder(Gio.File.new_for_path(str(SLOP_DIR)))
+
+        # Filter for .slop files
+        slop_filter = Gtk.FileFilter()
+        slop_filter.set_name("SLOP archives (*.slop)")
+        slop_filter.add_pattern("*.slop")
+        all_filter = Gtk.FileFilter()
+        all_filter.set_name("All files")
+        all_filter.add_pattern("*")
+        filters = Gio.ListStore.new(Gtk.FileFilter)
+        filters.append(slop_filter)
+        filters.append(all_filter)
+        dialog.set_filters(filters)
+
+        dialog.save(self._window, None, self._on_browse_slop_done)
+
+    def _on_browse_slop_done(self, dialog, result) -> None:
+        try:
+            gfile = dialog.save_finish(result)
+            path = gfile.get_path()
+            if path:
+                if not path.endswith(".slop"):
+                    path += ".slop"
+                self._slop_entry.set_text(path)
+                self._log(f"Output set to: {path}")
+        except GLib.Error:
+            pass  # user cancelled
+
+    def _on_merge_slop(self, _btn) -> None:
+        """Open file chooser to pick multiple .slop files to merge."""
+        dialog = Gtk.FileDialog()
+        dialog.set_title("Select .slop files to merge")
+        dialog.set_initial_folder(Gio.File.new_for_path(str(SLOP_DIR)))
+
+        slop_filter = Gtk.FileFilter()
+        slop_filter.set_name("SLOP archives (*.slop)")
+        slop_filter.add_pattern("*.slop")
+        filters = Gio.ListStore.new(Gtk.FileFilter)
+        filters.append(slop_filter)
+        dialog.set_filters(filters)
+
+        dialog.open_multiple(self._window, None, self._on_merge_select_done)
+
+    def _on_merge_select_done(self, dialog, result) -> None:
+        try:
+            gfiles = dialog.open_multiple_finish(result)
+        except GLib.Error:
+            return  # user cancelled
+
+        paths = []
+        for i in range(gfiles.get_n_items()):
+            gfile = gfiles.get_item(i)
+            p = gfile.get_path()
+            if p:
+                paths.append(Path(p))
+
+        if len(paths) < 2:
+            self._log("Need at least 2 files to merge")
+            return
+
+        # Now pick the output destination
+        out_dialog = Gtk.FileDialog()
+        out_dialog.set_title("Save merged .slop as")
+        out_dialog.set_initial_folder(Gio.File.new_for_path(str(SLOP_DIR)))
+        out_dialog.set_initial_name("merged.slop")
+
+        slop_filter = Gtk.FileFilter()
+        slop_filter.set_name("SLOP archives (*.slop)")
+        slop_filter.add_pattern("*.slop")
+        filters = Gio.ListStore.new(Gtk.FileFilter)
+        filters.append(slop_filter)
+        out_dialog.set_filters(filters)
+
+        # Stash paths for the callback
+        self._merge_sources = paths
+        out_dialog.save(self._window, None, self._on_merge_save_done)
+
+    def _on_merge_save_done(self, dialog, result) -> None:
+        try:
+            gfile = dialog.save_finish(result)
+            out_path = gfile.get_path()
+        except GLib.Error:
+            return  # user cancelled
+
+        if not out_path:
+            return
+        if not out_path.endswith(".slop"):
+            out_path += ".slop"
+        out_path = Path(out_path)
+
+        merged = {}
+        total_files = 0
+        for src in self._merge_sources:
+            try:
+                entries = read_slop(src)
+                before = len(merged)
+                merged.update(entries)
+                added = len(merged) - before
+                self._log(f"  {src.name}: {len(entries)} entries ({added} new)")
+                total_files += 1
+            except Exception as e:
+                self._log(f"  Error reading {src.name}: {e}")
+
+        if not merged:
+            self._log("No entries to merge")
+            return
+
+        write_slop(out_path, merged)
+        self._log(f"Merged {total_files} files → {out_path.name}: "
+                   f"{len(merged)} entries, {out_path.stat().st_size / 1024 / 1024:.1f} MB")
+        self._slop_entry.set_text(str(out_path))
+        self._merge_sources = []
+
     def _generate_prompt_ollama(self, entity_data: dict) -> str:
         """Call ollama to generate an image prompt from entity description."""
         import urllib.request
@@ -523,8 +725,9 @@ class BakeApp(Gtk.Application):
             equip_str = ", ".join(entity_data["equipment"])
             prompt_text += f"\nEquipped items: {equip_str}"
 
+        model = getattr(self, '_ollama_model', OLLAMA_MODEL)
         payload = json.dumps({
-            "model": OLLAMA_MODEL,
+            "model": model,
             "system": system,
             "prompt": prompt_text,
             "stream": False,
@@ -544,6 +747,43 @@ class BakeApp(Gtk.Application):
             response = parts[-1].strip()
         response = response.strip("\"'")
         return response
+
+    @staticmethod
+    def _validate_prompt(prompt: str) -> tuple[bool, str]:
+        """Check if a prompt is valid English text suitable for image generation.
+        Returns (ok, reason)."""
+        if not prompt or len(prompt) < 20:
+            return False, "too short"
+
+        # Count non-ASCII characters (CJK, Cyrillic, Arabic, etc.)
+        non_ascii = sum(1 for c in prompt if ord(c) > 127)
+        ratio = non_ascii / len(prompt)
+        if ratio > 0.15:
+            return False, f"non-English ({non_ascii}/{len(prompt)} non-ASCII chars, {ratio:.0%})"
+
+        # Check for CJK character ranges specifically
+        cjk_count = sum(1 for c in prompt if '\u4e00' <= c <= '\u9fff'  # CJK Unified
+                        or '\u3000' <= c <= '\u303f'  # CJK Punctuation
+                        or '\u3040' <= c <= '\u309f'  # Hiragana
+                        or '\u30a0' <= c <= '\u30ff'  # Katakana
+                        or '\uff00' <= c <= '\uffef')  # Fullwidth
+        if cjk_count > 3:
+            return False, f"contains CJK characters ({cjk_count} found)"
+
+        # Check for excessive repetition (model looping)
+        words = prompt.lower().split()
+        if len(words) > 10:
+            from collections import Counter
+            counts = Counter(words)
+            most_common_word, most_common_count = counts.most_common(1)[0]
+            if most_common_count > len(words) * 0.3 and most_common_count > 5:
+                return False, f"repetitive ('{most_common_word}' appears {most_common_count}x)"
+
+        # Check for thinking tags that weren't stripped
+        if "<think>" in prompt.lower() or "</think>" in prompt.lower():
+            return False, "contains thinking tags"
+
+        return True, "ok"
 
     def _build_thumb_prompt(self, base_prompt: str, entity_data: dict) -> str:
         """Build the full thumbnail prompt with suffix."""
@@ -585,15 +825,21 @@ class BakeApp(Gtk.Application):
 
                 try:
                     prompt = self._generate_prompt_ollama(entity_data)
-                    if len(prompt) > 20:
+                    ok, reason = self._validate_prompt(prompt)
+                    if not ok:
+                        # Retry once
+                        self._log(f"  [retry] {job.name}: {reason}, retrying...")
+                        prompt = self._generate_prompt_ollama(entity_data)
+                        ok, reason = self._validate_prompt(prompt)
+
+                    if ok:
                         job.prompt = prompt
-                        # Save back to entity json
                         entity_data["base_prompt"] = prompt
                         entity_file.write_text(json.dumps(entity_data))
                         self._log(f"  [ok] {job.name}: {prompt[:60]}...")
                     else:
-                        self._log(f"  [!] LLM too short for {job.name}: {prompt}")
-                        job.error = "LLM response too short"
+                        self._log(f"  [!] {job.name}: {reason} — \"{prompt[:60]}\"")
+                        job.error = f"bad prompt: {reason}"
                 except Exception as e:
                     self._log(f"  [!] LLM failed for {job.name}: {e}")
                     job.error = str(e)
@@ -606,6 +852,34 @@ class BakeApp(Gtk.Application):
         if self._cancel:
             self._finish_bake("Cancelled during prompt generation")
             return
+
+        # ── Phase 1.5: Validate all prompts ──
+        self._log("── Validating prompts ──")
+        bad_prompts = []
+        for job in self._jobs:
+            if not job.prompt or job.error:
+                continue
+            ok, reason = self._validate_prompt(job.prompt)
+            if not ok:
+                bad_prompts.append((job, reason))
+                job.error = f"bad prompt: {reason}"
+                self._log(f"  [BAD] {job.name}: {reason} — \"{job.prompt[:80]}\"")
+
+                # Clear the bad prompt from the entity json so it regenerates next time
+                safe = hashlib.sha256(job.key.lower().encode()).hexdigest()[:16]
+                entity_file = ENTITY_DIR / f"{safe}.json"
+                try:
+                    entity_data = json.loads(entity_file.read_text())
+                    if "base_prompt" in entity_data:
+                        del entity_data["base_prompt"]
+                        entity_file.write_text(json.dumps(entity_data))
+                except Exception:
+                    pass
+
+        if bad_prompts:
+            self._log(f"  Rejected {len(bad_prompts)} bad prompts (will retry next bake)")
+        else:
+            self._log("  All prompts OK")
 
         # ── Phase 2: Unload ollama, load FLUX ──
         self._log("── Phase 2: Loading image model ──")
@@ -641,18 +915,30 @@ class BakeApp(Gtk.Application):
         device = "cuda" if torch.cuda.is_available() else "cpu"
         dtype = torch.bfloat16 if device == "cuda" else torch.float32
 
+        has_flash = False
+        try:
+            import flash_attn  # noqa: F401
+            has_flash = True
+        except ImportError:
+            pass
+
+        load_kwargs = {"torch_dtype": dtype}
+        if has_flash:
+            load_kwargs["attn_implementation"] = "flash_attention_2"
+
         try:
             from diffusers import FluxPipeline
             self._pipe = FluxPipeline.from_pretrained(
-                model_cfg["repo"], torch_dtype=dtype
+                model_cfg["repo"], **load_kwargs
             )
         except Exception:
             from diffusers import DiffusionPipeline
             self._pipe = DiffusionPipeline.from_pretrained(
-                model_cfg["repo"], torch_dtype=dtype
+                model_cfg["repo"], **load_kwargs
             )
         self._pipe = self._pipe.to(device)
-        self._log(f"  {model_cfg['name']} loaded on {device}")
+        attn_str = " + Flash Attention 2" if has_flash else ""
+        self._log(f"  {model_cfg['name']} loaded on {device}{attn_str}")
 
         if self._cancel:
             self._unload_pipe()

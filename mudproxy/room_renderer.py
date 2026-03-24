@@ -341,6 +341,14 @@ class RoomRenderer:
                 )
             self._pipe = self._pipe.to(self._device)
 
+        # Enable flash attention 2 if available (for all flux models)
+        if self.model_type.startswith("flux") and self._pipe is not None:
+            try:
+                self._pipe.transformer.enable_attn_implementation("flash_attention_2")
+                logger.info("Flash Attention 2 enabled")
+            except Exception:
+                logger.info("Flash Attention 2 not available, using default attention")
+
         elif self.model_type == "sdxl-lightning":
             self._dtype = torch.float16 if self._device == "cuda" else torch.float32
             from diffusers import (

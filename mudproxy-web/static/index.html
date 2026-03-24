@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MajorSLOP!</title>
+    <link rel="stylesheet" href="/static/css/main.css">
+</head>
+<body>
+    <!-- Full-viewport room canvas (background) -->
+    <canvas id="room-canvas"></canvas>
+
+    <!-- Scanline overlay -->
+    <div id="scanline-overlay" style="display:none"></div>
+
+    <!-- Combat effects overlay -->
+    <div id="combat-effects"></div>
+
+    <!-- Top bar: menu + room name + HP bars -->
+    <header id="header">
+        <div class="header-left">
+            <div id="menu-bar"></div>
+            <span id="room-name">Not Connected</span>
+            <span id="connection-status" class="status-dot disconnected"></span>
+        </div>
+        <div class="header-right">
+            <div class="hp-bar-container">
+                <label>HP</label>
+                <div class="bar hp-bar"><div class="bar-fill" id="hp-fill"></div><span class="bar-text" id="hp-text">0/0</span></div>
+            </div>
+            <div class="hp-bar-container">
+                <label>MA</label>
+                <div class="bar mana-bar"><div class="bar-fill" id="mana-fill"></div><span class="bar-text" id="mana-text">0/0</span></div>
+            </div>
+            <button id="btn-char" onclick="charPanel.toggle()" title="Character & Inventory">Char</button>
+            <button id="btn-connect" onclick="sendCommand('connect')">Connect</button>
+            <button id="btn-disconnect" onclick="sendCommand('disconnect')">Disconnect</button>
+        </div>
+    </header>
+
+    <!-- Entity thumbnails (overlaid on room view) -->
+    <div id="entity-panel" class="floating">
+        <div id="npc-thumbs" class="thumb-row npc-row"></div>
+        <div id="item-thumbs" class="thumb-row item-row"></div>
+    </div>
+
+    <!-- Side panel (overlaid, toggleable) -->
+    <div id="side-panel">
+        <!-- Room description -->
+        <div id="room-desc-panel" class="panel">
+            <div class="panel-header">Room</div>
+            <div id="room-description" class="panel-body"></div>
+            <div id="room-exits" class="exits"></div>
+        </div>
+
+        <!-- Combat / chat log -->
+        <div id="log-panel" class="panel">
+            <div class="panel-header">
+                <span class="tab active" data-tab="combat">Combat</span>
+                <span class="tab" data-tab="chat">Chat</span>
+                <span class="tab" data-tab="all">All</span>
+            </div>
+            <div id="log-body" class="panel-body log-scroll"></div>
+        </div>
+    </div>
+
+    <!-- Scripts -->
+    <script src="/static/js/coin_renderer.js"></script>
+    <script src="/static/js/depth_parallax.js"></script>
+    <script src="/static/js/room_view.js"></script>
+    <script src="/static/js/combat_effects.js"></script>
+    <script src="/static/js/view_menu.js"></script>
+    <script src="/static/js/char_panel.js"></script>
+    <script src="/static/js/app.js"></script>
+    <script>
+        // Initialize
+        const roomView = new RoomView(document.getElementById('room-canvas'));
+        const combatFx = new CombatEffects(document.getElementById('combat-effects'));
+        const viewMenu = new ViewMenu(roomView);
+        const charPanel = new CharPanel();
+        roomView.applyAllSettings();
+    </script>
+</body>
+</html>
