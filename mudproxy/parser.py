@@ -6,6 +6,29 @@ from typing import Optional, Callable
 # Strip ANSI escape sequences (e.g. [K, [0m, [1;32m, ESC[...)
 RE_ANSI = re.compile(r'\x1b\[[0-9;]*[A-Za-z]|\[[ -/]*[A-Za-z]')
 
+# Known exit directions in MajorMUD
+_EXIT_DIRECTIONS = {
+    'north', 'south', 'east', 'west',
+    'up', 'down',
+    'northeast', 'northwest', 'southeast', 'southwest',
+    'ne', 'nw', 'se', 'sw',
+}
+
+def normalize_exit(exit_str: str) -> str:
+    """Extract the direction from an exit string.
+
+    MajorMUD exits can have descriptors before the direction:
+      'open door south' -> 'south'
+      'rocky passageway east' -> 'east'
+      'hidden staircase down' -> 'down'
+      'open gate west' -> 'west'
+    The direction is always the last word.
+    """
+    words = exit_str.strip().split()
+    if words and words[-1].lower() in _EXIT_DIRECTIONS:
+        return words[-1].lower()
+    return exit_str
+
 
 class ParserState(Enum):
     IDLE = auto()
@@ -185,6 +208,16 @@ class MudParser:
         # Chat callback: (sender, message, channel) where channel is
         # "gangpath", "broadcast", "telepath", or "say"
         self.on_chat: Optional[Callable[[str, str, str], None]] = None
+        # Wound status: (monster_name, wound_level) from "X appears to be Y."
+        self.on_wound_status: Optional[Callable[[str, str], None]] = None
+
+    # Wound status pattern: "The goblin appears to be heavily wounded."
+    RE_WOUND_STATUS = re.compile(
+        r'^(.+?)\s+appears?\s+to\s+be\s+'
+        r'(very critically wounded|critically wounded|severely wounded|'
+        r'heavily wounded|moderately wounded|slightly wounded|unwounded)\.',
+        re.IGNORECASE
+    )
 
     # Chat message patterns
     RE_GANGPATH = re.compile(r'^(\w+)\s+gangpaths:\s*(.+)$', re.IGNORECASE)
@@ -251,9 +284,7 @@ class MudParser:
                 m = pat.match(stripped)
                 if m:
                     sender, message = m.group(1), m.group(2)
-                    # Skip own echoes
-                    if sender.lower() != "you" and sender.lower() != self._char_name_lower:
-                        self.on_chat(sender, message, channel)
+                    self.on_chat(sender, message, channel)
                     break
 
         # Collecting inventory lines (multi-line "You are carrying ...")
@@ -411,7 +442,7 @@ class MudParser:
             self._also_here_partial = ""
             self._you_notice_partial = ""
             self._room_has_exits = True
-            self._room.exits = [e.strip().rstrip('.')
+            self._room.exits = [normalize_exit(e.strip().rstrip('.'))
                                 for e in exits_match.group(1).split(',')
                                 if e.strip()]
             self._finalize_room()
@@ -457,6 +488,15 @@ class MudParser:
         if self.RE_KILLED.match(line):
             if self.on_combat:
                 self.on_combat(line)
+            return
+
+        # Wound status from look: "The goblin appears to be heavily wounded."
+        wound_match = self.RE_WOUND_STATUS.match(line)
+        if wound_match:
+            monster_name = wound_match.group(1).strip()
+            wound_level = wound_match.group(2).strip().lower()
+            if self.on_wound_status:
+                self.on_wound_status(monster_name, wound_level)
             return
 
         # XP gain

@@ -32,7 +32,7 @@ NPC_THUMB_DIR = CACHE_BASE / "npc"
 ITEM_THUMB_DIR = CACHE_BASE / "item"
 ROOM_CACHE_DIR = CACHE_BASE / "room"
 DEPTH_CACHE_DIR = CACHE_BASE / "depth"
-SLOP_DIR = CACHE_BASE / "slop"
+SLOP_DIR = Path.home() / ".local" / "share" / "mudproxy" / "slop"
 
 OLLAMA_URL = "http://localhost:11434/api/generate"
 OLLAMA_MODEL = "llama3.2:3b"
@@ -79,24 +79,50 @@ MODELS = {
         "repo": "black-forest-labs/FLUX.2-klein-4B",
         "guidance": 0.0,
         "steps": 4,
+        "pipeline": "flux",
     },
     "flux-klein-9b": {
         "name": "FLUX.2 Klein 9B",
         "repo": "black-forest-labs/FLUX.2-klein-9B",
         "guidance": 0.0,
         "steps": 4,
+        "pipeline": "flux",
     },
     "flux-dev": {
         "name": "FLUX.2 Dev",
         "repo": "black-forest-labs/FLUX.2-dev",
         "guidance": 3.5,
         "steps": 20,
+        "pipeline": "flux",
     },
     "flux-schnell-9b": {
         "name": "FLUX.1 Schnell",
         "repo": "black-forest-labs/FLUX.1-schnell",
         "guidance": 0.0,
         "steps": 4,
+        "pipeline": "flux",
+    },
+    "sd15-rpg-v5": {
+        "name": "SD 1.5 RPG v5",
+        "repo": "Yntec/RPG",
+        "lora": "latent-consistency/lcm-lora-sdv1-5",
+        "guidance": 1.0,
+        "steps": 4,
+        "pipeline": "sd15-lcm",
+        "width": 512,
+        "height": 512,
+        "negative": "blurry, low quality, watermark, text, modern, sci-fi, photograph",
+    },
+    "sd15-dreamshaper-v8": {
+        "name": "SD 1.5 DreamShaper v8",
+        "repo": "Lykon/dreamshaper-8",
+        "lora": "latent-consistency/lcm-lora-sdv1-5",
+        "guidance": 1.0,
+        "steps": 4,
+        "pipeline": "sd15-lcm",
+        "width": 512,
+        "height": 512,
+        "negative": "blurry, low quality, watermark, text, modern, sci-fi, photograph",
     },
 }
 

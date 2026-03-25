@@ -3,30 +3,32 @@
 // and an inventory grid below.
 
 const EQUIP_SLOTS = {
-    2:  { name: 'Head',     col: 2, row: 0 },
-    15: { name: 'Ears',     col: 0, row: 0 },
-    17: { name: 'Light',    col: 4, row: 0 },
-    19: { name: 'Face',     col: 0, row: 1 },
-    8:  { name: 'Neck',     col: 4, row: 1 },
-    1:  { name: 'Weapon',   col: 0, row: 2 },
-    6:  { name: 'Arms',     col: 0, row: 3 },
-    7:  { name: 'Back',     col: 4, row: 2 },
-    12: { name: 'Off-hand', col: 4, row: 3 },
-    14: { name: 'Wrist',    col: 0, row: 4 },
-    4:  { name: 'Ring',     col: 4, row: 4 },
-    3:  { name: 'Hands',    col: 0, row: 5 },
-    11: { name: 'Torso',    col: 2, row: 5 },
-    10: { name: 'Waist',    col: 4, row: 5 },
-    16: { name: 'Trophy',   col: 0, row: 6 },
-    9:  { name: 'Legs',     col: 2, row: 6 },
-    5:  { name: 'Feet',     col: 2, row: 7 },
+    2:    { name: 'Head',      col: 2, row: 0 },
+    15:   { name: 'Ears',      col: 0, row: 0 },
+    17:   { name: 'Light',     col: 4, row: 0 },
+    19:   { name: 'Face',      col: 0, row: 1 },
+    8:    { name: 'Neck',      col: 4, row: 1 },
+    1:    { name: 'Weapon',    col: 0, row: 2 },
+    6:    { name: 'Arms',      col: 0, row: 3 },
+    7:    { name: 'Back',      col: 4, row: 2 },
+    12:   { name: 'Off-hand',  col: 4, row: 3 },
+    '14a': { name: 'Wrist 1',  col: 0, row: 4 },
+    '14b': { name: 'Wrist 2',  col: 0, row: 5 },
+    '4a':  { name: 'Ring 1',   col: 4, row: 4 },
+    '4b':  { name: 'Ring 2',   col: 4, row: 5 },
+    3:    { name: 'Hands',     col: 0, row: 6 },
+    11:   { name: 'Torso',     col: 2, row: 6 },
+    10:   { name: 'Waist',     col: 4, row: 6 },
+    16:   { name: 'Worn',      col: 0, row: 7 },
+    9:    { name: 'Legs',      col: 2, row: 7 },
+    5:    { name: 'Feet',      col: 2, row: 8 },
 };
 
-// Portrait spans the center area (cols 1-3, rows 1-4)
+// Portrait spans the center area (cols 1-3, rows 1-5)
 const PORTRAIT_COL_START = 1;
 const PORTRAIT_COL_END = 4;   // exclusive
 const PORTRAIT_ROW_START = 1;
-const PORTRAIT_ROW_END = 5;   // exclusive
+const PORTRAIT_ROW_END = 6;   // exclusive
 
 class CharPanel {
     constructor() {
@@ -111,7 +113,6 @@ class CharPanel {
             slot.dataset.slot = slotId;
             slot.style.gridColumn = info.col + 1;
             slot.style.gridRow = info.row + 1;
-            slot.title = info.name;
 
             const label = document.createElement('span');
             label.className = 'equip-slot-label';
@@ -122,6 +123,23 @@ class CharPanel {
 
             slot.appendChild(icon);
             slot.appendChild(label);
+
+            // Hover tooltip for equipped items
+            slot.addEventListener('mouseenter', () => {
+                const item = this._equipment[slotId];
+                if (item && item.name && typeof showTooltip === 'function') {
+                    showTooltip(slot, {
+                        name: item.name,
+                        type: 'item',
+                        item_data: item.item_data,
+                        key: item.key,
+                    });
+                }
+            });
+            slot.addEventListener('mouseleave', () => {
+                if (typeof hideTooltip === 'function') hideTooltip();
+            });
+
             equipGrid.appendChild(slot);
             this._slotEls[slotId] = { el: slot, icon, label };
         }
@@ -209,19 +227,17 @@ class CharPanel {
 
         if (item && item.key) {
             slotEl.icon.textContent = '';
-            slotEl.icon.style.backgroundImage = `url(/asset/${item.key})`;
+            const safeKey = encodeURIComponent(item.key).replace(/'/g, '%27');
+            slotEl.icon.style.backgroundImage = `url(/api/asset/${safeKey})`;
             slotEl.icon.classList.add('has-item');
-            slotEl.el.title = `${EQUIP_SLOTS[slotId].name}: ${item.name}`;
         } else if (item && item.name) {
             slotEl.icon.textContent = item.name.charAt(0).toUpperCase();
             slotEl.icon.style.backgroundImage = '';
             slotEl.icon.classList.add('has-item');
-            slotEl.el.title = `${EQUIP_SLOTS[slotId].name}: ${item.name}`;
         } else {
             slotEl.icon.textContent = '';
             slotEl.icon.style.backgroundImage = '';
             slotEl.icon.classList.remove('has-item');
-            slotEl.el.title = EQUIP_SLOTS[slotId].name;
         }
     }
 
@@ -251,11 +267,10 @@ class CharPanel {
             if (i < items.length) {
                 const item = items[i];
                 cell.classList.add('has-item');
-                cell.title = item.name + (item.quantity > 1 ? ` (×${item.quantity})` : '');
 
                 if (item.key) {
                     const img = document.createElement('img');
-                    img.src = `/asset/${item.key}`;
+                    img.src = `/api/asset/${encodeURIComponent(item.key)}`;
                     img.alt = item.name;
                     cell.appendChild(img);
                 } else {
@@ -268,6 +283,21 @@ class CharPanel {
                     qty.textContent = item.quantity;
                     cell.appendChild(qty);
                 }
+
+                // Hover tooltip
+                cell.addEventListener('mouseenter', () => {
+                    if (typeof showTooltip === 'function') {
+                        showTooltip(cell, {
+                            name: item.name,
+                            type: 'item',
+                            item_data: item.item_data,
+                            key: item.key,
+                        });
+                    }
+                });
+                cell.addEventListener('mouseleave', () => {
+                    if (typeof hideTooltip === 'function') hideTooltip();
+                });
             }
 
             this._invGrid.appendChild(cell);

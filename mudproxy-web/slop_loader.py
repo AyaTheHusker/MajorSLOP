@@ -16,7 +16,7 @@ ASSET_DEPTH_MAP = 4
 ASSET_PROMPT = 5
 ASSET_METADATA = 6
 
-CREATURE_PREFIXES = {"large", "small", "big", "short", "fat", "fierce", "nasty", "thin", "angry", "happy", "tall"}
+CREATURE_PREFIXES = {"large", "small", "big", "short", "tall", "fat", "fierce", "nasty", "thin", "angry", "happy", "old"}
 
 ASSET_TYPE_NAMES = {
     ASSET_NPC_THUMB: "npc_thumb",
@@ -42,14 +42,18 @@ class SlopEntry:
 
 class SlopLoader:
     def __init__(self, slop_dir: Path | None = None, cache_dir: Path | None = None):
-        self._slop_dir = slop_dir or (Path.home() / ".cache" / "mudproxy" / "slop")
+        self._slop_dir = slop_dir or (Path.home() / ".local" / "share" / "mudproxy" / "slop")
         self._cache_dir = cache_dir or (Path.home() / ".cache" / "mudproxy")
         # key -> SlopEntry (indexed for fast seek-based reads)
         self._index: dict[str, SlopEntry] = {}
+        # Alternate quality variant (lo-res if primary is hi-res, or vice versa)
+        self._alt_index: dict[str, SlopEntry] = {}
         # Separate prompt index
         self._prompt_index: dict[str, SlopEntry] = {}
         self._metadata: dict = {}
         self._loaded_files: list[Path] = []
+        # Quality preference: True = serve hi-res (default), False = serve lo-res
+        self.prefer_hires: bool = True
 
     def load_all(self) -> int:
         """Load indexes from all .slop files in slop_dir. Returns total entry count."""
@@ -62,12 +66,15 @@ class SlopLoader:
         return len(self._index)
 
     def reload_all(self) -> int:
-        """Re-scan slop dir, loading any new files. Returns total entry count."""
-        if not self._slop_dir.exists():
-            return 0
-        for slop_path in sorted(self._slop_dir.glob("*.slop")):
-            if slop_path not in self._loaded_files:
-                self._load_slop_index(slop_path)
+        """Reload only the currently loaded files (clears and re-indexes)."""
+        loaded = list(self._loaded_files)
+        self._index.clear()
+        self._alt_index.clear()
+        self._prompt_index.clear()
+        self._loaded_files.clear()
+        for p in loaded:
+            if p.exists():
+                self._load_slop_index(p)
         return len(self._index)
 
     def load_file(self, path: Path) -> int:
@@ -106,7 +113,17 @@ class SlopLoader:
                 elif asset_type == ASSET_PROMPT:
                     self._prompt_index[key] = entry
                 else:
-                    self._index[key] = entry
+                    # Track both hi-res and lo-res variants
+                    existing = self._index.get(key)
+                    if existing is not None and size != existing.size:
+                        # Keep the larger one as primary, smaller as alt
+                        if size > existing.size:
+                            self._alt_index[key] = existing
+                            self._index[key] = entry
+                        else:
+                            self._alt_index[key] = entry
+                    else:
+                        self._index[key] = entry
                 count += 1
 
         self._loaded_files.append(path)
@@ -114,10 +131,15 @@ class SlopLoader:
         return count
 
     def get_asset(self, key: str) -> bytes | None:
-        """Read asset data by key (seek-based, not cached in memory)."""
+        """Read asset data by key (seek-based, not cached in memory).
+        Respects prefer_hires setting when an alt variant exists."""
         entry = self._index.get(key)
+        alt = self._alt_index.get(key)
         if not entry:
             return None
+        # If prefer lo-res and we have a smaller alt, use it
+        if alt and not self.prefer_hires:
+            entry = alt
         with open(entry.slop_path, "rb") as f:
             f.seek(entry.offset)
             return f.read(entry.size)

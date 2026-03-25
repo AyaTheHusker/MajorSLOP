@@ -143,10 +143,67 @@ class MudProxy:
             self.on_disconnect()
 
     async def inject_command(self, command: str) -> None:
+        """Inject a command as if the user typed it (sent to BBS server)."""
         if self.server_writer and not self.server_writer.is_closing():
             self.server_writer.write((command + '\r\n').encode('ascii', errors='replace'))
             await self.server_writer.drain()
             logger.info(f"Injected: {command}")
+
+    async def inject_to_client(self, text: str) -> None:
+        """Inject fake server text into what MegaMud sees (sent to client).
+        Queues the text to prepend to the next server data chunk.
+        Falls back to direct send after 500ms if no server data arrives."""
+        self._ghost_inject_queue = getattr(self, '_ghost_inject_queue', [])
+        self._ghost_inject_queue.append(text)
+        logger.info(f"Ghost queued: {text}")
+
+        # Fallback: if no server data flushes the queue within 500ms, send directly
+        import asyncio
+        async def _fallback_flush():
+            await asyncio.sleep(0.5)
+            queue = getattr(self, '_ghost_inject_queue', [])
+            if not queue or not self.client_writer or self.client_writer.is_closing():
+                return
+            for t in queue:
+                self.client_writer.write((self._BBS_LINE_CLEAR + t + '\r\n').encode('cp437', errors='replace'))
+                logger.info(f"Ghost fallback inject: {t}")
+            self._ghost_inject_queue.clear()
+            try:
+                await self.client_writer.drain()
+            except Exception:
+                pass
+        asyncio.ensure_future(_fallback_flush())
+
+    # BBS line-clear sequence: reset + cursor to column 1 + erase line
+    # This is how MajorBBS overwrites the HP prompt before printing chat lines
+    _BBS_LINE_CLEAR = '\x1b[0m\x1b[79D\x1b[K'
+
+    def _pop_ghost_prefix(self) -> bytes:
+        """Return queued ghost injections as bytes to prepend to next server data.
+        Uses the exact BBS ANSI sequence (cursor-back-79 + erase-line) so MegaMud
+        recognizes the text as a real server line."""
+        queue = getattr(self, '_ghost_inject_queue', [])
+        if not queue:
+            return b''
+        parts = []
+        for text in queue:
+            # Match BBS format exactly: clear line, then text in default color + newline
+            # Real BBS uses \x1b[0m reset (no explicit white), message part uncolored for telepaths
+            parts.append((self._BBS_LINE_CLEAR + text + '\r\n').encode('cp437', errors='replace'))
+            logger.info(f"Ghost inject: {text}")
+        self._ghost_inject_queue.clear()
+        return b''.join(parts)
+
+    def set_ghost_name(self, name: str):
+        """Set the ghost character name to intercept responses for."""
+        self._ghost_name = name
+        self._ghost_responses: list[str] = []
+        self._ghost_callback = None
+        logger.info(f"Ghost character set: {name}")
+
+    def set_ghost_callback(self, callback):
+        """Set callback for ghost responses: callback(response_line)"""
+        self._ghost_callback = callback
 
     async def _handle_client(self, reader: asyncio.StreamReader,
                              writer: asyncio.StreamWriter) -> None:
@@ -407,6 +464,10 @@ class MudProxy:
                                 forward_parts.append(self._filter_ansi_buffer)
                                 self._filter_ansi_buffer = ''
                         if forward_parts:
+                            # Prepend ghost injections before filtered data too
+                            ghost_prefix = self._pop_ghost_prefix()
+                            if ghost_prefix:
+                                self.client_writer.write(ghost_prefix)
                             forward_text = ''.join(forward_parts)
                             self.client_writer.write(
                                 forward_text.encode('cp437', errors='replace'))
@@ -423,6 +484,11 @@ class MudProxy:
                                 'cp437', errors='replace')
                             self._filter_ansi_buffer = ''
                             self.client_writer.write(leftover)
+                        # Prepend queued ghost injections so they appear
+                        # naturally in the stream before this server data
+                        ghost_prefix = self._pop_ghost_prefix()
+                        if ghost_prefix:
+                            self.client_writer.write(ghost_prefix)
                         self.client_writer.write(data)
                         await self.client_writer.drain()
                 except Exception:
@@ -471,10 +537,35 @@ class MudProxy:
                 break
             if not data:
                 break
+
+            # Check for ghost character responses — intercept before BBS sees them
+            ghost_name = getattr(self, '_ghost_name', None)
+            forward_data = data
+            if ghost_name:
+                text = data.decode('ascii', errors='replace')
+                # MegaMud sends "/" + name + " " + response to telepath back
+                ghost_prefix = f'/{ghost_name} '
+                if ghost_prefix.lower() in text.lower():
+                    # Extract and intercept ghost response lines
+                    lines = text.split('\r\n')
+                    kept = []
+                    for line in lines:
+                        if line.strip().lower().startswith(ghost_prefix.lower()):
+                            response = line.strip()[len(ghost_prefix):]
+                            logger.info(f"Ghost response: {response}")
+                            cb = getattr(self, '_ghost_callback', None)
+                            if cb:
+                                cb(response)
+                        else:
+                            kept.append(line)
+                    # Rebuild data without ghost lines
+                    forward_data = '\r\n'.join(kept).encode('ascii', errors='replace')
+
             if self.server_writer and not self.server_writer.is_closing():
                 try:
-                    self.server_writer.write(data)
-                    await self.server_writer.drain()
+                    if forward_data:
+                        self.server_writer.write(forward_data)
+                        await self.server_writer.drain()
                 except Exception:
                     break
             # Parse client commands for look detection etc.

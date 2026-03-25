@@ -13,40 +13,52 @@ class RoomView {
         // Settings (persisted to localStorage)
         this.settings = this._loadSettings();
 
-        // Start parallax loop
-        this.parallax.depthScale = this.settings.depthScale;
-        this.parallax.cameraMode = this.settings.cameraMode;
-        this.parallax.cameraIntensity = this.settings.cameraIntensity;
-        this.parallax.cameraSpeed = this.settings.cameraSpeed;
-        this.parallax.isometric = this.settings.isometric;
-        this.parallax.steady = this.settings.steady;
-        this.parallax.overscan = this.settings.overscan;
-        this.parallax.edgeFadeStart = this.settings.edgeFadeStart;
-        this.parallax.edgeFadeEnd = this.settings.edgeFadeEnd;
-        this.parallax.depthContrast = this.settings.depthContrast;
-        this.parallax.start();
+        // Apply all parallax settings
+        const p = this.parallax;
+        p.fillMode = this.settings.fillMode;
+        p.depthScale = this.settings.depthScale;
+        p.cameraMode = this.settings.cameraMode;
+        p.cameraIntensity = this.settings.cameraIntensity;
+        p.cameraSpeed = this.settings.cameraSpeed;
+        p.isometric = this.settings.isometric;
+        p.steady = this.settings.steady;
+        p.overscan = this.settings.overscan;
+        p.panSpeed = this.settings.panSpeed;
+        p.panAmountX = this.settings.panAmountX;
+        p.panAmountY = this.settings.panAmountY;
+        p.edgeFadeStart = this.settings.edgeFadeStart;
+        p.edgeFadeEnd = this.settings.edgeFadeEnd;
+        p.depthContrast = this.settings.depthContrast;
+        p.vignetteAmount = this.settings.vignetteAmount;
+        p.vignetteFeather = this.settings.vignetteFeather;
+        p.start();
     }
 
     _loadSettings() {
         const defaults = {
             depth3d: true,
-            depthScale: 0.15,
-            cameraMode: 3,
-            cameraIntensity: 0.03,
+            preferHires: true,
+            fillMode: 'fill',
+            depthScale: 0.20,
+            cameraMode: 0,
+            cameraIntensity: 0.20,
             cameraSpeed: 0.4,
             isometric: 0.0,
-            steady: 0.5,
-            overscan: 0.05,
-            edgeFadeStart: 0.05,
-            edgeFadeEnd: 0.0,
+            steady: 0.3,
+            overscan: 0.06,
+            panSpeed: 0.05,
+            panAmountX: 0.3,
+            panAmountY: 0.2,
             depthContrast: 1.0,
+            vignetteAmount: 0.0,
+            vignetteFeather: 0.5,
             showMonsters: true,
             showItems: true,
             showConsole: true,
             showScanlines: false,
             showWarpZoom: false,
             scanlineThickness: 2,
-            npcLocation: 'floating',    // above, below, floating
+            npcLocation: 'floating',
             lootLocation: 'floating',
             npcLocked: false,
             lootLocked: false,
@@ -82,9 +94,12 @@ class RoomView {
             case 'isometric': p.isometric = value; break;
             case 'steady': p.steady = value; break;
             case 'overscan': p.overscan = value; break;
-            case 'edgeFadeStart': p.edgeFadeStart = value; break;
-            case 'edgeFadeEnd': p.edgeFadeEnd = value; break;
+            case 'panSpeed': p.panSpeed = value; break;
+            case 'panAmountX': p.panAmountX = value; break;
+            case 'panAmountY': p.panAmountY = value; break;
             case 'depthContrast': p.depthContrast = value; break;
+            case 'vignetteAmount': p.vignetteAmount = value; break;
+            case 'vignetteFeather': p.vignetteFeather = value; break;
             case 'showMonsters':
                 document.getElementById('npc-thumbs').style.display = value ? '' : 'none';
                 break;
@@ -96,6 +111,31 @@ class RoomView {
                 break;
             case 'showScanlines':
                 document.getElementById('scanline-overlay').style.display = value ? '' : 'none';
+                break;
+            case 'depth3d':
+                if (!value) {
+                    p.clearDepth();
+                } else {
+                    // Re-load depth for current room
+                    if (this.currentDepthKey) {
+                        this.parallax.loadDepth(`/api/asset/${encodeURIComponent(this.currentDepthKey)}`);
+                    }
+                }
+                break;
+            case 'fillMode':
+                p.fillMode = value;
+                break;
+            case 'preferHires':
+                fetch('/api/slop/quality', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ hires: value }),
+                }).then(() => {
+                    // Force room reload
+                    this.currentRoomKey = null;
+                    this.currentDepthKey = null;
+                    if (typeof sendCommand === 'function') sendCommand('get_state');
+                });
                 break;
             case 'npcThumbScale':
                 this._applyThumbScale('npc-thumbs', value);
@@ -115,8 +155,6 @@ class RoomView {
         const npcLoc = this.settings.npcLocation || 'floating';
         const lootLoc = this.settings.lootLocation || 'floating';
 
-        // Use the "most floating" mode — if either is floating, panel is floating
-        // If both docked, use npc location for panel position
         panel.classList.remove('dock-above', 'dock-below', 'floating');
 
         if (npcLoc === 'floating' || lootLoc === 'floating') {
@@ -151,12 +189,16 @@ class RoomView {
 
         // Load color image
         if (roomImageKey) {
-            await this.parallax.loadImage(`/api/asset/${encodeURIComponent(roomImageKey)}`);
+            const imgOk = await this.parallax.loadImage(`/api/asset/${encodeURIComponent(roomImageKey)}`);
+            console.log(`[RoomView] color image loaded: ${imgOk}, key=${roomImageKey}`);
         }
 
         // Load depth map
         if (depthKey && this.settings.depth3d) {
-            await this.parallax.loadDepth(`/api/asset/${encodeURIComponent(depthKey)}`);
+            const depthOk = await this.parallax.loadDepth(`/api/asset/${encodeURIComponent(depthKey)}`);
+            console.log(`[RoomView] depth map loaded: ${depthOk}, key=${depthKey}, hasDepth=${this.parallax.hasDepth}, depthScale=${this.parallax.depthScale}`);
+        } else {
+            console.log(`[RoomView] NO depth: depthKey=${depthKey}, depth3d=${this.settings.depth3d}`);
         }
 
         this.loading = false;

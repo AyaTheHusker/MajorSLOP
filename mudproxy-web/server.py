@@ -26,6 +26,7 @@ _MDB_SEARCH_PATHS = [
 
 # Known locations for SLOP files
 _SLOP_SEARCH_PATHS = [
+    Path.home() / ".local" / "share" / "mudproxy" / "slop",
     Path.home() / ".cache" / "mudproxy" / "slop",
     Path.home() / "Downloads",
     Path.home(),
@@ -95,6 +96,11 @@ def create_app(orchestrator: Orchestrator, event_bus: EventBus, slop: SlopLoader
             text = data.get("text", "")
             if text:
                 await orch.inject_command(text)
+        elif cmd == "ghost":
+            ghost_name = data.get("name", "")
+            at_cmd = data.get("at_cmd", "")
+            if ghost_name and at_cmd:
+                await orch.ghost_command(ghost_name, at_cmd)
         elif cmd == "get_state":
             # Re-send full state
             state = orch.get_state()
@@ -102,14 +108,18 @@ def create_app(orchestrator: Orchestrator, event_bus: EventBus, slop: SlopLoader
 
     # ── Asset API ──
 
-    @app.get("/api/asset/{key}")
+    @app.get("/api/asset/{key:path}")
     async def get_asset(key: str):
         """Serve a slop asset (image/depth/prompt) by key."""
+        # Strip trailing /prompt suffix (handled by separate route)
+        if key.endswith("/prompt"):
+            return await get_asset_prompt(key[:-7])
+
         data = slop.get_asset(key)
         if data is None:
+            logger.warning(f"Asset 404: {key!r}")
             return Response(status_code=404)
 
-        asset_type = slop.get_asset_type(key)
         # Determine content type
         if key.endswith("_depth"):
             content_type = "image/png"
@@ -120,12 +130,11 @@ def create_app(orchestrator: Orchestrator, event_bus: EventBus, slop: SlopLoader
             content=data,
             media_type=content_type,
             headers={
-                "Cache-Control": "public, max-age=31536000, immutable",
-                "ETag": f'"{key}"',
+                "Cache-Control": "no-store",
             },
         )
 
-    @app.get("/api/asset/{key}/prompt")
+    @app.get("/api/asset-prompt/{key:path}")
     async def get_asset_prompt(key: str):
         """Get the prompt text that generated an asset."""
         prompt = slop.get_prompt(key)
@@ -175,11 +184,41 @@ def create_app(orchestrator: Orchestrator, event_bus: EventBus, slop: SlopLoader
         count = slop.load_file(slop_path)
         return JSONResponse({"loaded": name, "entries": count, "stats": slop.get_stats()})
 
+    @app.post("/api/slop/quality")
+    async def slop_quality(body: dict):
+        """Toggle between hi-res and lo-res assets."""
+        hires = body.get("hires", True)
+        slop.prefer_hires = bool(hires)
+        alt_count = len(slop._alt_index)
+        logger.info(f"Asset quality: {'hi-res' if hires else 'lo-res'} ({alt_count} assets have variants)")
+        return JSONResponse({"prefer_hires": slop.prefer_hires, "alt_assets": alt_count})
+
     @app.post("/api/slop/reload")
     async def slop_reload():
-        """Re-scan slop dir for new files and load them."""
-        count = slop.reload_all()
-        return JSONResponse({"total_assets": count, "stats": slop.get_stats()})
+        """Reload the currently loaded slop files (does NOT load new ones)."""
+        # Clear and reload only the files that were originally loaded
+        loaded = list(slop._loaded_files)
+        slop._index.clear()
+        slop._alt_index.clear()
+        slop._prompt_index.clear()
+        slop._loaded_files.clear()
+        for p in loaded:
+            if p.exists():
+                slop.load_file(p)
+        return JSONResponse({"total_assets": len(slop._index), "stats": slop.get_stats()})
+
+    @app.get("/api/debug/room")
+    async def debug_room():
+        """Debug: show current room state."""
+        state = orchestrator.get_state()
+        return JSONResponse({
+            "room_name": state.get("room_name"),
+            "exits": state.get("exits"),
+            "room_image_key": state.get("room_image_key"),
+            "depth_key": state.get("depth_key"),
+            "entities": [{"name": e["name"], "key": e.get("key")} for e in state.get("entities", [])],
+            "items": [{"name": i["name"], "key": i.get("key")} for i in state.get("items", [])],
+        })
 
     @app.get("/api/status")
     async def status():

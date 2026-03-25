@@ -523,12 +523,24 @@ class DatBakeApp(Gtk.Application):
 
         css = Gtk.CssProvider()
         css.load_from_string(
-            ".bake-header { background: #1a1a2e; color: #e0e0e0; padding: 12px; }"
+            ".bake-header { background: #1a1a2e; color: #e0e0e0; padding: 8px 12px; }"
             ".bake-log { background: #0d0d1a; color: #b0b0c0; padding: 8px; font-family: monospace; font-size: 10px; }"
             ".bake-stat { color: #8888cc; font-size: 11px; }"
             ".bake-progress { min-height: 20px; }"
             ".vram-frame { background: #111122; border-radius: 4px; padding: 4px 8px; }"
             ".vram-label { font-size: 10px; font-family: monospace; color: #b0b0c0; }"
+            ".bake-action-btn { padding: 4px 12px; min-height: 0; min-width: 0;"
+            "  border-radius: 4px; font-size: 12px; font-weight: 500;"
+            "  background: #2a2a4a; color: #c8c8e8; border: 1px solid #3a3a5a; }"
+            ".bake-action-btn:hover { background: #3a3a6a; border-color: #5a5a8a; }"
+            ".bake-action-btn:active { background: #1a1a3a; }"
+            ".bake-action-btn:disabled { opacity: 0.4; }"
+            ".bake-btn-primary { background: #2a4a2a; color: #90dd90; border-color: #3a6a3a; }"
+            ".bake-btn-primary:hover { background: #3a6a3a; border-color: #5a8a5a; }"
+            ".bake-btn-danger { background: #4a2a2a; color: #dd9090; border-color: #6a3a3a; }"
+            ".bake-btn-danger:hover { background: #6a3a3a; border-color: #8a5a5a; }"
+            ".bake-path-entry { padding: 2px 8px; min-height: 0; font-size: 12px;"
+            "  background: #0d0d1a; color: #b0b0c0; border: 1px solid #2a2a4a; border-radius: 4px; }"
         )
         Gtk.StyleContext.add_provider_for_display(
             Gdk.Display.get_default(), css,
@@ -539,11 +551,21 @@ class DatBakeApp(Gtk.Application):
         win.set_child(vbox)
 
         # Header
-        header = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        header = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         header.add_css_class("bake-header")
-        title = Gtk.Label(label=f"Dat Directory: {self._dat_dir}")
-        title.set_halign(Gtk.Align.START)
-        header.append(title)
+
+        dat_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        self._dat_label = Gtk.Label(label=f"Dat Directory: {self._dat_dir}")
+        self._dat_label.set_halign(Gtk.Align.START)
+        self._dat_label.set_hexpand(True)
+        dat_row.append(self._dat_label)
+
+        dat_browse = Gtk.Button(label="Change...")
+        dat_browse.add_css_class("bake-action-btn")
+        dat_browse.set_tooltip_text("Select a different .dat files directory")
+        dat_browse.connect("clicked", lambda _: self._browse_dat_dir())
+        dat_row.append(dat_browse)
+        header.append(dat_row)
 
         self._stats_label = Gtk.Label(label="Click 'Scan' to parse .dat files")
         self._stats_label.add_css_class("bake-stat")
@@ -555,13 +577,8 @@ class DatBakeApp(Gtk.Application):
         controls = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         controls.set_margin_start(12)
         controls.set_margin_end(12)
-        controls.set_margin_top(8)
-        controls.set_margin_bottom(8)
-
-        self._scan_btn = Gtk.Button(label="Scan")
-        self._scan_btn.set_tooltip_text("Parse .dat files and build job list")
-        self._scan_btn.connect("clicked", lambda _: self._do_scan())
-        controls.append(self._scan_btn)
+        controls.set_margin_top(4)
+        controls.set_margin_bottom(4)
 
         # ── Include (what to process) ──
         inc_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
@@ -583,6 +600,39 @@ class DatBakeApp(Gtk.Application):
 
         controls.append(inc_box)
 
+        # ── Room Range Filter ──
+        range_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        range_lbl = Gtk.Label(label="<b>Room Filter</b>", use_markup=True)
+        range_lbl.set_halign(Gtk.Align.START)
+        range_box.append(range_lbl)
+
+        self._chk_room_filter = Gtk.CheckButton(label="Filter by Map/Room range")
+        self._chk_room_filter.set_active(False)
+        self._chk_room_filter.set_tooltip_text("Only include rooms in the specified map and room number range")
+        range_box.append(self._chk_room_filter)
+
+        range_grid = Gtk.Grid()
+        range_grid.set_row_spacing(2)
+        range_grid.set_column_spacing(4)
+
+        range_grid.attach(Gtk.Label(label="Map:"), 0, 0, 1, 1)
+        self._spin_map = Gtk.SpinButton.new_with_range(0, 999, 1)
+        self._spin_map.set_value(1)
+        range_grid.attach(self._spin_map, 1, 0, 1, 1)
+
+        range_grid.attach(Gtk.Label(label="Room from:"), 0, 1, 1, 1)
+        self._spin_room_from = Gtk.SpinButton.new_with_range(0, 99999, 1)
+        self._spin_room_from.set_value(1)
+        range_grid.attach(self._spin_room_from, 1, 1, 1, 1)
+
+        range_grid.attach(Gtk.Label(label="Room to:"), 0, 2, 1, 1)
+        self._spin_room_to = Gtk.SpinButton.new_with_range(0, 99999, 1)
+        self._spin_room_to.set_value(99999)
+        range_grid.attach(self._spin_room_to, 1, 2, 1, 1)
+
+        range_box.append(range_grid)
+        controls.append(range_box)
+
         # ── Phases (what work to do) ──
         phase_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         phase_lbl = Gtk.Label(label="<b>Phases</b>", use_markup=True)
@@ -594,10 +644,15 @@ class DatBakeApp(Gtk.Application):
         self._chk_gen_prompts.set_tooltip_text("Generate image prompts for entries missing them")
         phase_box.append(self._chk_gen_prompts)
 
-        self._chk_gen_images = Gtk.CheckButton(label="Generate images (FLUX)")
+        self._chk_gen_images = Gtk.CheckButton(label="Generate images")
         self._chk_gen_images.set_active(True)
         self._chk_gen_images.set_tooltip_text("Generate images for entries that have prompts but no image")
         phase_box.append(self._chk_gen_images)
+
+        self._chk_upscale = Gtk.CheckButton(label="Upscale rooms (4x Real-ESRGAN)")
+        self._chk_upscale.set_active(True)
+        self._chk_upscale.set_tooltip_text("Upscale room images 4x with Real-ESRGAN (768x512 → 3072x2048)")
+        phase_box.append(self._chk_upscale)
 
         self._chk_depth = Gtk.CheckButton(label="Generate depth maps")
         self._chk_depth.set_active(False)
@@ -688,53 +743,70 @@ class DatBakeApp(Gtk.Application):
 
         controls.append(model_grid)
 
-        # Action buttons
-        btn_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        vbox.append(controls)
+
+        # ── Action toolbar: buttons + output path in one compact row ──
+        toolbar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        toolbar.set_margin_start(12)
+        toolbar.set_margin_end(12)
+        toolbar.set_margin_bottom(4)
+        toolbar.set_valign(Gtk.Align.CENTER)
 
         self._start_btn = Gtk.Button(label="Bake")
         self._start_btn.set_tooltip_text("Start generating images")
         self._start_btn.connect("clicked", lambda _: self._do_start())
         self._start_btn.set_sensitive(False)
-        btn_box.append(self._start_btn)
+        self._start_btn.add_css_class("bake-action-btn")
+        self._start_btn.add_css_class("bake-btn-primary")
+        toolbar.append(self._start_btn)
 
         self._cancel_btn = Gtk.Button(label="Stop")
         self._cancel_btn.connect("clicked", lambda _: self._do_cancel())
         self._cancel_btn.set_sensitive(False)
-        btn_box.append(self._cancel_btn)
+        self._cancel_btn.add_css_class("bake-action-btn")
+        self._cancel_btn.add_css_class("bake-btn-danger")
+        toolbar.append(self._cancel_btn)
 
         self._save_btn = Gtk.Button(label="Save")
         self._save_btn.set_tooltip_text("Save results to .slop archive")
         self._save_btn.connect("clicked", lambda _: self._do_save())
         self._save_btn.set_sensitive(False)
-        btn_box.append(self._save_btn)
+        self._save_btn.add_css_class("bake-action-btn")
+        toolbar.append(self._save_btn)
 
         self._load_slop_btn = Gtk.Button(label="Load")
         self._load_slop_btn.set_tooltip_text("Load existing .slop to add depth maps or inspect")
         self._load_slop_btn.connect("clicked", lambda _: self._do_load_slop())
-        btn_box.append(self._load_slop_btn)
+        self._load_slop_btn.add_css_class("bake-action-btn")
+        toolbar.append(self._load_slop_btn)
 
         self._merge_btn = Gtk.Button(label="Merge")
         self._merge_btn.set_tooltip_text("Merge multiple .slop files into one")
         self._merge_btn.connect("clicked", lambda _: self._do_merge_slop())
-        btn_box.append(self._merge_btn)
+        self._merge_btn.add_css_class("bake-action-btn")
+        toolbar.append(self._merge_btn)
 
-        controls.append(btn_box)
+        # Separator
+        sep = Gtk.Separator(orientation=Gtk.Orientation.VERTICAL)
+        sep.set_margin_start(4)
+        sep.set_margin_end(4)
+        toolbar.append(sep)
 
-        # ── Output .slop file selector ──
-        slop_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        slop_box.set_margin_start(12)
-        slop_box.set_margin_end(12)
-        slop_box.append(Gtk.Label(label="Output:"))
+        # Output path inline
+        out_lbl = Gtk.Label(label="Output:")
+        out_lbl.add_css_class("bake-stat")
+        toolbar.append(out_lbl)
         self._slop_entry = Gtk.Entry()
         self._slop_entry.set_hexpand(True)
         self._slop_entry.set_placeholder_text("Auto-generated filename")
-        slop_box.append(self._slop_entry)
+        self._slop_entry.add_css_class("bake-path-entry")
+        toolbar.append(self._slop_entry)
         browse_btn = Gtk.Button(label="Browse...")
         browse_btn.connect("clicked", lambda _: self._do_browse_slop())
-        slop_box.append(browse_btn)
-        controls.append(slop_box)
+        browse_btn.add_css_class("bake-action-btn")
+        toolbar.append(browse_btn)
 
-        vbox.append(controls)
+        vbox.append(toolbar)
 
         # ── Style controls ──
         style_frame = Gtk.Frame(label="Style Suffixes (appended to generated prompts)")
@@ -884,17 +956,49 @@ class DatBakeApp(Gtk.Application):
 
         vbox.append(prog_box)
 
-        # Log
+        # Bottom section: log on left, preview thumbnail on right
+        bottom_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        bottom_box.set_vexpand(True)
+
+        # Log (left side)
         scroll = Gtk.ScrolledWindow()
+        scroll.set_hexpand(True)
         scroll.set_vexpand(True)
         self._log_view = Gtk.TextView()
         self._log_view.set_editable(False)
         self._log_view.add_css_class("bake-log")
         self._log_buf = self._log_view.get_buffer()
         scroll.set_child(self._log_view)
-        vbox.append(scroll)
+        bottom_box.append(scroll)
+
+        # Preview (right side) — fills the height of the bottom area
+        preview_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        preview_box.set_valign(Gtk.Align.START)
+        preview_box.set_margin_end(4)
+
+        self._preview_image = Gtk.Picture()
+        self._preview_image.set_size_request(256, 256)
+        self._preview_image.set_content_fit(Gtk.ContentFit.CONTAIN)
+        preview_box.append(self._preview_image)
+
+        self._preview_label = Gtk.Label(label="")
+        self._preview_label.set_halign(Gtk.Align.CENTER)
+        self._preview_label.set_wrap(True)
+        self._preview_label.set_max_width_chars(30)
+        preview_box.append(self._preview_label)
+
+        bottom_box.append(preview_box)
+        vbox.append(bottom_box)
 
         win.present()
+
+        # Auto-scan dat files on startup if directory has .dat files
+        if self._dat_dir.exists() and (
+            any(self._dat_dir.glob("*.dat")) or any(self._dat_dir.glob("*.DAT"))
+        ):
+            self._do_scan()
+        elif not self._dat_dir.exists():
+            self._log("No dat directory found — use Change... to select one")
 
     def _log(self, msg: str):
         def _ui():
@@ -903,6 +1007,35 @@ class DatBakeApp(Gtk.Application):
             # Auto-scroll
             mark = self._log_buf.create_mark(None, self._log_buf.get_end_iter(), False)
             self._log_view.scroll_mark_onscreen(mark)
+        GLib.idle_add(_ui)
+
+    def _set_preview(self, image_bytes: bytes, label: str):
+        """Update the preview thumbnail from WebP image bytes."""
+        def _ui():
+            try:
+                loader = GdkPixbuf.PixbufLoader.new()
+                loader.write(image_bytes)
+                loader.close()
+                pixbuf = loader.get_pixbuf()
+                if pixbuf:
+                    # Scale to 256px max
+                    w, h = pixbuf.get_width(), pixbuf.get_height()
+                    scale = min(256 / w, 256 / h, 1.0)
+                    if scale < 1.0:
+                        pixbuf = pixbuf.scale_simple(
+                            int(w * scale), int(h * scale),
+                            GdkPixbuf.InterpType.BILINEAR)
+                    texture = Gdk.Texture.new_for_pixbuf(pixbuf)
+                    self._preview_image.set_paintable(texture)
+                self._preview_label.set_text(label)
+            except Exception:
+                pass
+        GLib.idle_add(_ui)
+
+    def _set_preview_text(self, label: str):
+        """Update just the preview label (for depth/inpaint phases)."""
+        def _ui():
+            self._preview_label.set_text(label)
         GLib.idle_add(_ui)
 
     @staticmethod
@@ -1049,14 +1182,20 @@ class DatBakeApp(Gtk.Application):
         if mon_path:
             monsters = parse_monsters(mon_path)
             self._n_monsters = len(monsters)
-            # Only include monsters with descriptions
+            # Only include monsters with descriptions, deduplicate by name
             with_desc = [m for m in monsters if m["desc"]]
-            self._log(f"  Monsters: {len(monsters)} total, {len(with_desc)} with descriptions")
+            seen_monster_keys = set()
             cached_prompts = 0
+            n_dupes = 0
             for m in with_desc:
+                key = m["name"].lower()
+                if key in seen_monster_keys:
+                    n_dupes += 1
+                    continue
+                seen_monster_keys.add(key)
                 job = DatBakeJob(
-                    key=m["name"].lower(),
-                    name=m["name"],
+                    key=key,
+                    name=f"#{m['num']} {m['name']}",
                     asset_type=ASSET_NPC_THUMB,
                     description=m["desc"],
                 )
@@ -1065,6 +1204,8 @@ class DatBakeApp(Gtk.Application):
                     job.prompt = cached
                     cached_prompts += 1
                 self._jobs.append(job)
+            self._log(f"  Monsters: {len(monsters)} total, {len(with_desc)} with descriptions, "
+                      f"{len(seen_monster_keys)} unique ({n_dupes} name duplicates skipped)")
             if cached_prompts:
                 self._log(f"    ({cached_prompts} prompts loaded from cache)")
         else:
@@ -1076,12 +1217,18 @@ class DatBakeApp(Gtk.Application):
             items = parse_items(item_path)
             self._n_items = len(items)
             with_desc = [i for i in items if i["desc"]]
-            self._log(f"  Items: {len(items)} total, {len(with_desc)} with descriptions")
+            seen_item_keys = set()
             cached_prompts = 0
+            n_dupes = 0
             for i in with_desc:
+                key = i["name"].lower()
+                if key in seen_item_keys:
+                    n_dupes += 1
+                    continue
+                seen_item_keys.add(key)
                 job = DatBakeJob(
-                    key=i["name"].lower(),
-                    name=i["name"],
+                    key=key,
+                    name=f"#{i['num']} {i['name']}",
                     asset_type=ASSET_ITEM_THUMB,
                     description=i["desc"],
                 )
@@ -1090,6 +1237,8 @@ class DatBakeApp(Gtk.Application):
                     job.prompt = cached
                     cached_prompts += 1
                 self._jobs.append(job)
+            self._log(f"  Items: {len(items)} total, {len(with_desc)} with descriptions, "
+                      f"{len(seen_item_keys)} unique ({n_dupes} name duplicates skipped)")
             if cached_prompts:
                 self._log(f"    ({cached_prompts} prompts loaded from cache)")
         else:
@@ -1100,6 +1249,18 @@ class DatBakeApp(Gtk.Application):
         if room_path:
             rooms = parse_rooms(room_path)
             self._n_rooms = len(rooms)
+
+            # Apply map/room range filter if enabled
+            if self._chk_room_filter.get_active():
+                filter_map = int(self._spin_map.get_value())
+                filter_from = int(self._spin_room_from.get_value())
+                filter_to = int(self._spin_room_to.get_value())
+                before = len(rooms)
+                rooms = [r for r in rooms
+                         if r["map"] == filter_map
+                         and filter_from <= r["room"] <= filter_to]
+                self._log(f"  Room filter: Map {filter_map}, rooms {filter_from}-{filter_to} → {len(rooms)}/{before}")
+
             # Deduplicate: same name + same exits = same image (matches live proxy cache key)
             seen_descs = {}
             for r in rooms:
@@ -1120,7 +1281,7 @@ class DatBakeApp(Gtk.Application):
                 job_key = f"room_{cache_key}"
                 job = DatBakeJob(
                     key=job_key,
-                    name=f"{r['name']} ({r['key']})",
+                    name=f"Map {r['map']} Room {r['room']}: {r['name']}",
                     asset_type=ASSET_ROOM_IMAGE,
                     description=f"{r['name']}\n{r['desc']}{exits_line}",
                     room_meta={"map": r["map"], "room": r["room"],
@@ -1141,10 +1302,18 @@ class DatBakeApp(Gtk.Application):
         # Merge pre-existing assets from loaded .slop into scanned jobs
         loaded = getattr(self, '_loaded_entries', {})
         if loaded:
+            n_loaded_with_img = sum(1 for e in loaded.values() if e.get("image"))
+            self._log(f"  Merging {len(loaded)} loaded entries ({n_loaded_with_img} with images) into jobs...")
             n_reused = 0
+            n_type_mismatch = 0
             for job in self._jobs:
                 entry = loaded.get(job.key)
                 if entry and entry.get("image"):
+                    # Only match if asset types are compatible
+                    entry_type = entry.get("type")
+                    if entry_type is not None and entry_type != job.asset_type:
+                        n_type_mismatch += 1
+                        continue
                     job.image_bytes = entry["image"]
                     job.done = True
                     if entry.get("depth"):
@@ -1171,6 +1340,11 @@ class DatBakeApp(Gtk.Application):
     # ── Start/Cancel/Save ──
 
     def _do_start(self):
+        # Auto-scan if no jobs exist yet (e.g. user loaded slop then hit Bake)
+        if not self._jobs:
+            self._log("No jobs — auto-scanning .dat files...")
+            self._do_scan()
+
         # Filter jobs based on Include checkboxes
         active_jobs = []
         if self._chk_monsters.get_active():
@@ -1185,6 +1359,7 @@ class DatBakeApp(Gtk.Application):
         self._gen_images = self._chk_gen_images.get_active()
         self._gen_depth = self._chk_depth.get_active()
         self._gen_inpaint = self._chk_inpaint.get_active()
+        self._gen_upscale = self._chk_upscale.get_active()
         self._gen_3d = self._chk_3d.get_active()
         self._skip_existing = self._chk_skip.get_active()
         self._steps = int(self._steps_spin.get_value())
@@ -1227,7 +1402,6 @@ class DatBakeApp(Gtk.Application):
         self._cancel = False
 
         self._start_btn.set_sensitive(False)
-        self._scan_btn.set_sensitive(False)
         self._cancel_btn.set_sensitive(True)
         self._save_btn.set_sensitive(False)
 
@@ -1240,6 +1414,46 @@ class DatBakeApp(Gtk.Application):
         self._cancel = True
         self._cancel_btn.set_sensitive(False)
         self._log("Cancelling...")
+
+    def _collect_all_entries(self, include_prompts=True):
+        """Collect ALL entries: loaded from disk + current session jobs.
+        This is the single source of truth for save/autosave."""
+        entries = {}
+
+        # Start with everything loaded from disk
+        if hasattr(self, '_loaded_entries'):
+            for key, entry in self._loaded_entries.items():
+                if "image" in entry:
+                    entries[key] = (entry["type"], entry["image"])
+                    if entry.get("depth"):
+                        entries[f"{key}_depth"] = (ASSET_DEPTH_MAP, entry["depth"])
+                    if entry.get("inpaint"):
+                        entries[f"{key}_inpaint"] = (ASSET_INPAINT, entry["inpaint"])
+                    if entry.get("prompt"):
+                        entries[f"{key}_prompt"] = (ASSET_PROMPT, entry["prompt"].encode("utf-8"))
+                elif entry.get("prompt"):
+                    entries[f"{key}_prompt"] = (ASSET_PROMPT, entry["prompt"].encode("utf-8"))
+
+        # Overlay current session jobs on top (newer data wins)
+        n_prompts = 0
+        for job in self._jobs:
+            if job.done and job.image_bytes:
+                entries[job.key] = (job.asset_type, job.image_bytes)
+                if job.depth_bytes:
+                    entries[f"{job.key}_depth"] = (ASSET_DEPTH_MAP, job.depth_bytes)
+                if job.inpaint_bytes:
+                    entries[f"{job.key}_inpaint"] = (ASSET_INPAINT, job.inpaint_bytes)
+                if include_prompts and job.prompt:
+                    entries[f"{job.key}_prompt"] = (ASSET_PROMPT, job.prompt.encode("utf-8"))
+                    n_prompts += 1
+                if job.room_meta:
+                    entries[f"{job.key}_rmeta"] = (ASSET_METADATA, json.dumps(job.room_meta).encode("utf-8"))
+            elif job.prompt:
+                entries[f"{job.key}_prompt"] = (ASSET_PROMPT, job.prompt.encode("utf-8"))
+                if job.room_meta:
+                    entries[f"{job.key}_rmeta"] = (ASSET_METADATA, json.dumps(job.room_meta).encode("utf-8"))
+
+        return entries, n_prompts
 
     def _do_save(self):
         user_path = self._slop_entry.get_text().strip()
@@ -1254,35 +1468,20 @@ class DatBakeApp(Gtk.Application):
             slop_path = SLOP_DIR / f"majormud_1.11p_{ts}.slop"
 
         include_prompts = self._chk_prompts.get_active()
-        entries = {}
-        n_prompts = 0
-        for job in self._jobs:
-            if not job.done or not job.image_bytes:
-                continue
-            entries[job.key] = (job.asset_type, job.image_bytes)
-            if job.depth_bytes:
-                entries[f"{job.key}_depth"] = (ASSET_DEPTH_MAP, job.depth_bytes)
-            if job.inpaint_bytes:
-                entries[f"{job.key}_inpaint"] = (ASSET_INPAINT, job.inpaint_bytes)
-            if include_prompts and job.prompt:
-                prompt_data = job.prompt.encode("utf-8")
-                entries[f"{job.key}_prompt"] = (ASSET_PROMPT, prompt_data)
-                n_prompts += 1
-            if job.room_meta:
-                entries[f"{job.key}_rmeta"] = (ASSET_METADATA, json.dumps(job.room_meta).encode("utf-8"))
+        entries, n_prompts = self._collect_all_entries(include_prompts)
 
         if not entries:
-            self._log("No completed assets to save")
+            self._log("No assets to save")
             return
 
-        # Count done per type from all jobs (not just entries)
-        done_npc = sum(1 for j in self._jobs if j.done and j.asset_type == ASSET_NPC_THUMB)
-        done_item = sum(1 for j in self._jobs if j.done and j.asset_type == ASSET_ITEM_THUMB)
-        done_room = sum(1 for j in self._jobs if j.done and j.asset_type == ASSET_ROOM_IMAGE)
-        done_depth = sum(1 for j in self._jobs if j.depth_bytes and j.asset_type == ASSET_ROOM_IMAGE)
-        done_inpaint = sum(1 for j in self._jobs if j.inpaint_bytes and j.asset_type == ASSET_ROOM_IMAGE)
+        # Count done per type
+        done_npc = sum(1 for k, (t, _) in entries.items() if t == ASSET_NPC_THUMB)
+        done_item = sum(1 for k, (t, _) in entries.items() if t == ASSET_ITEM_THUMB)
+        done_room = sum(1 for k, (t, _) in entries.items() if t == ASSET_ROOM_IMAGE)
+        done_depth = sum(1 for k, (t, _) in entries.items() if t == ASSET_DEPTH_MAP)
+        done_inpaint = sum(1 for k, (t, _) in entries.items() if t == ASSET_INPAINT)
 
-        # Embed metadata — totals from scan + what's done
+        # Embed metadata
         metadata = {
             "source": "MajorMUD 1.11p",
             "dat_dir": str(self._dat_dir),
@@ -1298,16 +1497,6 @@ class DatBakeApp(Gtk.Application):
             "done_inpaint": done_inpaint,
         }
         entries["_metadata"] = (ASSET_METADATA, json.dumps(metadata).encode("utf-8"))
-
-        # If appending to existing file, merge entries
-        if slop_path.exists():
-            try:
-                existing = read_slop(slop_path)
-                existing.update(entries)
-                entries = existing
-                self._log(f"Appending to existing {slop_path.name}")
-            except Exception as e:
-                self._log(f"Warning: could not read existing file: {e}")
 
         write_slop(slop_path, entries)
         size_mb = slop_path.stat().st_size / 1024 / 1024
@@ -1450,39 +1639,11 @@ class DatBakeApp(Gtk.Application):
                     "type": atype,
                 }
 
-        # Build jobs — both complete and incomplete
-        self._jobs.clear()
         self._loaded_slop_path = path
 
-        for key, entry in self._loaded_entries.items():
-            prompt = entry.get("prompt", "")
-            has_image = "image" in entry
-            job = DatBakeJob(
-                key=key,
-                name=key,
-                asset_type=entry["type"],
-                description="",
-                prompt=prompt,
-                width=768 if entry["type"] == ASSET_ROOM_IMAGE else 512,
-                height=512,
-            )
-            if has_image:
-                job.image_bytes = entry["image"]
-                job.done = True
-                job.depth_bytes = entry.get("depth")
-                job.inpaint_bytes = entry.get("inpaint")
-            self._jobs.append(job)
-
-        n_with_image = sum(1 for j in self._jobs if j.done)
-        n_need_image = sum(1 for j in self._jobs if not j.done and j.prompt)
-        n_need_prompt = sum(1 for j in self._jobs if not j.prompt)
-        rooms_without_depth = sum(1 for j in self._jobs
-                                  if j.asset_type == ASSET_ROOM_IMAGE and j.done and not j.depth_bytes)
-        rooms_without_inpaint = sum(1 for j in self._jobs
-                                    if j.asset_type == ASSET_ROOM_IMAGE and j.depth_bytes and not j.inpaint_bytes)
-
-        self._log(f"  Jobs: {n_with_image} have images, {n_need_image} have prompts but need images, "
-                  f"{n_need_prompt} need prompts")
+        # Set output path to loaded file IMMEDIATELY
+        self._slop_entry.set_text(str(path))
+        self._log(f"  Output set to: {path}")
 
         # Store totals from metadata for re-save
         if total_npc:
@@ -1494,6 +1655,7 @@ class DatBakeApp(Gtk.Application):
         if total_room:
             self._n_unique_rooms = total_room
 
+        n_need_image = (total_npc - n_npc) + (total_item - n_item) + (total_room - n_room)
         self._stats_label.set_text(
             f"Loaded: {_frac(n_npc, total_npc)} NPCs | {_frac(n_item, total_item)} items | "
             f"{_frac(n_room, total_room)} rooms | "
@@ -1501,15 +1663,41 @@ class DatBakeApp(Gtk.Application):
             f"{n_need_image} need images"
         )
 
-        can_work = n_need_image > 0 or rooms_without_depth > 0 or rooms_without_inpaint > 0
-        self._start_btn.set_sensitive(can_work)
+        # Auto-scan .dat files so ALL job types exist (monsters, items, rooms),
+        # then merge slop assets into matching jobs
+        self._log("  Auto-scanning .dat files to build full job list...")
+        self._do_scan()
+
+        n_with_image = sum(1 for j in self._jobs if j.done)
+        rooms_without_depth = sum(1 for j in self._jobs
+                                  if j.asset_type == ASSET_ROOM_IMAGE and j.done and not j.depth_bytes)
+        rooms_without_inpaint = sum(1 for j in self._jobs
+                                    if j.asset_type == ASSET_ROOM_IMAGE and j.depth_bytes and not j.inpaint_bytes)
+
         self._save_btn.set_sensitive(n_with_image > 0)
-        if n_need_image > 0:
-            self._log(f"  Ready: {n_need_image} entries have prompts but need image generation")
         if rooms_without_depth > 0:
             self._log(f"  Ready: {rooms_without_depth} rooms need depth maps")
         if rooms_without_inpaint > 0:
             self._log(f"  Ready: {rooms_without_inpaint} rooms need inpainting")
+
+    def _browse_dat_dir(self):
+        """Open folder chooser to change the .dat files directory."""
+        dialog = Gtk.FileDialog()
+        dialog.set_title("Select .dat files directory")
+        if self._dat_dir.exists():
+            dialog.set_initial_folder(Gio.File.new_for_path(str(self._dat_dir)))
+        dialog.select_folder(self.get_active_window(), None, self._on_dat_dir_chosen)
+
+    def _on_dat_dir_chosen(self, dialog, result):
+        try:
+            gfile = dialog.select_folder_finish(result)
+        except GLib.Error:
+            return
+        path = Path(gfile.get_path())
+        self._dat_dir = path
+        self._dat_label.set_text(f"Dat Directory: {path}")
+        self._log(f"Dat directory changed to: {path}")
+        self._do_scan()
 
     def _do_browse_slop(self):
         """Open file chooser for .slop output path."""
@@ -1527,11 +1715,11 @@ class DatBakeApp(Gtk.Application):
         dialog.set_filters(filters)
         if SLOP_DIR.exists():
             dialog.set_initial_folder(Gio.File.new_for_path(str(SLOP_DIR)))
-        dialog.save(self.get_active_window(), None, self._on_browse_slop_done)
+        dialog.open(self.get_active_window(), None, self._on_browse_slop_done)
 
     def _on_browse_slop_done(self, dialog, result):
         try:
-            gfile = dialog.save_finish(result)
+            gfile = dialog.open_finish(result)
             path = gfile.get_path()
         except GLib.Error:
             return
@@ -1668,18 +1856,25 @@ class DatBakeApp(Gtk.Application):
         need_images = [j for j in self._jobs if j.prompt and not j.done] if gen_images else []
         need_depth = [j for j in self._jobs if j.done and j.image_bytes
                       and j.asset_type == ASSET_ROOM_IMAGE and not j.depth_bytes] if self._gen_depth else []
+        need_upscale = [j for j in self._jobs if j.done and j.image_bytes
+                       and j.asset_type == ASSET_ROOM_IMAGE
+                       and not getattr(j, '_upscaled', False)] if self._gen_upscale else []
         need_inpaint = [j for j in self._jobs if j.done and j.image_bytes
                         and j.asset_type == ASSET_ROOM_IMAGE and not j.inpaint_bytes] if self._gen_inpaint else []
 
         n_prompts = len(need_prompts)
         n_images = len(need_images)
+        n_upscale = len(need_upscale)
         n_depth = len(need_depth)
         n_inpaint_est = len(need_inpaint)
-        total_work = n_prompts + n_images + n_depth + n_inpaint_est
+        n_already_done = sum(1 for j in self._jobs if j.done)
+        n_total_jobs = len(self._jobs)
+        total_work = n_prompts + n_images + n_upscale + n_depth + n_inpaint_est
         work_done = 0
 
+        self._log(f"  Already done: {n_already_done}/{n_total_jobs}")
         self._log(f"  Plan: {n_prompts} prompts, {n_images} images, "
-                  f"{n_depth} depth maps, {n_inpaint_est} inpaint")
+                  f"{n_upscale} upscale, {n_depth} depth maps, {n_inpaint_est} inpaint")
 
         if total_work == 0:
             self._finish("Nothing to do — all phases complete or disabled")
@@ -1836,32 +2031,54 @@ class DatBakeApp(Gtk.Application):
                 except ImportError:
                     pass
 
-                load_kwargs = {"torch_dtype": dtype}
-                if has_flash:
-                    load_kwargs["attn_implementation"] = "flash_attention_2"
+                pipeline_type = model_cfg.get("pipeline", "flux")
 
-                try:
-                    from diffusers import FluxPipeline
-                    self._pipe = FluxPipeline.from_pretrained(
-                        model_cfg["repo"], **load_kwargs
-                    )
-                except Exception:
-                    from diffusers import DiffusionPipeline
-                    self._pipe = DiffusionPipeline.from_pretrained(
-                        model_cfg["repo"], **load_kwargs
-                    )
+                if pipeline_type == "sd15-lcm":
+                    # SD 1.5 + LCM-LoRA — lightweight, fast
+                    from diffusers import StableDiffusionPipeline, LCMScheduler
 
-                if has_flash:
-                    self._log(f"  Flash Attention 2 enabled")
+                    self._pipe = StableDiffusionPipeline.from_pretrained(
+                        model_cfg["repo"],
+                        torch_dtype=dtype,
+                        safety_checker=None,
+                    ).to(device)
+                    self._pipe.scheduler = LCMScheduler.from_config(
+                        self._pipe.scheduler.config)
+
+                    # Load LCM-LoRA for fast 4-step inference
+                    lora_id = model_cfg.get("lora", "latent-consistency/lcm-lora-sdv1-5")
+                    self._pipe.load_lora_weights(lora_id)
+                    self._pipe.fuse_lora()
+                    self._log(f"  {model_cfg['name']} loaded on {device} (SD 1.5 + LCM)")
+
                 else:
-                    self._log(f"  Using default attention (flash-attn not installed)")
+                    # FLUX pipeline
+                    load_kwargs = {"torch_dtype": dtype}
+                    if has_flash:
+                        load_kwargs["attn_implementation"] = "flash_attention_2"
 
-                if device == "cuda":
-                    self._pipe.enable_model_cpu_offload()
-                    self._log(f"  {model_cfg['name']} loaded with CPU offload")
-                else:
-                    self._pipe = self._pipe.to(device)
-                    self._log(f"  {model_cfg['name']} loaded on {device}")
+                    try:
+                        from diffusers import FluxPipeline
+                        self._pipe = FluxPipeline.from_pretrained(
+                            model_cfg["repo"], **load_kwargs
+                        )
+                    except Exception:
+                        from diffusers import DiffusionPipeline
+                        self._pipe = DiffusionPipeline.from_pretrained(
+                            model_cfg["repo"], **load_kwargs
+                        )
+
+                    if has_flash:
+                        self._log(f"  Flash Attention 2 enabled")
+                    else:
+                        self._log(f"  Using default attention (flash-attn not installed)")
+
+                    if device == "cuda":
+                        self._pipe.enable_model_cpu_offload()
+                        self._log(f"  {model_cfg['name']} loaded with CPU offload")
+                    else:
+                        self._pipe = self._pipe.to(device)
+                        self._log(f"  {model_cfg['name']} loaded on {device}")
 
                 current_model_key = model_key
 
@@ -1870,13 +2087,13 @@ class DatBakeApp(Gtk.Application):
 
             # Generate images for this model group
             n_group = len(group)
-            self._log(f"  Generating {n_group} images with {model_cfg['name']}")
+            self._log(f"  Generating {n_group} new images with {model_cfg['name']} ({n_already_done} already done)")
 
             for gi, (pi, ji, job) in enumerate(group):
                 if self._cancel:
                     break
 
-                self._set_current(f"[{model_cfg['name']}] {job.name} ({pi_global+1}/{n_ready})")
+                self._set_current(f"[{model_cfg['name']}] {job.name} ({n_already_done + pi_global+1}/{n_total_jobs})")
                 full_prompt = self._build_full_prompt(job)
 
                 try:
@@ -1893,23 +2110,40 @@ class DatBakeApp(Gtk.Application):
                             f"Image {_pi+1}/{_n}: {_name} (step {step+1}/{_s})")
                         return kwargs
 
+                    pipe_type = model_cfg.get("pipeline", "flux")
+                    gen_width = model_cfg.get("width", job.width)
+                    gen_height = model_cfg.get("height", job.height)
+
                     with torch.no_grad():
-                        image = self._pipe(
-                            prompt=full_prompt,
-                            width=job.width,
-                            height=job.height,
-                            num_inference_steps=steps,
-                            guidance_scale=model_cfg["guidance"],
-                            generator=generator,
-                            callback_on_step_end=_step_cb,
-                        ).images[0]
+                        if pipe_type == "sd15-lcm":
+                            image = self._pipe(
+                                prompt=full_prompt,
+                                negative_prompt=model_cfg.get("negative", ""),
+                                width=gen_width,
+                                height=gen_height,
+                                num_inference_steps=steps,
+                                guidance_scale=model_cfg["guidance"],
+                                generator=generator,
+                                callback_on_step_end=_step_cb,
+                            ).images[0]
+                        else:
+                            image = self._pipe(
+                                prompt=full_prompt,
+                                width=gen_width,
+                                height=gen_height,
+                                num_inference_steps=steps,
+                                guidance_scale=model_cfg["guidance"],
+                                generator=generator,
+                                callback_on_step_end=_step_cb,
+                            ).images[0]
 
                     buf = io.BytesIO()
                     image.save(buf, format="WebP", quality=90)
                     job.image_bytes = buf.getvalue()
                     job.done = True
                     generated += 1
-                    self._log(f"  [{pi_global+1}/{n_ready}] {job.name} ({len(job.image_bytes)/1024:.0f} KB)")
+                    self._log(f"  [{n_already_done + pi_global+1}/{n_total_jobs}] {job.name} ({len(job.image_bytes)/1024:.0f} KB)")
+                    self._set_preview(job.image_bytes, job.name)
 
                 except Exception as e:
                     job.error = str(e)
@@ -1925,33 +2159,172 @@ class DatBakeApp(Gtk.Application):
                 if generated > 0 and generated % 100 == 0 and self._chk_autosave.get_active():
                     self._autosave(generated)
 
-        # ── Phase 4: Depth maps (optional) ──
+        # ── Phase 4: Upscale rooms (optional, Real-ESRGAN 4x) ──
+        if self._gen_upscale and not self._cancel:
+            self._unload_pipe()
+            upscale_jobs = [j for j in self._jobs
+                           if j.done and j.image_bytes and j.asset_type == ASSET_ROOM_IMAGE
+                           and not getattr(j, '_upscaled', False)]
+            if upscale_jobs:
+                self._log(f"── Phase 4: Upscaling {len(upscale_jobs)} rooms (4x Real-ESRGAN) ──")
+                self._set_overall(work_done, total_work, "Phase 4: Upscale")
+                work_done = self._generate_upscale(upscale_jobs, work_done, total_work)
+            else:
+                self._log("── Phase 4: No rooms need upscaling ──")
+
+        # ── Phase 5: Depth maps (optional) ──
         if self._gen_depth and not self._cancel:
             self._unload_pipe()
             room_jobs = [j for j in self._jobs
                         if j.done and j.image_bytes and j.asset_type == ASSET_ROOM_IMAGE
                         and not j.depth_bytes]
-            self._log(f"── Phase 4: Generating {len(room_jobs)} depth maps ──")
-            self._set_overall(work_done, total_work, "Phase 4: Depth Maps")
+            self._log(f"── Phase 5: Generating {len(room_jobs)} depth maps ──")
+            self._set_overall(work_done, total_work, "Phase 5: Depth Maps")
             self._generate_depth_maps(room_jobs, work_done, total_work)
 
-        # ── Phase 5: Inpainting (optional, requires depth) ──
+        # ── Phase 6: Inpainting (optional, requires depth) ──
         if self._gen_inpaint and not self._cancel:
             inpaint_jobs = [j for j in self._jobs
                            if j.done and j.image_bytes and j.depth_bytes
                            and j.asset_type == ASSET_ROOM_IMAGE and not j.inpaint_bytes]
             if inpaint_jobs:
-                self._log(f"── Phase 5: Inpainting {len(inpaint_jobs)} rooms ──")
+                self._log(f"── Phase 6: Inpainting {len(inpaint_jobs)} rooms ──")
                 self._generate_inpaint(inpaint_jobs, work_done, total_work)
                 done_inpaint = sum(1 for j in inpaint_jobs if j.inpaint_bytes)
                 self._log(f"  Inpaint: {done_inpaint}/{len(inpaint_jobs)} generated")
             else:
-                self._log("── Phase 5: No rooms need inpainting (no depth maps?) ──")
+                self._log("── Phase 6: No rooms need inpainting (no depth maps?) ──")
 
         # ── Cleanup ──
         self._unload_pipe()
         status = "Cancelled" if self._cancel else "Complete"
         self._finish(f"{status}: {generated} generated, {errors} errors")
+
+    def _generate_upscale(self, jobs: list[DatBakeJob],
+                          work_done: int = 0, total_work: int = 0) -> int:
+        """Upscale room images 4x with Real-ESRGAN via spandrel (768x512 → 3072x2048)."""
+        import torch
+        import numpy as np
+        from PIL import Image
+
+        n_upscale = len(jobs)
+        self._log(f"  Loading Real-ESRGAN 4x+ model via spandrel...")
+        self._set_current("Loading upscale model...")
+
+        try:
+            import spandrel
+            from torch.hub import download_url_to_file
+
+            model_cache = Path.home() / ".cache" / "mudproxy" / "models"
+            model_cache.mkdir(parents=True, exist_ok=True)
+            model_path = model_cache / "RealESRGAN_x4plus.pth"
+            if not model_path.exists():
+                self._log("  Downloading RealESRGAN_x4plus.pth (64 MB)...")
+                download_url_to_file(
+                    "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth",
+                    str(model_path),
+                )
+
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            use_half = torch.cuda.is_available()
+            model_desc = spandrel.ModelLoader().load_from_file(str(model_path))
+            model = model_desc.eval().to(device)
+            if use_half:
+                model = model.half()
+            self._log(f"  Real-ESRGAN 4x+ loaded on {device} (scale={model_desc.scale})")
+        except Exception as e:
+            self._log(f"  Failed to load Real-ESRGAN: {e}")
+            return work_done
+
+        TILE = 512
+        TILE_PAD = 10
+        upscaled = 0
+
+        for pi, job in enumerate(jobs):
+            if self._cancel:
+                break
+            self._set_current(f"Upscale: {job.name} ({pi+1}/{n_upscale})")
+            self._set_phase(pi, n_upscale, f"Upscale {pi+1}/{n_upscale}")
+            self._set_overall(work_done + pi, total_work, "Phase 4: Upscale")
+
+            try:
+                img = Image.open(io.BytesIO(job.image_bytes)).convert("RGB")
+                w, h = img.size
+
+                # Skip already upscaled (> 1024 wide)
+                if w > 1024:
+                    self._log(f"  [{pi+1}/{n_upscale}] {job.name} already {w}x{h}, skipping")
+                    job._upscaled = True
+                    work_done += 1
+                    continue
+
+                # Convert to tensor [1, 3, H, W] in 0-1 range
+                img_np = np.array(img, dtype=np.float32) / 255.0
+                tensor = torch.from_numpy(img_np).permute(2, 0, 1).unsqueeze(0).to(device)
+                if use_half:
+                    tensor = tensor.half()
+
+                # Tiled inference to avoid OOM on large images
+                with torch.no_grad():
+                    _, _, ih, iw = tensor.shape
+                    scale = model_desc.scale
+                    out_h, out_w = ih * scale, iw * scale
+                    output = torch.empty((1, 3, out_h, out_w), dtype=tensor.dtype, device=device)
+
+                    for y in range(0, ih, TILE):
+                        for x in range(0, iw, TILE):
+                            # Input tile with padding
+                            x1 = max(0, x - TILE_PAD)
+                            y1 = max(0, y - TILE_PAD)
+                            x2 = min(iw, x + TILE + TILE_PAD)
+                            y2 = min(ih, y + TILE + TILE_PAD)
+                            tile_in = tensor[:, :, y1:y2, x1:x2]
+                            tile_out = model(tile_in)
+
+                            # Output coordinates (remove padding)
+                            ox1 = (x - x1) * scale
+                            oy1 = (y - y1) * scale
+                            ox2 = ox1 + min(TILE, iw - x) * scale
+                            oy2 = oy1 + min(TILE, ih - y) * scale
+                            # Destination
+                            dx1 = x * scale
+                            dy1 = y * scale
+                            dx2 = dx1 + min(TILE, iw - x) * scale
+                            dy2 = dy1 + min(TILE, ih - y) * scale
+                            output[:, :, dy1:dy2, dx1:dx2] = tile_out[:, :, oy1:oy2, ox1:ox2]
+
+                # Convert back to image
+                output = output.squeeze(0).clamp(0, 1).float().cpu()
+                out_np = (output.permute(1, 2, 0).numpy() * 255).astype(np.uint8)
+
+                buf = io.BytesIO()
+                Image.fromarray(out_np).save(buf, format="WebP", quality=90)
+                old_size = len(job.image_bytes)
+                job.image_bytes = buf.getvalue()
+                job._upscaled = True
+                upscaled += 1
+
+                oh, ow = out_np.shape[:2]
+                self._log(f"  [{pi+1}/{n_upscale}] {job.name} → {ow}x{oh} "
+                         f"({old_size//1024}K → {len(job.image_bytes)//1024}K)")
+                self._set_preview(job.image_bytes, f"{job.name} (upscaled)")
+
+            except Exception as e:
+                self._log(f"  [!] Upscale error for {job.name}: {e}")
+
+            work_done += 1
+
+            # Autosave every 50 upscales
+            if upscaled > 0 and upscaled % 50 == 0 and self._chk_autosave.get_active():
+                self._autosave(upscaled)
+
+        # Unload
+        del model, model_desc
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        self._log(f"  Upscale complete: {upscaled}/{n_upscale} rooms upscaled 4x")
+        return work_done
 
     def _generate_depth_maps(self, jobs: list[DatBakeJob],
                              work_done: int = 0, total_work: int = 0):
@@ -2003,6 +2376,7 @@ class DatBakeApp(Gtk.Application):
                 Image.fromarray(depth_8bit, mode="L").save(buf, format="PNG")
                 job.depth_bytes = buf.getvalue()
                 self._log(f"  [{pi+1}/{n_depth}] {job.name} depth OK ({len(job.depth_bytes)//1024}K)")
+                self._set_preview_text(f"Depth Map: {job.name}")
 
             except Exception as e:
                 self._log(f"  [!] Depth error for {job.name}: {e}")
@@ -2119,6 +2493,7 @@ class DatBakeApp(Gtk.Application):
                 result.save(buf, format="WebP", quality=90)
                 job.inpaint_bytes = buf.getvalue()
                 self._log(f"  [{pi+1}/{n_inpaint}] {job.name} inpaint OK ({len(job.inpaint_bytes)//1024}K)")
+                self._set_preview_text(f"Inpaint: {job.name}")
 
             except Exception as e:
                 self._log(f"  [!] Inpaint error for {job.name}: {e}")
@@ -2132,7 +2507,7 @@ class DatBakeApp(Gtk.Application):
         self._log(f"  LaMa unloaded")
 
     def _autosave(self, count: int):
-        """Autosave current progress to .slop file."""
+        """Autosave current progress to .slop file — includes ALL data."""
         user_path = None
         try:
             user_path = self._slop_entry.get_text().strip()
@@ -2151,23 +2526,7 @@ class DatBakeApp(Gtk.Application):
 
         slop_path.parent.mkdir(parents=True, exist_ok=True)
 
-        entries = {}
-        for job in self._jobs:
-            if job.done and job.image_bytes:
-                entries[job.key] = (job.asset_type, job.image_bytes)
-                if job.depth_bytes:
-                    entries[f"{job.key}_depth"] = (ASSET_DEPTH_MAP, job.depth_bytes)
-                if job.inpaint_bytes:
-                    entries[f"{job.key}_inpaint"] = (ASSET_INPAINT, job.inpaint_bytes)
-                if job.prompt:
-                    entries[f"{job.key}_prompt"] = (ASSET_PROMPT, job.prompt.encode("utf-8"))
-                if job.room_meta:
-                    entries[f"{job.key}_rmeta"] = (ASSET_METADATA, json.dumps(job.room_meta).encode("utf-8"))
-            elif job.prompt:
-                # Save prompt-only entries too so we don't lose them
-                entries[f"{job.key}_prompt"] = (ASSET_PROMPT, job.prompt.encode("utf-8"))
-                if job.room_meta:
-                    entries[f"{job.key}_rmeta"] = (ASSET_METADATA, json.dumps(job.room_meta).encode("utf-8"))
+        entries, _ = self._collect_all_entries(include_prompts=True)
 
         if not entries:
             return
@@ -2175,7 +2534,7 @@ class DatBakeApp(Gtk.Application):
         try:
             write_slop(slop_path, entries)
             size_mb = slop_path.stat().st_size / 1024 / 1024
-            self._log(f"  💾 Autosaved: {count} images → {slop_path.name} ({size_mb:.1f} MB)")
+            self._log(f"  Autosaved: {count} images, {len(entries)} total entries → {slop_path.name} ({size_mb:.1f} MB)")
         except Exception as e:
             self._log(f"  [!] Autosave failed: {e}")
 
@@ -2203,7 +2562,6 @@ class DatBakeApp(Gtk.Application):
 
         def _ui():
             self._start_btn.set_sensitive(True)
-            self._scan_btn.set_sensitive(True)
             self._cancel_btn.set_sensitive(False)
             has_results = any(j.done and j.image_bytes for j in self._jobs)
             self._save_btn.set_sensitive(has_results)
@@ -2213,15 +2571,18 @@ class DatBakeApp(Gtk.Application):
 def main():
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
-    if len(sys.argv) < 2:
-        print("Usage: python -m mudproxy.dat_bake /path/to/dat/files/")
-        print("  Directory should contain wccknms2.dat, wccitem2.dat, wccmp002.dat, etc.")
-        sys.exit(1)
+    DEFAULT_DAT_DIR = Path.home() / "Documents" / "majormud-dats" / "DAT Files V1.11p"
 
-    dat_dir = Path(sys.argv[1])
-    if not dat_dir.is_dir():
-        print(f"Error: {dat_dir} is not a directory")
-        sys.exit(1)
+    if len(sys.argv) >= 2:
+        dat_dir = Path(sys.argv[1])
+        if not dat_dir.is_dir():
+            print(f"Error: {dat_dir} is not a directory")
+            sys.exit(1)
+    elif DEFAULT_DAT_DIR.is_dir():
+        dat_dir = DEFAULT_DAT_DIR
+    else:
+        # No dat dir found — launch app anyway, it will prompt to choose
+        dat_dir = DEFAULT_DAT_DIR
 
     app = DatBakeApp(dat_dir)
     app.run([sys.argv[0]])

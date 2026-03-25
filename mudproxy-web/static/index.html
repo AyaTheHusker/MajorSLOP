@@ -33,6 +33,12 @@
                 <div class="bar mana-bar"><div class="bar-fill" id="mana-fill"></div><span class="bar-text" id="mana-text">0/0</span></div>
             </div>
             <button id="btn-char" onclick="charPanel.toggle()" title="Character & Inventory">Char</button>
+            <button id="btn-chat" onclick="chatPanel.toggle()" title="Chat Window">Chat</button>
+            <div class="ghost-box">
+                <span class="ghost-icon" title="Ghost Character Remote">👻</span>
+                <input id="ghost-input" type="text" placeholder="@where" spellcheck="false"
+                       title="Send remote command via ghost character">
+            </div>
             <button id="btn-connect" onclick="sendCommand('connect')">Connect</button>
             <button id="btn-disconnect" onclick="sendCommand('disconnect')">Disconnect</button>
         </div>
@@ -65,20 +71,35 @@
     </div>
 
     <!-- Scripts -->
-    <script src="/static/js/coin_renderer.js"></script>
-    <script src="/static/js/depth_parallax.js"></script>
-    <script src="/static/js/room_view.js"></script>
-    <script src="/static/js/combat_effects.js"></script>
-    <script src="/static/js/view_menu.js"></script>
-    <script src="/static/js/char_panel.js"></script>
-    <script src="/static/js/app.js"></script>
+    <script src="/static/js/coin_renderer.js?v=2"></script>
+    <script src="/static/js/depth_parallax.js?v=2"></script>
+    <script src="/static/js/room_view.js?v=2"></script>
+    <script src="/static/js/combat_effects.js?v=2"></script>
+    <script src="/static/js/view_menu.js?v=2"></script>
+    <script src="/static/js/char_panel.js?v=2"></script>
+    <script src="/static/js/chat_panel.js?v=2"></script>
+    <script src="/static/js/app.js?v=2"></script>
     <script>
         // Initialize
         const roomView = new RoomView(document.getElementById('room-canvas'));
         const combatFx = new CombatEffects(document.getElementById('combat-effects'));
         const viewMenu = new ViewMenu(roomView);
         const charPanel = new CharPanel();
+        const chatPanel = new ChatPanel((cmd, data) => sendCommand(cmd, data));
         roomView.applyAllSettings();
+
+        // Ghost character input
+        const ghostInput = document.getElementById('ghost-input');
+        const GHOST_NAME = localStorage.getItem('ghostName') || 'Yoder';
+        ghostInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                const cmd = ghostInput.value.trim();
+                if (cmd) {
+                    sendCommand('ghost', { name: GHOST_NAME, at_cmd: cmd });
+                    ghostInput.value = '';
+                }
+            }
+        });
     </script>
 </body>
 </html>

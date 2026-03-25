@@ -87,7 +87,7 @@ class CombatEffects {
     spawnShatter(targetEl) {
         if (!targetEl) return;
         const img = targetEl.querySelector('img');
-        if (!img || !img.complete) return;
+        if (!img || !img.complete || !img.naturalWidth) return;
 
         const rect = targetEl.getBoundingClientRect();
         const cols = 6, rows = 6;

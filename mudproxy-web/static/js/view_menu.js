@@ -15,6 +15,11 @@ class ViewMenu {
         // View menu
         this._addMenu(bar, 'View', [
             { type: 'toggle', label: '3D Mode', key: 'depth3d', default: true },
+            { type: 'toggle', label: 'Hi-Res Images', key: 'preferHires', default: true },
+            { type: 'submenu', label: 'Image Scaling', items: [
+                { type: 'radio', label: 'Fill (no black bars)', key: 'fillMode', value: 'fill' },
+                { type: 'radio', label: 'Fit (letterbox)', key: 'fillMode', value: 'fit' },
+            ]},
             { type: 'toggle', label: 'Scanlines', key: 'showScanlines', default: false },
             { type: 'toggle', label: 'Warp Zoom', key: 'showWarpZoom', default: false },
             { type: 'separator' },
@@ -82,14 +87,19 @@ class ViewMenu {
             ]},
             { type: 'separator' },
             { type: 'slider', label: 'Depth Scale', key: 'depthScale', min: 0, max: 0.5, step: 0.01 },
-            { type: 'slider', label: 'Intensity', key: 'cameraIntensity', min: 0, max: 0.2, step: 0.005 },
+            { type: 'slider', label: 'Intensity', key: 'cameraIntensity', min: 0, max: 0.5, step: 0.01 },
             { type: 'slider', label: 'Speed', key: 'cameraSpeed', min: 0, max: 2.0, step: 0.05 },
             { type: 'slider', label: 'Isometric', key: 'isometric', min: 0, max: 1.0, step: 0.05 },
             { type: 'slider', label: 'Steady', key: 'steady', min: 0, max: 1.0, step: 0.05 },
             { type: 'slider', label: 'Overscan', key: 'overscan', min: 0, max: 0.2, step: 0.01 },
-            { type: 'slider', label: 'Edge Fade Start', key: 'edgeFadeStart', min: 0, max: 0.3, step: 0.01 },
-            { type: 'slider', label: 'Edge Fade End', key: 'edgeFadeEnd', min: 0, max: 0.3, step: 0.01 },
             { type: 'slider', label: 'Depth Contrast', key: 'depthContrast', min: 0.1, max: 3.0, step: 0.1 },
+            { type: 'separator' },
+            { type: 'slider', label: 'Pan Speed', key: 'panSpeed', min: 0, max: 0.3, step: 0.01 },
+            { type: 'slider', label: 'Pan X', key: 'panAmountX', min: 0, max: 1.0, step: 0.05 },
+            { type: 'slider', label: 'Pan Y', key: 'panAmountY', min: 0, max: 1.0, step: 0.05 },
+            { type: 'separator' },
+            { type: 'slider', label: 'Vignette', key: 'vignetteAmount', min: 0, max: 1.0, step: 0.05 },
+            { type: 'slider', label: 'Vignette Size', key: 'vignetteFeather', min: 0.2, max: 1.5, step: 0.05 },
         ]);
     }
 

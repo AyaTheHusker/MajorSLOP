@@ -1,5 +1,5 @@
 // ── WebGL 2 Depth Parallax Renderer ──
-// Port of depth_parallax.comp Vulkan compute shader to WebGL fragment shader
+// Ported from Scurry's vk_depthcarousel.frag (DepthFlow-style two-stage ray march)
 
 const VERT_SHADER = `#version 300 es
 in vec2 a_pos;
@@ -26,127 +26,197 @@ uniform float u_cameraSpeed;
 uniform float u_isometric;
 uniform float u_steady;
 uniform float u_overscan;
-uniform float u_edgeFadeStart;
-uniform float u_edgeFadeEnd;
+uniform float u_panSpeed;
+uniform float u_panAmountX;
+uniform float u_panAmountY;
 uniform float u_depthContrast;
-uniform vec2 u_mouse;       // normalized mouse offset for interactive mode
-uniform float u_mouseActive; // 1.0 if mouse is controlling, 0.0 for auto
+uniform float u_vignetteAmount;
+uniform float u_vignetteFeather;
 
-vec2 mirrorRepeat(vec2 uv) {
-    vec2 m = mod(uv, 2.0);
-    return mix(m, 2.0 - m, step(1.0, m));
+// ============================================================================
+// Mirror wrapping (DepthFlow technique)
+// Triangle wave maps any UV coordinate to [0,1] with mirrored repeat.
+// Prevents accordion/tiling artifacts when parallax pushes UVs out of bounds.
+// ============================================================================
+float triangleWave(float x) {
+    return abs(mod(x, 2.0) - 1.0);
 }
 
-// Camera modes — compute (offsetX, offsetY) based on time
-vec2 cameraOffset(float mode, float t, float intensity) {
-    float s = t;
+vec2 mirrorUV(vec2 uv) {
+    return vec2(triangleWave(uv.x), triangleWave(uv.y));
+}
+
+// Sample color with mirror wrapping
+vec3 sampleColor(vec2 uv) {
+    return texture(u_color, mirrorUV(uv)).rgb;
+}
+
+// Sample depth with contrast and mirror wrapping
+float sampleDepth(vec2 uv) {
+    float d = texture(u_depth, mirrorUV(uv)).r;
+    return pow(d, max(u_depthContrast, 0.1));
+}
+
+// ============================================================================
+// DepthFlow-style two-stage ray march with isometric + steady camera
+//
+// Stage 1 (FORWARD): Coarse steps to quickly find where the ray enters the
+//   depth surface. Overshoots past the intersection.
+// Stage 2 (BACKWARD): Fine steps to refine the exact intersection point.
+//
+// depth map: 1 = foreground (close), 0 = background (far)
+// surface height = depthScale * depthValue
+// Ray walks from camera origin toward the image plane.
+//
+// Isometric: spreads ray origins across screen (parallel rays) to flatten
+//   perspective, reducing edge artifacts by design.
+// Steady: pins a depth layer so it doesn't move, reducing parallax at that depth.
+// ============================================================================
+vec2 depthFlowParallax(vec2 uv, vec2 offset, float height,
+                        float isoAmount, float steadyAmount, out float hitDepth) {
+    float probe   = 1.0 / 80.0;   // coarse forward step
+    float quality = 1.0 / 400.0;   // fine backward step
+
+    // The guaranteed safe distance before hitting any surface
+    float safe = 1.0 - height;
+
+    // Isometric: spread ray origins across screen (parallel rays)
+    vec2 screenPos = (uv - 0.5) * 2.0;
+    vec2 isoSpread = screenPos * isoAmount * height;
+
+    // Ray origin with isometric spread
+    vec3 origin = vec3(uv + offset + isoSpread, 0.0);
+
+    // Steady pivot: pin a depth layer so it doesn't move
+    vec2 steadyCorrection = offset * (1.0 / max(1.0 - steadyAmount, 0.01));
+    vec3 target = vec3(uv + steadyCorrection * steadyAmount, 1.0);
+
+    float walk = 0.0;
+    float depthVal = 0.0;
+    vec2 hitUV = uv;
+
+    // === Stage 1: Forward coarse march ===
+    for (int i = 0; i < 120; i++) {
+        if (walk > 1.0) break;
+        walk += probe;
+
+        vec3 point = mix(origin, target, mix(safe, 1.0, walk));
+        hitUV = point.xy;
+
+        depthVal = sampleDepth(hitUV);
+
+        float surface = height * depthVal;
+        float ceiling = 1.0 - point.z;
+
+        // Ray has entered the surface
+        if (ceiling < surface) break;
+    }
+
+    // === Stage 2: Backward fine refinement ===
+    for (int i = 0; i < 80; i++) {
+        walk -= quality;
+
+        vec3 point = mix(origin, target, mix(safe, 1.0, walk));
+        hitUV = point.xy;
+
+        depthVal = sampleDepth(hitUV);
+
+        float surface = height * depthVal;
+        float ceiling = 1.0 - point.z;
+
+        // Ray has exited the surface — we found the boundary
+        if (ceiling >= surface) break;
+    }
+
+    hitDepth = depthVal;
+    return hitUV;
+}
+
+// ============================================================================
+// Camera mode animation — DepthFlow-inspired camera presets
+// ============================================================================
+vec2 computeCameraOffset(float t, float intensity, float speed, float mode) {
+    float phase = t * speed;
+
     if (mode < 0.5) {
-        // Carousel
-        return vec2(sin(s) * intensity, cos(s) * intensity * 0.3);
+        // Carousel — gentle circular sway
+        return vec2(cos(phase) * intensity * 0.5, sin(phase) * intensity * 0.3);
     } else if (mode < 1.5) {
         // Horizontal
-        return vec2(sin(s) * intensity, 0.0);
+        return vec2(sin(phase) * intensity * 0.5, 0.0);
     } else if (mode < 2.5) {
         // Vertical
-        return vec2(0.0, sin(s) * intensity);
+        return vec2(0.0, sin(phase) * intensity * 0.5);
     } else if (mode < 3.5) {
         // Circle
-        return vec2(sin(s) * intensity, cos(s) * intensity);
+        return vec2(cos(phase) * intensity * 0.5, sin(phase) * intensity * 0.5);
     } else if (mode < 4.5) {
-        // Zoom (depth pulse)
-        return vec2(0.0, 0.0); // handled via depthScale modulation
+        // Zoom — offset is zero, height modulated in main
+        return vec2(0.0);
     } else if (mode < 5.5) {
-        // Dolly
-        return vec2(0.0, sin(s) * intensity * 0.5);
+        // Dolly — offset is zero, isometric modulated in main
+        return vec2(0.0);
     } else if (mode < 6.5) {
-        // Orbital
-        return vec2(sin(s) * intensity, sin(s * 0.7) * intensity * 0.5);
+        // Orbital — lateral offset + isometric oscillation
+        return vec2(sin(phase) * intensity * 0.5, 0.0);
     } else {
-        // Explore
-        return vec2(sin(s * 0.3) * intensity, cos(s * 0.5) * intensity * 0.4);
+        // Explore — slow multi-axis drift
+        return vec2(sin(phase * 0.3) * intensity * 0.4, cos(phase * 0.5) * intensity * 0.3);
     }
-}
-
-vec2 depthFlowParallax(vec2 uv, vec2 offset, float height, float isoAmt, float steadyAmt, out float hitDepth) {
-    // Two-stage ray march
-    float numCoarse = 60.0;
-    float numFine = 40.0;
-
-    vec2 totalOffset = offset * height;
-    vec2 stepCoarse = totalOffset / numCoarse;
-
-    vec2 currentUV = uv;
-    float currentDepth = 0.0;
-    float prevDepth = 0.0;
-
-    // Coarse pass
-    for (float i = 0.0; i < 60.0; i++) {
-        float sampledDepth = texture(u_depth, mirrorRepeat(currentUV)).r;
-        sampledDepth = pow(sampledDepth, max(u_depthContrast, 0.1));
-
-        if (currentDepth >= sampledDepth) {
-            // Refine
-            vec2 prevUV = currentUV + stepCoarse;
-            float stepFine = 1.0 / numFine;
-            for (float j = 0.0; j < 40.0; j++) {
-                float t = j * stepFine;
-                vec2 midUV = mix(prevUV, currentUV, t);
-                float midSample = texture(u_depth, mirrorRepeat(midUV)).r;
-                midSample = pow(midSample, max(u_depthContrast, 0.1));
-                float midDepth = mix(prevDepth, currentDepth, t);
-                if (midDepth >= midSample) {
-                    hitDepth = midSample;
-                    // Steady: pin to depth layer
-                    vec2 result = midUV;
-                    if (steadyAmt > 0.0) {
-                        result -= offset * midSample * steadyAmt;
-                    }
-                    return result;
-                }
-            }
-            hitDepth = sampledDepth;
-            return currentUV;
-        }
-
-        prevDepth = currentDepth;
-        currentUV -= stepCoarse;
-        currentDepth += 1.0 / numCoarse;
-    }
-
-    hitDepth = 0.0;
-    return currentUV;
 }
 
 void main() {
-    vec2 uv = v_uv;
+    vec2 uv = vec2(v_uv.x, 1.0 - v_uv.y);
 
-    // Overscan zoom
-    if (u_overscan > 0.0) {
-        float scale = 1.0 + u_overscan;
-        uv = (uv - 0.5) / scale + 0.5;
+    // === Overscan: zoom into center, extra pixels at edges for panning ===
+    float scale = 1.0 / (1.0 + u_overscan * 2.0);
+
+    // Pan offset within overscan margin using circular loop
+    float panT = u_time * u_panSpeed;
+    vec2 panOffset = vec2(sin(panT), cos(panT)) * vec2(u_panAmountX, u_panAmountY) * u_overscan;
+
+    // Apply overscan crop + pan
+    uv = (uv - 0.5) * scale + 0.5 + panOffset;
+
+    float effectiveDepthScale = u_depthScale;
+    float effectiveIso = u_isometric;
+    float camPhase = u_time * u_cameraSpeed;
+
+    // Zoom mode: modulate depth scale
+    if (u_cameraMode > 3.5 && u_cameraMode < 4.5) {
+        effectiveDepthScale += sin(camPhase) * u_cameraIntensity * 0.5 * u_depthScale;
+    }
+    // Dolly mode: modulate isometric
+    if (u_cameraMode > 4.5 && u_cameraMode < 5.5) {
+        effectiveIso += sin(camPhase) * u_cameraIntensity * 0.5;
+        effectiveIso = clamp(effectiveIso, 0.0, 1.0);
+    }
+    // Orbital mode: oscillate isometric alongside lateral offset
+    if (u_cameraMode > 5.5 && u_cameraMode < 6.5) {
+        effectiveIso += cos(camPhase) * u_cameraIntensity * 0.3;
+        effectiveIso = clamp(effectiveIso, 0.0, 1.0);
     }
 
-    // Camera offset
-    vec2 offset;
-    if (u_mouseActive > 0.5) {
-        offset = u_mouse * u_cameraIntensity;
-    } else {
-        offset = cameraOffset(u_cameraMode, u_time * u_cameraSpeed, u_cameraIntensity);
+    // Camera offset from mode animation (passed directly like DepthFlow)
+    vec2 cameraOffset = computeCameraOffset(u_time, u_cameraIntensity, u_cameraSpeed, u_cameraMode);
+
+    // === Two-stage parallax ray march (DepthFlow style) ===
+    float hitDepth = 0.0;
+    vec2 finalUV = depthFlowParallax(uv, cameraOffset, effectiveDepthScale,
+                                      effectiveIso, u_steady, hitDepth);
+
+    // === Sample color (mirror wrapping handles edges, like DepthFlow) ===
+    vec3 color = sampleColor(finalUV);
+
+    // === Vignette (edges/corners only, off by default) ===
+    if (u_vignetteAmount > 0.001) {
+        vec2 away = v_uv * (1.0 - v_uv);
+        float linear = 10.0 * (away.x * away.y);
+        float vig = clamp(pow(linear, u_vignetteFeather), 0.0, 1.0);
+        color *= mix(1.0, vig, u_vignetteAmount);
     }
 
-    // Depth parallax
-    float hitDepth;
-    vec2 parallaxUV = depthFlowParallax(uv, offset, u_depthScale, u_isometric, u_steady, hitDepth);
-
-    // Sample color
-    vec4 color = texture(u_color, mirrorRepeat(parallaxUV));
-
-    // Edge fade
-    vec2 edgeDist = min(parallaxUV, 1.0 - parallaxUV);
-    float edgeFade = smoothstep(u_edgeFadeEnd, u_edgeFadeStart, min(edgeDist.x, edgeDist.y));
-    color.rgb *= edgeFade;
-
-    fragColor = color;
+    fragColor = vec4(color, 1.0);
 }`;
 
 class DepthParallax {
@@ -164,25 +234,26 @@ class DepthParallax {
         this.uniforms = {};
         this.animating = false;
         this.startTime = performance.now() / 1000;
-        this.mouseX = 0;
-        this.mouseY = 0;
-        this.mouseActive = false;
         this.hasDepth = false;
+        this.imageAspect = 3 / 2; // default 3:2 until image loads
+        this.fillMode = 'fill'; // 'fit' = letterbox, 'fill' = cover (no black bars)
 
-        // Parallax settings
-        this.depthScale = 0.15;
+        // Parallax settings (defaults match DepthFlow)
+        this.depthScale = 0.20;
         this.cameraMode = 0; // carousel
-        this.cameraIntensity = 0.03;
+        this.cameraIntensity = 0.20;
         this.cameraSpeed = 0.4;
         this.isometric = 0.0;
-        this.steady = 0.5;
-        this.overscan = 0.05;
-        this.edgeFadeStart = 0.05;
-        this.edgeFadeEnd = 0.0;
+        this.steady = 0.3;
+        this.overscan = 0.06;
+        this.panSpeed = 0.05;
+        this.panAmountX = 0.3;
+        this.panAmountY = 0.2;
         this.depthContrast = 1.0;
+        this.vignetteAmount = 0.0;
+        this.vignetteFeather = 0.5;
 
         this._init();
-        this._setupMouse();
     }
 
     _init() {
@@ -217,8 +288,9 @@ class DepthParallax {
             'u_color', 'u_depth', 'u_time', 'u_resolution',
             'u_depthScale', 'u_cameraMode', 'u_cameraIntensity', 'u_cameraSpeed',
             'u_isometric', 'u_steady', 'u_overscan',
-            'u_edgeFadeStart', 'u_edgeFadeEnd', 'u_depthContrast',
-            'u_mouse', 'u_mouseActive',
+            'u_panSpeed', 'u_panAmountX', 'u_panAmountY',
+            'u_depthContrast',
+            'u_vignetteAmount', 'u_vignetteFeather',
         ]) {
             this.uniforms[name] = gl.getUniformLocation(this.program, name);
         }
@@ -256,26 +328,17 @@ class DepthParallax {
         return tex;
     }
 
-    _setupMouse() {
-        this.canvas.addEventListener('mousemove', (e) => {
-            const rect = this.canvas.getBoundingClientRect();
-            this.mouseX = ((e.clientX - rect.left) / rect.width - 0.5) * 2;
-            this.mouseY = ((e.clientY - rect.top) / rect.height - 0.5) * -2;
-            this.mouseActive = true;
-        });
-        this.canvas.addEventListener('mouseleave', () => {
-            this.mouseActive = false;
-        });
-    }
-
     loadImage(url) {
         return new Promise((resolve) => {
             const img = new Image();
             img.crossOrigin = 'anonymous';
             img.onload = () => {
                 const gl = this.gl;
+                this.imageAspect = img.naturalWidth / img.naturalHeight;
+                gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
                 gl.bindTexture(gl.TEXTURE_2D, this.colorTex);
                 gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, img);
+                gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
                 this.hasDepth = false;
                 resolve(true);
             };
@@ -290,8 +353,10 @@ class DepthParallax {
             img.crossOrigin = 'anonymous';
             img.onload = () => {
                 const gl = this.gl;
+                gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
                 gl.bindTexture(gl.TEXTURE_2D, this.depthTex);
                 gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, img);
+                gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
                 this.hasDepth = true;
                 resolve(true);
             };
@@ -310,17 +375,61 @@ class DepthParallax {
         this.animating = false;
     }
 
+    clearDepth() {
+        if (!this.gl) return;
+        const gl = this.gl;
+        gl.bindTexture(gl.TEXTURE_2D, this.depthTex);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([0,0,0,255]));
+        this.hasDepth = false;
+    }
+
     _render() {
         if (!this.animating || !this.gl) return;
 
         const gl = this.gl;
-        const w = this.canvas.clientWidth;
-        const h = this.canvas.clientHeight;
+        const parentW = window.innerWidth;
+        const parentH = window.innerHeight;
 
-        if (this.canvas.width !== w || this.canvas.height !== h) {
-            this.canvas.width = w;
-            this.canvas.height = h;
-            gl.viewport(0, 0, w, h);
+        // Scale canvas to image aspect ratio
+        const aspect = this.imageAspect || (3 / 2);
+        let w, h;
+        if (this.fillMode === 'fill') {
+            // Cover: scale up to fill viewport, crop overflow (no black bars)
+            if (parentW / parentH > aspect) {
+                w = parentW;
+                h = Math.round(w / aspect);
+            } else {
+                h = parentH;
+                w = Math.round(h * aspect);
+            }
+        } else {
+            // Fit: letterbox/pillarbox (no crop, black bars)
+            if (parentW / parentH > aspect) {
+                h = parentH;
+                w = Math.round(h * aspect);
+            } else {
+                w = parentW;
+                h = Math.round(w / aspect);
+            }
+        }
+
+        // Size and center the canvas
+        if (this.canvas.style.width !== w + 'px' || this.canvas.style.height !== h + 'px') {
+            this.canvas.style.width = w + 'px';
+            this.canvas.style.height = h + 'px';
+            this.canvas.style.position = 'absolute';
+            this.canvas.style.left = Math.round((parentW - w) / 2) + 'px';
+            this.canvas.style.top = Math.round((parentH - h) / 2) + 'px';
+        }
+
+        // Set backing buffer to match CSS size for sharp rendering
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        const bufW = Math.round(w * dpr);
+        const bufH = Math.round(h * dpr);
+        if (this.canvas.width !== bufW || this.canvas.height !== bufH) {
+            this.canvas.width = bufW;
+            this.canvas.height = bufH;
+            gl.viewport(0, 0, bufW, bufH);
         }
 
         gl.useProgram(this.program);
@@ -335,11 +444,12 @@ class DepthParallax {
         gl.uniform1f(this.uniforms.u_isometric, this.isometric);
         gl.uniform1f(this.uniforms.u_steady, this.steady);
         gl.uniform1f(this.uniforms.u_overscan, this.overscan);
-        gl.uniform1f(this.uniforms.u_edgeFadeStart, this.edgeFadeStart);
-        gl.uniform1f(this.uniforms.u_edgeFadeEnd, this.edgeFadeEnd);
+        gl.uniform1f(this.uniforms.u_panSpeed, this.panSpeed);
+        gl.uniform1f(this.uniforms.u_panAmountX, this.panAmountX);
+        gl.uniform1f(this.uniforms.u_panAmountY, this.panAmountY);
         gl.uniform1f(this.uniforms.u_depthContrast, this.depthContrast);
-        gl.uniform2f(this.uniforms.u_mouse, this.mouseX, this.mouseY);
-        gl.uniform1f(this.uniforms.u_mouseActive, this.mouseActive ? 1.0 : 0.0);
+        gl.uniform1f(this.uniforms.u_vignetteAmount, this.vignetteAmount);
+        gl.uniform1f(this.uniforms.u_vignetteFeather, this.vignetteFeather);
 
         gl.activeTexture(gl.TEXTURE0);
         gl.bindTexture(gl.TEXTURE_2D, this.colorTex);

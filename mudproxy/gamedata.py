@@ -14,7 +14,8 @@ GAMEDATA_DIR = Path.home() / ".cache" / "mudproxy" / "gamedata"
 # MajorMUD random spawn prefixes — only these are applied by the server
 # at spawn time and won't appear in the monster database
 _CREATURE_PREFIXES = {
-    "large", "small", "big", "short", "fat", "fierce", "nasty", "thin", "angry", "happy",
+    "large", "small", "big", "short", "tall", "fat", "fierce", "nasty", "thin",
+    "angry", "happy", "old",
 }
 
 
@@ -206,6 +207,11 @@ class GameData:
         m = self.get_monster(name)
         return m.get("HPRegen", 0) if m else 0
 
+    # Monster type IDs from MajorMUD
+    MONSTER_TYPES = {
+        0: "Normal", 1: "Humanoid", 2: "Humanoid", 3: "Unique/Boss",
+    }
+
     def get_monster_stats(self, name: str) -> dict | None:
         """Get a summary of monster combat stats for display."""
         m = self.get_monster(name)
@@ -218,10 +224,13 @@ class GameData:
             "ac": m["ArmourClass"],
             "dr": m["DamageResist"],
             "mr": m["MagicRes"],
-            "dodge": m.get("BSDefense", 0),
+            "bs_def": m.get("BSDefense", 0),
+            "cash": {k: m.get(f"Cash{k}", 0) for k in "RPGSC"},
             "regen": m.get("HPRegen", 0),
+            "regen_time": m.get("RegenTime", 0),
             "undead": bool(m.get("Undead", 0)),
             "align": m.get("Align", 0),
+            "mob_type": self.MONSTER_TYPES.get(m.get("Type", 0), ""),
             "follow_pct": m.get("Follow%", 0),
             "energy": m.get("Energy", 0),
             "avg_dmg": m.get("AvgDmg", 0),
@@ -230,7 +239,7 @@ class GameData:
 
     def get_monster_drops(self, name: str) -> list[dict]:
         """Get monster drop table with item names resolved.
-        Returns [{name, chance, item_num}, ...]"""
+        Returns [{name, chance, item_num, key}, ...]"""
         m = self.get_monster(name)
         if not m:
             return []
@@ -242,7 +251,12 @@ class GameData:
                 continue
             item = self._items.get(item_num)
             item_name = item["Name"] if item else f"Item #{item_num}"
-            drops.append({"name": item_name, "chance": chance, "item_num": item_num})
+            drops.append({
+                "name": item_name,
+                "chance": chance,
+                "item_num": item_num,
+                "key": item_name.strip().lower(),
+            })
         return drops
 
     # ── Item lookups ──
@@ -272,6 +286,24 @@ class GameData:
         """Get room name by map/room number."""
         room = self.get_room(map_num, room_num)
         return room["Name"] if room else None
+
+    # ── Shop lookups ──
+
+    def get_shop_name(self, num: int) -> str | None:
+        """Get shop name by number."""
+        shop = self._shops.get(num)
+        return shop["Name"] if shop else None
+
+    def resolve_shop_names(self, obtained_from: str) -> str:
+        """Replace 'Shop #N' and 'Shop(sell) #N' with resolved names."""
+        import re
+        def _replace(m):
+            num = int(m.group(2))
+            name = self.get_shop_name(num)
+            if name:
+                return f"{m.group(0)} ({name})"
+            return m.group(0)
+        return re.sub(r'Shop(\([^)]*\))?\s*#(\d+)', _replace, obtained_from)
 
     # ── Spell lookups ──
 
