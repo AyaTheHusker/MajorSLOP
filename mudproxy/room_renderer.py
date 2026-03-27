@@ -18,7 +18,8 @@ from typing import Optional, Callable
 
 logger = logging.getLogger(__name__)
 
-CACHE_DIR = Path.home() / ".cache" / "mudproxy" / "room"
+from .paths import default_cache_dir
+CACHE_DIR = default_cache_dir() / "room"
 
 # Model paths (HF cache)
 FLUX_KLEIN_4B = "black-forest-labs/FLUX.2-klein-4B"

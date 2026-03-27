@@ -48,7 +48,7 @@ def main():
     config = Config.load()
 
     # Resolve dat directory
-    dat_dir = Path(args.dat_dir) if args.dat_dir else Path.home() / "Megamud"
+    dat_dir = Path(args.dat_dir) if args.dat_dir else config.get_dat_dir()
 
     # Initialize components
     event_bus = EventBus()

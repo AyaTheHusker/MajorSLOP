@@ -1,42 +1,38 @@
 """FastAPI server — HTTP routes + WebSocket endpoint."""
 import asyncio
+import hashlib
 import json
 import logging
+import re
 import subprocess
 from pathlib import Path
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, Form
 from fastapi.responses import Response, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from event_bus import EventBus
 from slop_loader import SlopLoader
 from orchestrator import Orchestrator
+from mudproxy.paths import mdb_search_paths, slop_search_paths
 
 logger = logging.getLogger(__name__)
 
-# Known locations to scan for MDB files
-_MDB_SEARCH_PATHS = [
-    Path.home() / ".wine" / "drive_c" / "Program Files (x86)" / "MMUD Explorer",
-    Path.home() / ".wine" / "drive_c" / "Program Files" / "MMUD Explorer",
-    Path.home() / "Downloads",
-    Path.home() / "Megamud",
-    Path.home(),
-]
+_MDB_SEARCH_PATHS = mdb_search_paths()
+_SLOP_SEARCH_PATHS = slop_search_paths()
 
-# Known locations for SLOP files
-_SLOP_SEARCH_PATHS = [
-    Path.home() / ".local" / "share" / "mudproxy" / "slop",
-    Path.home() / ".cache" / "mudproxy" / "slop",
-    Path.home() / "Downloads",
-    Path.home(),
-]
+def _get_static_dir() -> Path:
+    """Resolve static dir — works both normally and inside PyInstaller bundle."""
+    import sys
+    if getattr(sys, '_MEIPASS', None):
+        return Path(sys._MEIPASS) / "static"
+    return Path(__file__).parent / "static"
 
-STATIC_DIR = Path(__file__).parent / "static"
+STATIC_DIR = _get_static_dir()
 
 
 def create_app(orchestrator: Orchestrator, event_bus: EventBus, slop: SlopLoader) -> FastAPI:
-    app = FastAPI(title="MudProxy Web")
+    app = FastAPI(title="MajorSLOP!")
 
     @app.on_event("startup")
     async def startup():
@@ -55,10 +51,23 @@ def create_app(orchestrator: Orchestrator, event_bus: EventBus, slop: SlopLoader
                 del response.headers["ETag"]
         return response
 
+    def _cache_bust_html(html: str) -> str:
+        """Replace ?v=N query strings on /static/ URLs with content hashes."""
+        def _hash_asset(m):
+            url_path = m.group(1)       # e.g. /static/js/nav_panel.js
+            rel = url_path.split("/static/", 1)[-1]  # js/nav_panel.js
+            full = STATIC_DIR / rel
+            if full.exists():
+                h = hashlib.md5(full.read_bytes()).hexdigest()[:10]
+                return f'{url_path}?h={h}'
+            return m.group(0)
+        return re.sub(r'(/static/[^\s"\'?]+)(?:\?[^\s"\']*)?', _hash_asset, html)
+
     @app.get("/", response_class=HTMLResponse)
     async def index():
         index_path = STATIC_DIR / "index.html"
-        return index_path.read_text()
+        html = index_path.read_text()
+        return _cache_bust_html(html)
 
     # ── WebSocket ──
 
@@ -94,13 +103,34 @@ def create_app(orchestrator: Orchestrator, event_bus: EventBus, slop: SlopLoader
             await orch.disconnect()
         elif cmd == "inject":
             text = data.get("text", "")
-            if text:
+            if text is not None:
                 await orch.inject_command(text)
+        elif cmd == "raw_input":
+            # Raw bytes from terminal (arrow keys, escape sequences, etc.)
+            raw = data.get("data", "")
+            if raw:
+                await orch.inject_raw(raw.encode('latin-1', errors='replace'))
         elif cmd == "ghost":
             ghost_name = data.get("name", "")
             at_cmd = data.get("at_cmd", "")
             if ghost_name and at_cmd:
                 await orch.ghost_command(ghost_name, at_cmd)
+        elif cmd == "silent_pro":
+            await orch.proxy.inject_silent_pro()
+        elif cmd == "set_pro_mode":
+            mode = data.get("mode", "silent")
+            if mode in ("silent", "loud", "off"):
+                orch.pro_mode = mode
+                await event_bus.broadcast("pro_mode", {"mode": mode})
+                if hasattr(orch, 'on_pro_mode_changed') and orch.on_pro_mode_changed:
+                    orch.on_pro_mode_changed(mode)
+        elif cmd == "toggle_ambient_filter":
+            orch.ambient_filter_enabled = not orch.ambient_filter_enabled
+            await event_bus.broadcast("ambient_filter", {
+                "enabled": orch.ambient_filter_enabled
+            })
+            if hasattr(orch, 'on_ambient_filter_changed') and orch.on_ambient_filter_changed:
+                orch.on_ambient_filter_changed(orch.ambient_filter_enabled)
         elif cmd == "get_state":
             # Re-send full state
             state = orch.get_state()
@@ -404,5 +434,201 @@ def create_app(orchestrator: Orchestrator, event_bus: EventBus, slop: SlopLoader
             "entries": count,
             "stats": slop.get_stats(),
         })
+
+    # ── Character Portrait API ──
+
+    def _portrait_dir() -> Path:
+        d = orchestrator.gamedata._data_dir / "portraits"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    @app.post("/api/portrait/upload")
+    async def upload_portrait(file: UploadFile = File(...), char_name: str = Form(...)):
+        """Upload a character portrait image. Saved as <char_name>.webp."""
+        import re
+        safe_name = re.sub(r'[^a-zA-Z0-9_-]', '_', char_name.strip().lower())
+        if not safe_name:
+            return JSONResponse({"error": "Invalid character name"}, status_code=400)
+
+        data = await file.read()
+        if len(data) > 10 * 1024 * 1024:  # 10MB limit
+            return JSONResponse({"error": "File too large (10MB max)"}, status_code=400)
+
+        # Save as-is (browser can handle any image format)
+        # Detect format from content
+        ext = "png"
+        if data[:4] == b'RIFF':
+            ext = "webp"
+        elif data[:3] == b'\xff\xd8\xff':
+            ext = "jpg"
+        elif data[:8] == b'\x89PNG\r\n\x1a\n':
+            ext = "png"
+
+        dest = _portrait_dir() / f"{safe_name}.{ext}"
+        # Remove any old portraits for this character
+        for old in _portrait_dir().glob(f"{safe_name}.*"):
+            old.unlink()
+        dest.write_bytes(data)
+        logger.info(f"Portrait saved: {dest}")
+        return JSONResponse({"ok": True, "path": str(dest)})
+
+    @app.get("/api/portrait/{char_name}")
+    async def get_portrait(char_name: str):
+        """Serve a character portrait by name."""
+        import re
+        safe_name = re.sub(r'[^a-zA-Z0-9_-]', '_', char_name.strip().lower())
+        d = _portrait_dir()
+        for ext in ("webp", "png", "jpg", "jpeg", "gif"):
+            p = d / f"{safe_name}.{ext}"
+            if p.exists():
+                ct = {"webp": "image/webp", "png": "image/png", "jpg": "image/jpeg",
+                      "jpeg": "image/jpeg", "gif": "image/gif"}
+                return Response(content=p.read_bytes(), media_type=ct.get(ext, "image/png"),
+                                headers={"Cache-Control": "no-cache"})
+        return Response(status_code=404)
+
+    # ── MegaMud Navigation API ──
+
+    # Cache for parsed megamud nav data
+    _nav_cache = {"data": None, "mtimes": {}}
+
+    def _megamud_source_files() -> dict[str, Path]:
+        """Find MegaMud source files (Rooms.md, .mp loops/paths)."""
+        import os, platform
+        # Under Wine: C:\MegaMUD; on Linux natively: ~/.wine/drive_c/MegaMUD
+        if platform.system() == "Windows":
+            mm_dir = Path("C:/MegaMUD")
+            loops_dir = Path(os.path.expanduser("~/Documents/Loops"))
+        else:
+            mm_dir = Path(os.path.expanduser("~/.wine/drive_c/MegaMUD"))
+            loops_dir = Path(os.path.expanduser("~/.wine/drive_c/users/bucka/Documents/Loops"))
+        sources = {}
+        for rooms_file in [mm_dir / "Default" / "Rooms.md", mm_dir / "Chars" / "All" / "Rooms.md"]:
+            if rooms_file.exists():
+                sources[str(rooms_file)] = rooms_file
+        for d in [mm_dir / "Default", loops_dir]:
+            if d.exists():
+                for mp in d.glob("*.mp"):
+                    sources[str(mp)] = mp
+        return sources
+
+    def _check_nav_stale() -> bool:
+        """Check if any MegaMud source files changed since last parse."""
+        sources = _megamud_source_files()
+        if not sources:
+            return False
+        if _nav_cache["data"] is None:
+            return True
+        for path_str, path in sources.items():
+            try:
+                mtime = path.stat().st_mtime
+            except OSError:
+                continue
+            if path_str not in _nav_cache["mtimes"] or _nav_cache["mtimes"][path_str] != mtime:
+                return True
+        # Also check if files were removed
+        if set(_nav_cache["mtimes"].keys()) != set(sources.keys()):
+            return True
+        return False
+
+    def _rebuild_nav():
+        """Re-parse MegaMud files and update cache."""
+        import sys, os, platform
+        sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
+        from parse_megamud_rooms import parse_rooms_md, scan_mp_files, parse_loops
+
+        if platform.system() == "Windows":
+            mm_dir = Path("C:/MegaMUD")
+            loops_dir = Path(os.path.expanduser("~/Documents/Loops"))
+        else:
+            mm_dir = Path(os.path.expanduser("~/.wine/drive_c/MegaMUD"))
+            loops_dir = Path(os.path.expanduser("~/.wine/drive_c/users/bucka/Documents/Loops"))
+
+        # Parse rooms
+        all_rooms = parse_rooms_md(mm_dir / "Default" / "Rooms.md")
+        char_rooms = parse_rooms_md(mm_dir / "Chars" / "All" / "Rooms.md")
+        by_code = {r["code"]: r for r in all_rooms}
+        for r in char_rooms:
+            by_code[r["code"]] = r
+        all_rooms = list(by_code.values())
+
+        categories = {}
+        hidden = []
+        for r in all_rooms:
+            if r["flags"] & 0x10:
+                hidden.append(r)
+                continue
+            cat = r["category"] or "Uncategorized"
+            if cat not in categories:
+                categories[cat] = []
+            categories[cat].append({"code": r["code"], "name": r["name"], "flags": r["flags"]})
+        for cat in categories:
+            categories[cat].sort(key=lambda x: x["name"])
+
+        # Parse loops and paths
+        default_loops, default_paths = scan_mp_files(mm_dir / "Default")
+        user_loops = parse_loops(loops_dir)
+        loop_by_file = {l["file"]: l for l in default_loops}
+        for l in user_loops:
+            loop_by_file[l["file"]] = l
+        all_loops = sorted(loop_by_file.values(), key=lambda x: x.get("start_category", "") + x.get("name", ""))
+
+        loop_categories = {}
+        for l in all_loops:
+            cat = l.get("start_category") or "Uncategorized"
+            if cat not in loop_categories:
+                loop_categories[cat] = []
+            loop_categories[cat].append(l)
+
+        all_paths = sorted(default_paths, key=lambda x: x.get("start_category", "") + x.get("name", ""))
+        path_categories = {}
+        for p in all_paths:
+            cat = p.get("start_category") or "Uncategorized"
+            if cat not in path_categories:
+                path_categories[cat] = []
+            path_categories[cat].append(p)
+
+        data = {
+            "rooms": dict(sorted(categories.items())),
+            "hidden_rooms": [{"code": r["code"], "category": r["category"], "name": r["name"]} for r in hidden],
+            "loops": dict(sorted(loop_categories.items())),
+            "paths": dict(sorted(path_categories.items())),
+            "stats": {
+                "total_rooms": len(all_rooms),
+                "visible_rooms": sum(len(v) for v in categories.values()),
+                "hidden_rooms": len(hidden),
+                "categories": len(categories),
+                "loops": len(all_loops),
+                "paths": len(all_paths),
+            },
+        }
+
+        # Update cache with current mtimes
+        sources = _megamud_source_files()
+        mtimes = {}
+        for path_str, path in sources.items():
+            try:
+                mtimes[path_str] = path.stat().st_mtime
+            except OSError:
+                pass
+        _nav_cache["data"] = data
+        _nav_cache["mtimes"] = mtimes
+
+        logger.info(f"MegaMud nav rebuilt: {data['stats']['visible_rooms']} rooms, "
+                     f"{data['stats']['loops']} loops, {data['stats']['paths']} paths")
+        return data
+
+    @app.get("/api/megamud/nav")
+    async def megamud_nav():
+        """Serve parsed MegaMud rooms, loops, and paths. Auto-rebuilds when source files change."""
+        try:
+            if _check_nav_stale():
+                _rebuild_nav()
+            if _nav_cache["data"] is None:
+                return JSONResponse({"error": "No MegaMud files found"}, status_code=404)
+            return JSONResponse(_nav_cache["data"])
+        except Exception as e:
+            logger.exception("Failed to load MegaMud nav data")
+            return JSONResponse({"error": str(e)}, status_code=500)
 
     return app

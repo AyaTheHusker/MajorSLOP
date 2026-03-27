@@ -53,6 +53,11 @@ class MudProxy:
         self.on_client_command: Optional[Callable[[str], None]] = None
         # Filter active callback: returns True only when filtering is needed
         self.filter_active: Optional[Callable[[], bool]] = None
+        # Silent pro suppression — hides proxy-injected pro output from MegaMud
+        self._suppressing_pro = False
+        self._pro_suppress_buf = b''  # raw bytes buffer during pro suppression
+        # Web terminal pro filtering — hides pro output from web terminal only
+        self._web_hiding_pro = False
 
         # Auto-login state
         self._auto_login_active = False
@@ -149,50 +154,64 @@ class MudProxy:
             await self.server_writer.drain()
             logger.info(f"Injected: {command}")
 
-    async def inject_to_client(self, text: str) -> None:
-        """Inject fake server text into what MegaMud sees (sent to client).
-        Queues the text to prepend to the next server data chunk.
-        Falls back to direct send after 500ms if no server data arrives."""
-        self._ghost_inject_queue = getattr(self, '_ghost_inject_queue', [])
-        self._ghost_inject_queue.append(text)
-        logger.info(f"Ghost queued: {text}")
-
-        # Fallback: if no server data flushes the queue within 500ms, send directly
-        import asyncio
-        async def _fallback_flush():
-            await asyncio.sleep(0.5)
-            queue = getattr(self, '_ghost_inject_queue', [])
-            if not queue or not self.client_writer or self.client_writer.is_closing():
-                return
-            for t in queue:
-                self.client_writer.write((self._BBS_LINE_CLEAR + t + '\r\n').encode('cp437', errors='replace'))
-                logger.info(f"Ghost fallback inject: {t}")
-            self._ghost_inject_queue.clear()
+    async def inject_silent_pro(self) -> None:
+        """Inject 'pro' and suppress its output from reaching MegaMud.
+        Sets suppression flag synchronously, then sends the command."""
+        if self._suppressing_pro:
+            logger.debug("inject_silent_pro: already suppressing, skipping")
+            return
+        self._suppressing_pro = True
+        self._pro_suppress_buf = b''
+        self._pro_suppress_start = time.monotonic()
+        logger.info("PRO SUPPRESSION ON — injecting pro")
+        # Flush any pending filter buffer before suppression starts
+        if self._filter_ansi_buffer and self.client_writer and not self.client_writer.is_closing():
             try:
-                await self.client_writer.drain()
+                self.client_writer.write(
+                    self._filter_ansi_buffer.encode('cp437', errors='replace'))
+                self._filter_ansi_buffer = ''
             except Exception:
                 pass
-        asyncio.ensure_future(_fallback_flush())
+        await self.inject_command("pro")
+
+    async def inject_raw(self, data: bytes) -> None:
+        """Inject raw bytes to the BBS server (for arrow keys, special sequences)."""
+        if self.server_writer and not self.server_writer.is_closing():
+            self.server_writer.write(data)
+            await self.server_writer.drain()
+
+    async def inject_to_client(self, text: str, hp: int = 0, mana: int = 0) -> None:
+        """Inject fake server text directly to MegaMud as standalone data.
+        Sent with a short delay so MegaMud receives it as unsolicited data
+        while idle at the HP prompt — not mixed into a command response.
+        Includes HP prompt so MegaMud sees a complete server output block."""
+        # Build: line-clear + text + \r\n + HP prompt
+        parts = self._BBS_LINE_CLEAR + text + '\r\n'
+        if hp > 0:
+            # Exact BBS HP prompt format: cursor col 1, clear, then colored HP/MA
+            W = '\x1b[0;37m'  # white
+            parts += f'\x1b[79D\x1b[K{W}[HP={W}{hp}{W}/MA={W}{mana}{W}]: '
+        payload = parts.encode('cp437', errors='replace')
+        logger.info(f"Ghost inject (standalone): {text!r}")
+        logger.info(f"Ghost bytes: {payload.hex()}")
+        # Schedule delayed send so it arrives as its own recv() in MegaMud
+        asyncio.get_event_loop().call_later(
+            0.3, lambda: self._send_ghost_delayed(payload)
+        )
+
+    def _send_ghost_delayed(self, payload: bytes):
+        """Send ghost inject payload directly to client socket after delay."""
+        if self.client_writer and not self.client_writer.is_closing():
+            try:
+                self.client_writer.write(payload)
+                logger.info(f"Ghost sent standalone ({len(payload)} bytes)")
+            except Exception as e:
+                logger.error(f"Ghost send failed: {e}")
 
     # BBS line-clear sequence: reset + cursor to column 1 + erase line
     # This is how MajorBBS overwrites the HP prompt before printing chat lines
     _BBS_LINE_CLEAR = '\x1b[0m\x1b[79D\x1b[K'
 
-    def _pop_ghost_prefix(self) -> bytes:
-        """Return queued ghost injections as bytes to prepend to next server data.
-        Uses the exact BBS ANSI sequence (cursor-back-79 + erase-line) so MegaMud
-        recognizes the text as a real server line."""
-        queue = getattr(self, '_ghost_inject_queue', [])
-        if not queue:
-            return b''
-        parts = []
-        for text in queue:
-            # Match BBS format exactly: clear line, then text in default color + newline
-            # Real BBS uses \x1b[0m reset (no explicit white), message part uncolored for telepaths
-            parts.append((self._BBS_LINE_CLEAR + text + '\r\n').encode('cp437', errors='replace'))
-            logger.info(f"Ghost inject: {text}")
-        self._ghost_inject_queue.clear()
-        return b''.join(parts)
 
     def set_ghost_name(self, name: str):
         """Set the ghost character name to intercept responses for."""
@@ -434,11 +453,88 @@ class MudProxy:
                         logger.debug(f"BBS IAC: {cmd} (x{count})")
                 await self._handle_server_iac(iac_cmds)
 
+            # Log raw ANSI for actual telepath messages (not pro output)
+            if clean_data and b'telepaths:' in clean_data.lower() and b'Player ID:' not in clean_data:
+                try:
+                    with open('/tmp/telepath_ansi.log', 'ab') as f:
+                        f.write(b'--- RAW BYTES ---\n')
+                        f.write(clean_data)
+                        f.write(b'\n--- HEX ---\n')
+                        f.write(clean_data.hex().encode() + b'\n')
+                        f.write(b'--- REPR ---\n')
+                        f.write(repr(clean_data).encode() + b'\n\n')
+                except Exception:
+                    pass
+
+            _pro_suppressed_this_chunk = False
+            _parser_clean_data = clean_data  # preserve for parser even during pro suppression
+            # ── Silent pro suppression (raw byte level) ──
+            if self._suppressing_pro and clean_data:
+                # Safety timeout
+                if time.monotonic() - getattr(self, '_pro_suppress_start', 0) > 5:
+                    logger.warning("Pro suppression timed out — releasing")
+                    self._suppressing_pro = False
+                    self._pro_suppress_buf = b''
+                else:
+                    self._pro_suppress_buf += clean_data
+                    decoded = self._pro_suppress_buf.decode('cp437', errors='replace')
+                    stripped_buf = strip_ansi(decoded)
+                    import re as _re
+                    has_pro_output = 'Player ID:' in stripped_buf
+
+                    if not has_pro_output:
+                        # No pro output yet. Check if a NEW room arrived
+                        # during suppression (user moved again quickly).
+                        if 'Obvious exits:' in stripped_buf:
+                            # New room data in the buffer — abort suppression,
+                            # forward everything so MegaMud sees the room.
+                            # Pro output will leak this one time but that's
+                            # better than eating the room.
+                            logger.warning("Room arrived during pro suppression — aborting")
+                            self._suppressing_pro = False
+                            self._pro_suppress_buf = b''
+                            _pro_suppressed_this_chunk = False
+                            # clean_data stays as-is, will be forwarded
+                        else:
+                            _pro_suppressed_this_chunk = True
+                    else:
+                        # Have pro output — check for HP prompt after it
+                        hp_match = _re.search(r'\[HP=\d+/MA=\d+\]:', stripped_buf)
+                        if hp_match:
+                            # Pro done. Check if there's room data AFTER pro
+                            # (user moved while pro was in flight).
+                            pro_hp_end = stripped_buf.rfind(']:')
+                            after_pro = stripped_buf[pro_hp_end + 2:].strip() if pro_hp_end >= 0 else ''
+                            if after_pro:
+                                # There's data after pro — find it in raw and forward
+                                # Find the HP prompt end in the decoded buffer
+                                hp_end_idx = decoded.rfind(']:')
+                                if hp_end_idx >= 0:
+                                    remainder = decoded[hp_end_idx + 2:]
+                                    clean_data = remainder.encode('cp437', errors='replace')
+                                    _pro_suppressed_this_chunk = False
+                                    logger.info("Pro suppression complete — forwarding remainder")
+                                else:
+                                    clean_data = b''
+                                    _pro_suppressed_this_chunk = True
+                            else:
+                                # Clean finish — eat everything, send blank
+                                # enter to BBS to get a fresh HP prompt
+                                clean_data = b''
+                                _pro_suppressed_this_chunk = True
+                                logger.info("Pro suppression complete — sending enter for fresh prompt")
+                                if self.server_writer and not self.server_writer.is_closing():
+                                    self.server_writer.write(b'\r\n')
+                            self._pro_suppress_buf = b''
+                            self._suppressing_pro = False
+                        else:
+                            # Have Player ID but no HP prompt yet — keep buffering
+                            _pro_suppressed_this_chunk = True
+
             # Forward to MegaMUD — with optional line filtering
-            # Only use the buffered filter when actively suppressing something
             use_filter = (self.line_filter and clean_data and
                           self.filter_active and self.filter_active())
-            if self.client_writer and not self.client_writer.is_closing():
+            if not _pro_suppressed_this_chunk and self.client_writer and not self.client_writer.is_closing():
                 try:
                     if use_filter:
                         # Filter using clean_data (post-telnet, no IAC bytes)
@@ -455,19 +551,19 @@ class MudProxy:
                         # Flush partial data — but only if it looks safe
                         # (HP prompts end with ]: which MegaMUD needs to see)
                         if self._filter_ansi_buffer and '\r\n' not in self._filter_ansi_buffer:
-                            # Check if the partial contains "pro" echo we should suppress
-                            partial_stripped = strip_ansi(self._filter_ansi_buffer).strip()
-                            if partial_stripped.lower() == 'pro' or partial_stripped.lower().endswith(':pro'):
-                                # Hold it — will be filtered as a complete line when \r\n arrives
-                                pass
+                            # Hold partials during pro suppression
+                            if self._suppressing_pro:
+                                pass  # hold everything until \r\n arrives
                             else:
-                                forward_parts.append(self._filter_ansi_buffer)
-                                self._filter_ansi_buffer = ''
+                                # Check if the partial contains "pro" echo we should suppress
+                                partial_stripped = strip_ansi(self._filter_ansi_buffer).strip()
+                                if partial_stripped.lower() == 'pro' or partial_stripped.lower().endswith(':pro'):
+                                    # Hold it — will be filtered as a complete line when \r\n arrives
+                                    pass
+                                else:
+                                    forward_parts.append(self._filter_ansi_buffer)
+                                    self._filter_ansi_buffer = ''
                         if forward_parts:
-                            # Prepend ghost injections before filtered data too
-                            ghost_prefix = self._pop_ghost_prefix()
-                            if ghost_prefix:
-                                self.client_writer.write(ghost_prefix)
                             forward_text = ''.join(forward_parts)
                             self.client_writer.write(
                                 forward_text.encode('cp437', errors='replace'))
@@ -484,22 +580,33 @@ class MudProxy:
                                 'cp437', errors='replace')
                             self._filter_ansi_buffer = ''
                             self.client_writer.write(leftover)
-                        # Prepend queued ghost injections so they appear
-                        # naturally in the stream before this server data
-                        ghost_prefix = self._pop_ghost_prefix()
-                        if ghost_prefix:
-                            self.client_writer.write(ghost_prefix)
                         self.client_writer.write(data)
                         await self.client_writer.drain()
                 except Exception:
                     pass
 
-            if clean_data:
+            if _parser_clean_data:
                 # Decode CP437 to Unicode, then encode as UTF-8 for VTE
-                text = clean_data.decode('cp437', errors='replace')
-                if self.on_server_data_bytes:
-                    self.on_server_data_bytes(text.encode('utf-8', errors='replace'))
+                text = _parser_clean_data.decode('cp437', errors='replace')
                 stripped = strip_ansi(text)
+
+                # Web terminal pro filtering — only hide auto-injected pro, not user-typed
+                # _web_hiding_pro is set by _fire_pro() in loud mode,
+                # transitions: True -> 'seen_player_id' -> False
+                _send_to_web = True
+                if self._suppressing_pro:
+                    _send_to_web = False
+                elif self._web_hiding_pro:
+                    _send_to_web = False
+                    if self._web_hiding_pro == 'seen_player_id':
+                        # Waiting for HP prompt to end pro output
+                        if re.search(r'\[HP=\d+/MA=\d+\]:', stripped):
+                            self._web_hiding_pro = False
+                    elif 'Player ID:' in stripped:
+                        self._web_hiding_pro = 'seen_player_id'
+
+                if _send_to_web and self.on_server_data_bytes:
+                    self.on_server_data_bytes(text.encode('utf-8', errors='replace'))
 
                 # Check auto-login triggers
                 self._check_auto_login(stripped)
@@ -538,11 +645,12 @@ class MudProxy:
             if not data:
                 break
 
-            # Check for ghost character responses — intercept before BBS sees them
+            # Log ALL client data for ghost debugging
             ghost_name = getattr(self, '_ghost_name', None)
             forward_data = data
             if ghost_name:
                 text = data.decode('ascii', errors='replace')
+                logger.info(f"CLIENT->SERVER: {text.strip()!r}")
                 # MegaMud sends "/" + name + " " + response to telepath back
                 ghost_prefix = f'/{ghost_name} '
                 if ghost_prefix.lower() in text.lower():

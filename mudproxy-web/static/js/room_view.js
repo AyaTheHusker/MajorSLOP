@@ -54,7 +54,7 @@ class RoomView {
             vignetteFeather: 0.5,
             showMonsters: true,
             showItems: true,
-            showConsole: true,
+            showConsole: false,
             showScanlines: false,
             showWarpZoom: false,
             scanlineThickness: 2,
@@ -65,11 +65,17 @@ class RoomView {
             npcThumbScale: '100%',
             lootThumbScale: '100%',
             dmgTextScale: '100%',
+            proMode: 'silent',
+            ambientFilter: true,
         };
 
         try {
             const saved = JSON.parse(localStorage.getItem('roomViewSettings'));
-            if (saved) return { ...defaults, ...saved };
+            if (saved) {
+                // Force showConsole off — side panel replaced by pop-out terminal
+                delete saved.showConsole;
+                return { ...defaults, ...saved };
+            }
         } catch {}
         return defaults;
     }
@@ -107,11 +113,18 @@ class RoomView {
                 document.getElementById('item-thumbs').style.display = value ? '' : 'none';
                 break;
             case 'showConsole':
-                document.getElementById('side-panel').style.display = value ? '' : 'none';
+                document.getElementById('side-panel').style.display = value ? 'flex' : 'none';
                 break;
             case 'showScanlines':
                 document.getElementById('scanline-overlay').style.display = value ? '' : 'none';
                 break;
+            case 'scanlineThickness': {
+                const t = parseInt(value) || 2;
+                const gap = Math.max(t + 1, Math.round(t * 1.5));
+                document.getElementById('scanline-overlay').style.background =
+                    `repeating-linear-gradient(0deg, rgba(0,0,0,0.15) 0px, rgba(0,0,0,0.15) ${t}px, transparent ${t}px, transparent ${t + gap}px)`;
+                break;
+            }
             case 'depth3d':
                 if (!value) {
                     p.clearDepth();
@@ -167,11 +180,28 @@ class RoomView {
     }
 
     _applyThumbScale(containerId, pct) {
-        const scales = { '50%': 0.5, '75%': 0.75, '100%': 1.0, '125%': 1.25, '150%': 1.5, '200%': 2.0 };
+        const scales = { '50%': 0.5, '75%': 0.75, '100%': 1.0, '125%': 1.25, '150%': 1.5,
+                         '200%': 2.0, '250%': 2.5, '300%': 3.0, '400%': 4.0 };
         const mult = scales[pct] || 1.0;
-        const baseSize = containerId === 'npc-thumbs' ? 67 : 32;
-        const size = Math.round(baseSize * mult);
+        const isItem = containerId === 'item-thumbs';
+        const baseSize = isItem ? 64 : 67;
         const container = document.getElementById(containerId);
+        const count = container.querySelectorAll('.thumb').length;
+
+        let size;
+        if (isItem && count > 4) {
+            // Auto-grid: pack into a square-ish block, shrink as count grows
+            const fullSize = Math.round(baseSize * mult);
+            const maxBox = Math.round(fullSize * 3.5);
+            const cols = Math.ceil(Math.sqrt(count));
+            const fitSize = Math.floor((maxBox - (cols - 1) * 4) / cols);
+            size = Math.max(Math.min(fitSize, fullSize), 20);
+            container.style.maxWidth = `${maxBox + 16}px`;
+        } else {
+            size = Math.round(baseSize * mult);
+            container.style.maxWidth = '';
+        }
+
         for (const thumb of container.querySelectorAll('.thumb')) {
             thumb.style.width = `${size}px`;
             thumb.style.height = `${size}px`;

@@ -46,14 +46,14 @@ vec2 mirrorUV(vec2 uv) {
     return vec2(triangleWave(uv.x), triangleWave(uv.y));
 }
 
-// Sample color with mirror wrapping
+// Sample color with clamped UVs (no mirroring — preserves text direction)
 vec3 sampleColor(vec2 uv) {
-    return texture(u_color, mirrorUV(uv)).rgb;
+    return texture(u_color, clamp(uv, 0.0, 1.0)).rgb;
 }
 
-// Sample depth with contrast and mirror wrapping
+// Sample depth with contrast and clamped UVs
 float sampleDepth(vec2 uv) {
-    float d = texture(u_depth, mirrorUV(uv)).r;
+    float d = texture(u_depth, clamp(uv, 0.0, 1.0)).r;
     return pow(d, max(u_depthContrast, 0.1));
 }
 
@@ -166,7 +166,7 @@ vec2 computeCameraOffset(float t, float intensity, float speed, float mode) {
 }
 
 void main() {
-    vec2 uv = vec2(v_uv.x, 1.0 - v_uv.y);
+    vec2 uv = v_uv;
 
     // === Overscan: zoom into center, extra pixels at edges for panning ===
     float scale = 1.0 / (1.0 + u_overscan * 2.0);
@@ -319,8 +319,8 @@ class DepthParallax {
         const gl = this.gl;
         const tex = gl.createTexture();
         gl.bindTexture(gl.TEXTURE_2D, tex);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.MIRRORED_REPEAT);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.MIRRORED_REPEAT);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
         // 1x1 black placeholder

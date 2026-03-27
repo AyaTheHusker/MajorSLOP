@@ -4,7 +4,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>MajorSLOP!</title>
-    <link rel="stylesheet" href="/static/css/main.css">
+    <link rel="stylesheet" href="/static/css/main.css?v=7">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5/css/xterm.css">
 </head>
 <body>
     <!-- Full-viewport room canvas (background) -->
@@ -21,6 +22,7 @@
         <div class="header-left">
             <div id="menu-bar"></div>
             <span id="room-name">Not Connected</span>
+            <span id="room-location" style="color:#888;font-size:0.85em;margin-left:8px;"></span>
             <span id="connection-status" class="status-dot disconnected"></span>
         </div>
         <div class="header-right">
@@ -34,6 +36,7 @@
             </div>
             <button id="btn-char" onclick="charPanel.toggle()" title="Character & Inventory">Char</button>
             <button id="btn-chat" onclick="chatPanel.toggle()" title="Chat Window">Chat</button>
+            <button id="btn-terminal" onclick="mudTerminal.toggle()" title="MUD Terminal (ANSI)">Terminal</button>
             <div class="ghost-box">
                 <span class="ghost-icon" title="Ghost Character Remote">👻</span>
                 <input id="ghost-input" type="text" placeholder="@where" spellcheck="false"
@@ -47,11 +50,12 @@
     <!-- Entity thumbnails (overlaid on room view) -->
     <div id="entity-panel" class="floating">
         <div id="npc-thumbs" class="thumb-row npc-row"></div>
+        <div id="player-thumbs" class="thumb-row player-row"></div>
         <div id="item-thumbs" class="thumb-row item-row"></div>
     </div>
 
-    <!-- Side panel (overlaid, toggleable) -->
-    <div id="side-panel">
+    <!-- Side panel (overlaid, toggleable, hidden by default) -->
+    <div id="side-panel" style="display:none">
         <!-- Room description -->
         <div id="room-desc-panel" class="panel">
             <div class="panel-header">Room</div>
@@ -70,15 +74,21 @@
         </div>
     </div>
 
+    <!-- xterm.js -->
+    <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5/lib/xterm.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0/lib/addon-fit.min.js"></script>
+
     <!-- Scripts -->
-    <script src="/static/js/coin_renderer.js?v=2"></script>
-    <script src="/static/js/depth_parallax.js?v=2"></script>
-    <script src="/static/js/room_view.js?v=2"></script>
-    <script src="/static/js/combat_effects.js?v=2"></script>
-    <script src="/static/js/view_menu.js?v=2"></script>
-    <script src="/static/js/char_panel.js?v=2"></script>
-    <script src="/static/js/chat_panel.js?v=2"></script>
-    <script src="/static/js/app.js?v=2"></script>
+    <script src="/static/js/coin_renderer.js?v=6"></script>
+    <script src="/static/js/depth_parallax.js?v=6"></script>
+    <script src="/static/js/room_view.js?v=6"></script>
+    <script src="/static/js/combat_effects.js?v=6"></script>
+    <script src="/static/js/view_menu.js?v=6"></script>
+    <script src="/static/js/char_panel.js?v=6"></script>
+    <script src="/static/js/chat_panel.js?v=6"></script>
+    <script src="/static/js/mud_terminal.js?v=6"></script>
+    <script src="/static/js/nav_panel.js?v=8"></script>
+    <script src="/static/js/app.js?v=7"></script>
     <script>
         // Initialize
         const roomView = new RoomView(document.getElementById('room-canvas'));
@@ -86,6 +96,8 @@
         const viewMenu = new ViewMenu(roomView);
         const charPanel = new CharPanel();
         const chatPanel = new ChatPanel((cmd, data) => sendCommand(cmd, data));
+        const mudTerminal = new MudTerminal(sendCommand);
+        const navPanel = new NavPanel((cmd, data) => sendCommand(cmd, data));
         roomView.applyAllSettings();
 
         // Ghost character input

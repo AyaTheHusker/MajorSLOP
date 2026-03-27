@@ -159,12 +159,26 @@ class MudParser:
         self._collecting_who = False
         self._who_lines: list[str] = []
         self._who_seen_dashes = False
+
+        # Top list collection state
+        self._collecting_top = False
+        self._top_lines: list[str] = []
+        self._top_seen_dashes = False
         self._char_name_lower = ""  # first name, lowercase, for filtering own echoes
         self._room_has_exits = False  # True once "Obvious exits/paths" seen for current room
 
         # Pro command collection state
         self._collecting_pro = False
         self._pro_lines: list[str] = []
+
+        # Stat advanced collection state
+        self._collecting_stat_adv = False
+        self._stat_adv_lines: list[str] = []
+
+        # Spells/Powers collection state
+        self._collecting_spells = False
+        self._spell_lines: list[str] = []
+        self._spell_type = "spells"  # "spells" or "powers" (kai)
 
         self.on_room_update: Optional[Callable[[RoomData], None]] = None
 
@@ -198,18 +212,6 @@ class MudParser:
                 items.append(name)
                 self._room.item_quantities[name] = qty
         return items
-        self.on_combat: Optional[Callable[[str], None]] = None
-        self.on_hp_update: Optional[Callable[[int, int, int, int], None]] = None  # hp, max_hp, mana, max_mana
-        self.on_death: Optional[Callable[[], None]] = None
-        self.on_xp: Optional[Callable[[int], None]] = None
-        self.on_inventory: Optional[Callable[[InventoryData], None]] = None
-        self.on_who_list: Optional[Callable[[list[str]], None]] = None
-        self.on_char_name: Optional[Callable[[str], None]] = None  # from stat "Name:" line
-        # Chat callback: (sender, message, channel) where channel is
-        # "gangpath", "broadcast", "telepath", or "say"
-        self.on_chat: Optional[Callable[[str, str, str], None]] = None
-        # Wound status: (monster_name, wound_level) from "X appears to be Y."
-        self.on_wound_status: Optional[Callable[[str, str], None]] = None
 
     # Wound status pattern: "The goblin appears to be heavily wounded."
     RE_WOUND_STATUS = re.compile(
@@ -257,8 +259,14 @@ class MudParser:
                 self._finalize_inventory()
             if self._collecting_who:
                 self._finalize_who()
+            if self._collecting_top:
+                self._finalize_top()
             if self._collecting_pro:
                 self._finalize_pro()
+            if self._collecting_stat_adv:
+                self._finalize_stat_adv()
+            if self._collecting_spells:
+                self._finalize_spells()
             self.state = ParserState.IDLE
             # Check for text after HP prompt (e.g. "[HP=88/MA=27]:Room Name")
             remainder = line[hp_match.end():].strip()
@@ -269,11 +277,7 @@ class MudParser:
         # Chat message detection (gangpath, broadcast, telepath, say)
         if self.on_chat:
             stripped = line.strip()
-            # Log lines that contain chat keywords for debugging
             low = stripped.lower()
-            if any(kw in low for kw in ('gossips:', 'gangpaths:', 'broadcasts:', 'telepaths:', 'says "')):
-                import logging
-                logging.getLogger('mudproxy.parser').info(f"Chat candidate line: {stripped!r}")
             for pat, channel in (
                 (self.RE_GANGPATH, "gangpath"),
                 (self.RE_BROADCAST, "broadcast"),
@@ -318,6 +322,23 @@ class MudParser:
             else:
                 return
 
+        # Collecting top list
+        if self._collecting_top:
+            if not line.strip() and self._top_seen_dashes:
+                self._finalize_top()
+                return
+            if self.RE_HP_PROMPT.match(line):
+                self._finalize_top()
+                # Fall through to process HP line normally
+            elif '=-=-' in line:
+                self._top_seen_dashes = True
+                return
+            elif self._top_seen_dashes and line.strip():
+                self._top_lines.append(line.strip())
+                return
+            else:
+                return
+
         # Detect leaving MajorMUD (back to BBS menu, relog, etc.)
         if self._in_game:
             stripped_lower = line.strip().lower()
@@ -355,6 +376,13 @@ class MudParser:
             self._who_seen_dashes = False
             return
 
+        # Start top list collection
+        if line.strip().startswith("Top Heroes of the Realm"):
+            self._collecting_top = True
+            self._top_lines = []
+            self._top_seen_dashes = False
+            return
+
         # Start pro command collection
         if line.strip().startswith("Player ID:"):
             self._collecting_pro = True
@@ -373,6 +401,53 @@ class MudParser:
                 # Fall through to process HP line normally
             else:
                 self._pro_lines.append(stripped)
+                return
+
+        # Start stat advanced collection (triggered by "HP Regen:" which is unique to st a)
+        if re.match(r'^HP Regen:\s', line.strip()):
+            self._collecting_stat_adv = True
+            self._stat_adv_lines = [line.strip()]
+            return
+
+        # Continue stat advanced collection
+        if self._collecting_stat_adv:
+            stripped = line.strip()
+            if not stripped:
+                self._finalize_stat_adv()
+                return
+            if self.RE_HP_PROMPT.match(line):
+                self._finalize_stat_adv()
+                # Fall through to process HP line normally
+            else:
+                self._stat_adv_lines.append(stripped)
+                return
+
+        # Start spells/powers collection
+        if line.strip() == 'You have the following spells:':
+            self._collecting_spells = True
+            self._spell_lines = []
+            self._spell_type = "spells"
+            return
+        if line.strip() == 'You have the following powers:':
+            self._collecting_spells = True
+            self._spell_lines = []
+            self._spell_type = "powers"
+            return
+
+        # Continue spells collection
+        if self._collecting_spells:
+            stripped = line.strip()
+            # Skip the header line
+            if stripped.startswith('Level') and ('Mana' in stripped or 'Kai' in stripped):
+                return
+            if not stripped:
+                self._finalize_spells()
+                return
+            if self.RE_HP_PROMPT.match(line):
+                self._finalize_spells()
+                # Fall through to process HP line normally
+            else:
+                self._spell_lines.append(stripped)
                 return
 
         # Check for multi-line "Also here:" continuation
@@ -742,6 +817,51 @@ class MudParser:
         if players and self.on_who_list:
             self.on_who_list(players)
 
+    def _finalize_top(self) -> None:
+        """Parse collected top list into player names + classes."""
+        self._collecting_top = False
+        self._top_seen_dashes = False
+        if not self._top_lines:
+            return
+
+        # Format: "  1. Farmer                Druid      Feckless Mortals    44097400000"
+        # Fixed-width: rank(~6) name(~22) class(~11) gang(~20) exp
+        import re
+        players = []  # (full_name, class_name)
+        for line in self._top_lines:
+            # Strip rank number + dot
+            m = re.match(r'\s*\d+\.\s+(.+)', line)
+            if not m:
+                continue
+            rest = m.group(1)
+            # The class is a single known word — scan for it
+            # Split into tokens and find the class name
+            # Strategy: everything before the class word is the name,
+            # the class word itself, then gang + exp after
+            tokens = rest.split()
+            if len(tokens) < 2:
+                continue
+            # Find class token — scan from position 1 onwards
+            name_parts = []
+            class_name = None
+            for i, tok in enumerate(tokens):
+                if tok.lower() in self._MAJORMUD_CLASSES and i >= 1:
+                    class_name = tok
+                    break
+                name_parts.append(tok)
+            if class_name and name_parts:
+                full_name = ' '.join(name_parts)
+                players.append((full_name, class_name))
+
+        if players and self.on_top_list:
+            self.on_top_list(players)
+
+    _MAJORMUD_CLASSES = {
+        "warrior", "witchunter", "paladin", "cleric", "priest",
+        "missionary", "ninja", "thief", "bard", "gypsy",
+        "warlock", "mage", "druid", "ranger", "mystic",
+    }
+
     def _finalize_pro(self) -> None:
         """Parse collected pro command output into a structured dict."""
         self._collecting_pro = False
@@ -801,3 +921,157 @@ class MudParser:
 
         if pro_data and hasattr(self, 'on_pro') and self.on_pro:
             self.on_pro(pro_data)
+
+    def _finalize_stat_adv(self) -> None:
+        """Parse collected 'stat advanced' output into a structured dict."""
+        self._collecting_stat_adv = False
+        if not self._stat_adv_lines:
+            return
+
+        data = {
+            "resistances": {},
+            "attacks": [],
+            "spells": [],
+        }
+
+        in_attacks = False
+        in_spells = False
+        attack_header_seen = False
+        spell_header_seen = False
+
+        for line in self._stat_adv_lines:
+            # Section headers
+            if line.startswith("Attacks:"):
+                in_attacks = True
+                in_spells = False
+                attack_header_seen = False
+                continue
+            if line.startswith("Spells:"):
+                in_spells = True
+                in_attacks = False
+                spell_header_seen = False
+                continue
+
+            if in_attacks:
+                # Skip the column header line (Type, Swings, Accy, ...)
+                if line.startswith("Type"):
+                    attack_header_seen = True
+                    continue
+                if not attack_header_seen:
+                    continue
+                parts = line.split()
+                if len(parts) >= 6:
+                    # Extract QnD(Total) if present
+                    qnd_total = None
+                    avg_rnd = None
+                    for p in parts:
+                        if '(' in p and ')' in p and qnd_total is None:
+                            qnd_total = p
+                        elif '(' in p and ')' in p:
+                            avg_rnd = p
+                    data["attacks"].append({
+                        "type": parts[0],
+                        "swings": parts[1],
+                        "accuracy": int(parts[2]) if parts[2].isdigit() else parts[2],
+                        "min": int(parts[3]) if parts[3].isdigit() else parts[3],
+                        "max": int(parts[4]) if parts[4].isdigit() else parts[4],
+                        "qnd_total": qnd_total,
+                        "avg_rnd": avg_rnd,
+                    })
+                continue
+
+            if in_spells:
+                # Skip column header
+                if line.startswith("Short Name"):
+                    spell_header_seen = True
+                    continue
+                if not spell_header_seen:
+                    continue
+                parts = line.split()
+                if len(parts) >= 4:
+                    avg_rnd = None
+                    for p in parts:
+                        if p.isdigit() and avg_rnd is None:
+                            pass  # skip
+                    data["spells"].append({
+                        "name": parts[0],
+                        "casts": int(parts[1]) if parts[1].isdigit() else parts[1],
+                        "difficulty": int(parts[2]) if parts[2].isdigit() else parts[2],
+                        "min": int(parts[3]) if parts[3].isdigit() else parts[3],
+                        "max": int(parts[4]) if len(parts) > 4 and parts[4].isdigit() else 0,
+                        "avg_rnd": parts[-1] if len(parts) > 5 else None,
+                    })
+                continue
+
+            # Key-value pairs from the stat block (multiple per line)
+            # Format: "HP Regen:   3/9        AC vs Evil:  39           Cold Resist:     0"
+            # Split on multiple spaces to find key:value pairs
+            pairs = re.findall(r'([A-Za-z][A-Za-z .]+?):\s+(\S+)', line)
+            for key, val in pairs:
+                key = key.strip()
+                norm_key = key.lower().replace(' ', '_').replace('.', '')
+                # Resistances
+                if 'resist' in norm_key:
+                    data["resistances"][key.replace(" Resist", "")] = int(val) if val.lstrip('-').isdigit() else val
+                elif norm_key == 'hp_regen':
+                    data["hp_regen"] = val
+                elif norm_key == 'ma_regen':
+                    data["ma_regen"] = val
+                elif norm_key == 'max_hp':
+                    data["max_hp_bonus"] = int(val) if val.lstrip('-').isdigit() else val
+                elif norm_key == 'max_mana':
+                    data["max_mana_bonus"] = int(val) if val.lstrip('-').isdigit() else val
+                elif norm_key == 'encum':
+                    data["encumbrance"] = int(val) if val.isdigit() else val
+                elif norm_key == 'dodge':
+                    data["dodge"] = int(val) if val.isdigit() else val
+                elif norm_key == 'crits':
+                    data["crits"] = int(val) if val.isdigit() else val
+                elif norm_key == 'spell_damage':
+                    data["spell_damage"] = int(val) if val.lstrip('-').isdigit() else val
+                elif norm_key == 'ac_vs_evil':
+                    data["ac_vs_evil"] = int(val) if val.isdigit() else val
+                elif norm_key == 'vs_good':
+                    data["ac_vs_good"] = int(val) if val.isdigit() else val
+                elif norm_key == 'shadow':
+                    data["shadow"] = int(val) if val.isdigit() else val
+                elif norm_key == 'party':
+                    data["party"] = int(val) if val.isdigit() else val
+                elif norm_key == 'prev':
+                    data["prev"] = int(val) if val.isdigit() else val
+                elif norm_key == 'prgd':
+                    data["prgd"] = int(val) if val.isdigit() else val
+                else:
+                    data[norm_key] = int(val) if val.lstrip('-').isdigit() else val
+
+        if data and hasattr(self, 'on_stat_advanced') and self.on_stat_advanced:
+            self.on_stat_advanced(data)
+
+    def _finalize_spells(self) -> None:
+        """Parse collected 'spells' or 'powers' output into a structured list."""
+        self._collecting_spells = False
+        if not self._spell_lines:
+            return
+
+        # Format from DLL: "%3d   %-4d %4.4s  %-30.30s"
+        # Actual: "  1   2    lore  song of lore"
+        spells = []
+        re_spell = re.compile(
+            r'^\s*(\d+)\s+(\d+)\s+(\w{2,5})\s+(.+)$'
+        )
+        for line in self._spell_lines:
+            m = re_spell.match(line)
+            if m:
+                spells.append({
+                    "level": int(m.group(1)),
+                    "cost": int(m.group(2)),
+                    "short": m.group(3).strip(),
+                    "name": m.group(4).strip(),
+                })
+
+        if spells and hasattr(self, 'on_spellbook') and self.on_spellbook:
+            self.on_spellbook({
+                "type": self._spell_type,  # "spells" or "powers"
+                "cost_type": "mana" if self._spell_type == "spells" else "kai",
+                "spells": spells,
+            })

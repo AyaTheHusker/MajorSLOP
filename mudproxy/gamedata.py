@@ -9,7 +9,8 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-GAMEDATA_DIR = Path.home() / ".cache" / "mudproxy" / "gamedata"
+from .paths import default_gamedata_dir
+GAMEDATA_DIR = default_gamedata_dir()
 
 # MajorMUD random spawn prefixes — only these are applied by the server
 # at spawn time and won't appear in the monster database
@@ -40,6 +41,8 @@ class GameData:
         self._shops: dict[int, dict] = {}
         self._monster_by_name: dict[str, int | list[int]] = {}  # name -> number or [numbers]
         self._item_by_name: dict[str, int] = {}
+        self._teleport_messages: dict[str, list[dict]] = {}  # "You climb..." -> [{src/dst}]
+        self._messages: dict[int, dict] = {}  # msg_num -> {you, others, dest}
         self._loaded = False
         # Current player location for disambiguating monsters with same name
         self.current_map: int | None = None
@@ -62,6 +65,8 @@ class GameData:
         self._shops.clear()
         self._monster_by_name.clear()
         self._item_by_name.clear()
+        self._teleport_messages.clear()
+        self._messages.clear()
         if hasattr(self, '_map_mob_cache'):
             self._map_mob_cache.clear()
         self._loaded = False
@@ -102,6 +107,25 @@ class GameData:
                         self._item_by_name = {k.lower(): v for k, v in raw.items()}
                 except Exception as e:
                     logger.error(f"Failed to load {name}: {e}")
+
+        # Load teleport messages (special exit confirmation texts)
+        tp_path = self._data_dir / "teleport_messages.json"
+        if tp_path.exists():
+            try:
+                self._teleport_messages = json.loads(tp_path.read_text())
+                logger.info(f"Loaded {len(self._teleport_messages)} teleport message texts")
+            except Exception as e:
+                logger.error(f"Failed to load teleport_messages.json: {e}")
+
+        # Load all messages (for spell expiry, combat, etc.)
+        msg_path = self._data_dir / "messages.json"
+        if msg_path.exists():
+            try:
+                raw_msgs = json.loads(msg_path.read_text())
+                self._messages = {int(k): v for k, v in raw_msgs.items()}
+                logger.info(f"Loaded {len(self._messages)} messages from messages.json")
+            except Exception as e:
+                logger.error(f"Failed to load messages.json: {e}")
 
         self._loaded = loaded_any
         return loaded_any
@@ -286,6 +310,26 @@ class GameData:
         """Get room name by map/room number."""
         room = self.get_room(map_num, room_num)
         return room["Name"] if room else None
+
+    def check_teleport_message(self, text: str, current_map: int | None = None,
+                                current_room: int | None = None) -> dict | None:
+        """Check if a server line matches a teleport confirmation message.
+        Returns {src_map, src_room, dst_map, dst_room, keyword} or None."""
+        text = text.strip()
+        entries = self._teleport_messages.get(text)
+        if not entries:
+            return None
+        # If we know current position, narrow to matching source room
+        if current_map is not None and current_room is not None:
+            for e in entries:
+                if e['src_map'] == current_map and e['src_room'] == current_room:
+                    return e
+        # Return first match if position unknown
+        return entries[0] if entries else None
+
+    def get_message(self, num: int) -> dict | None:
+        """Get message by number. Returns {you, others, dest} or None."""
+        return self._messages.get(num)
 
     # ── Shop lookups ──
 

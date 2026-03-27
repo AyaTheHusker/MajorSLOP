@@ -5,31 +5,49 @@ Usage:
     python export_gamedata.py /path/to/database.mdb
     python export_gamedata.py /path/to/database.mdb --outdir /custom/output
 
-Requires mdbtools: sudo pacman -S mdbtools  (or apt install mdbtools)
+Uses access-parser (pure Python, no external tools needed).
 """
 
 import argparse
-import csv
-import io
 import json
-import subprocess
+import logging
 import sys
 from pathlib import Path
 
+logger = logging.getLogger(__name__)
+
 DEFAULT_OUTDIR = Path.home() / ".cache" / "mudproxy" / "gamedata"
 
+# Module-level state (set by run_export or __main__)
+OUTDIR = Path(".")
+_db = None
 
-def mdb_read(table: str) -> list[dict]:
-    """Run mdb-export and return list of row dicts."""
-    result = subprocess.run(
-        ["mdb-export", MDB, table],
-        capture_output=True, text=True,
-    )
-    if result.returncode != 0:
-        print(f"  Warning: failed to export table '{table}': {result.stderr.strip()}")
+
+def _parse_table(table_name: str) -> list[dict]:
+    """Parse a table and return as list of row dicts."""
+    try:
+        cols_data = _db.parse_table(table_name)
+    except Exception as e:
+        logger.warning(f"Failed to read table '{table_name}': {e}")
         return []
-    reader = csv.DictReader(io.StringIO(result.stdout))
-    return list(reader)
+
+    if not cols_data:
+        return []
+
+    # Convert column-oriented {col: [vals]} to row-oriented [{col: val}]
+    columns = list(cols_data.keys())
+    num_rows = len(cols_data[columns[0]]) if columns else 0
+    rows = []
+    for i in range(num_rows):
+        row = {}
+        for col in columns:
+            val = cols_data[col][i]
+            # access-parser returns bytes for strings
+            if isinstance(val, bytes):
+                val = val.decode('utf-8', errors='replace')
+            row[col] = val
+        rows.append(row)
+    return rows
 
 
 def to_int(val, default=0):
@@ -47,42 +65,42 @@ def to_float(val, default=0.0):
 
 
 def export_monsters():
-    rows = mdb_read("Monsters")
+    rows = _parse_table("Monsters")
     monsters = {}
     name_lookup = {}
 
     for r in rows:
-        num = to_int(r["Number"])
-        name = r["Name"].strip()
+        num = to_int(r.get("Number"))
+        name = str(r.get("Name", "")).strip()
 
         entry = {
             "Number": num,
             "Name": name,
-            "HP": to_int(r["HP"]),
-            "EXP": to_int(r["EXP"]),
-            "ArmourClass": to_int(r["ArmourClass"]),
-            "DamageResist": to_int(r["DamageResist"]),
-            "MagicRes": to_int(r["MagicRes"]),
+            "HP": to_int(r.get("HP")),
+            "EXP": to_int(r.get("EXP")),
+            "ArmourClass": to_int(r.get("ArmourClass")),
+            "DamageResist": to_int(r.get("DamageResist")),
+            "MagicRes": to_int(r.get("MagicRes")),
             "BSDefense": to_int(r.get("BSDefense", 0)),
             "CashR": to_int(r.get("R", 0)),
             "CashP": to_int(r.get("P", 0)),
             "CashG": to_int(r.get("G", 0)),
             "CashS": to_int(r.get("S", 0)),
             "CashC": to_int(r.get("C", 0)),
-            "HPRegen": to_int(r["HPRegen"]),
-            "Type": to_int(r["Type"]),
-            "Undead": to_int(r["Undead"]),
-            "Align": to_int(r["Align"]),
-            "RegenTime": to_int(r["RegenTime"]),
-            "Follow%": to_int(r["Follow%"]),
-            "Energy": to_int(r["Energy"]),
-            "AvgDmg": to_float(r["AvgDmg"]),
+            "HPRegen": to_int(r.get("HPRegen")),
+            "Type": to_int(r.get("Type")),
+            "Undead": to_int(r.get("Undead")),
+            "Align": to_int(r.get("Align")),
+            "RegenTime": to_int(r.get("RegenTime")),
+            "Follow%": to_int(r.get("Follow%")),
+            "Energy": to_int(r.get("Energy")),
+            "AvgDmg": to_float(r.get("AvgDmg")),
         }
 
         # Attacks (0-4)
         attacks = []
         for i in range(5):
-            att_name = r.get(f"AttName-{i}", "").strip()
+            att_name = str(r.get(f"AttName-{i}", "")).strip()
             if not att_name or att_name == "None":
                 continue
             attacks.append({
@@ -146,36 +164,36 @@ def export_monsters():
 
     write_json("monsters.json", monsters)
     write_json("monster_names.json", name_lookup)
-    print(f"Monsters: {len(monsters)} entries")
+    logger.info(f"Monsters: {len(monsters)} entries")
 
 
 def export_items():
-    rows = mdb_read("Items")
+    rows = _parse_table("Items")
     items = {}
     name_lookup = {}
 
     for r in rows:
-        num = to_int(r["Number"])
-        name = r["Name"].strip()
+        num = to_int(r.get("Number"))
+        name = str(r.get("Name", "")).strip()
 
         entry = {
             "Number": num,
             "Name": name,
-            "ItemType": to_int(r["ItemType"]),
-            "Price": to_int(r["Price"]),
-            "Min": to_int(r["Min"]),
-            "Max": to_int(r["Max"]),
-            "ArmourClass": to_int(r["ArmourClass"]),
-            "DamageResist": to_int(r["DamageResist"]),
-            "WeaponType": to_int(r["WeaponType"]),
-            "ArmourType": to_int(r["ArmourType"]),
-            "Worn": to_int(r["Worn"]),
-            "Accy": to_int(r["Accy"]),
-            "Speed": to_int(r["Speed"]),
-            "StrReq": to_int(r["StrReq"]),
-            "Encum": to_int(r["Encum"]),
+            "ItemType": to_int(r.get("ItemType")),
+            "Price": to_int(r.get("Price")),
+            "Min": to_int(r.get("Min")),
+            "Max": to_int(r.get("Max")),
+            "ArmourClass": to_int(r.get("ArmourClass")),
+            "DamageResist": to_int(r.get("DamageResist")),
+            "WeaponType": to_int(r.get("WeaponType")),
+            "ArmourType": to_int(r.get("ArmourType")),
+            "Worn": to_int(r.get("Worn")),
+            "Accy": to_int(r.get("Accy")),
+            "Speed": to_int(r.get("Speed")),
+            "StrReq": to_int(r.get("StrReq")),
+            "Encum": to_int(r.get("Encum")),
             "In Game": to_int(r.get("In Game", 0)),
-            "Obtained From": r.get("Obtained From", "").strip(),
+            "Obtained From": str(r.get("Obtained From", "")).strip(),
         }
 
         # Abilities (0-19)
@@ -196,33 +214,33 @@ def export_items():
 
     write_json("items.json", items)
     write_json("item_names.json", name_lookup)
-    print(f"Items: {len(items)} entries")
+    logger.info(f"Items: {len(items)} entries")
 
 
 def export_rooms():
-    rows = mdb_read("Rooms")
+    rows = _parse_table("Rooms")
     rooms = {}
     directions = ["N", "S", "E", "W", "NE", "NW", "SE", "SW", "U", "D"]
 
     for r in rows:
-        map_num = to_int(r["Map Number"])
-        room_num = to_int(r["Room Number"])
+        map_num = to_int(r.get("Map Number"))
+        room_num = to_int(r.get("Room Number"))
         key = f"{map_num}-{room_num}"
 
         entry = {
             "Map Number": map_num,
             "Room Number": room_num,
-            "Name": r["Name"].strip(),
-            "Light": to_int(r["Light"]),
-            "Shop": to_int(r["Shop"]),
-            "Lair": r.get("Lair", "").strip(),
-            "Delay": to_int(r["Delay"]),
-            "Placed": r.get("Placed", "").strip(),
+            "Name": str(r.get("Name", "")).strip(),
+            "Light": to_int(r.get("Light")),
+            "Shop": to_int(r.get("Shop")),
+            "Lair": str(r.get("Lair", "")).strip(),
+            "Delay": to_int(r.get("Delay")),
+            "Placed": str(r.get("Placed", "")).strip(),
         }
 
         exits = {}
         for d in directions:
-            val = r.get(d, "").strip()
+            val = str(r.get(d, "")).strip()
             if val and val != "0":
                 exits[d] = val
         entry["exits"] = exits
@@ -230,29 +248,29 @@ def export_rooms():
         rooms[key] = entry
 
     write_json("rooms.json", rooms)
-    print(f"Rooms: {len(rooms)} entries")
+    logger.info(f"Rooms: {len(rooms)} entries")
 
 
 def export_spells():
-    rows = mdb_read("Spells")
+    rows = _parse_table("Spells")
     spells = {}
 
     for r in rows:
-        num = to_int(r["Number"])
+        num = to_int(r.get("Number"))
 
         entry = {
             "Number": num,
-            "Name": r["Name"].strip(),
-            "Short": r["Short"].strip(),
-            "ReqLevel": to_int(r["ReqLevel"]),
-            "EnergyCost": to_int(r["EnergyCost"]),
-            "ManaCost": to_int(r["ManaCost"]),
-            "MinBase": to_int(r["MinBase"]),
-            "MaxBase": to_int(r["MaxBase"]),
-            "Dur": to_int(r["Dur"]),
-            "AttType": to_int(r["AttType"]),
-            "Magery": to_int(r["Magery"]),
-            "MageryLVL": to_int(r["MageryLVL"]),
+            "Name": str(r.get("Name", "")).strip(),
+            "Short": str(r.get("Short", "")).strip(),
+            "ReqLevel": to_int(r.get("ReqLevel")),
+            "EnergyCost": to_int(r.get("EnergyCost")),
+            "ManaCost": to_int(r.get("ManaCost")),
+            "MinBase": to_int(r.get("MinBase")),
+            "MaxBase": to_int(r.get("MaxBase")),
+            "Dur": to_int(r.get("Dur")),
+            "AttType": to_int(r.get("AttType")),
+            "Magery": to_int(r.get("Magery")),
+            "MageryLVL": to_int(r.get("MageryLVL")),
         }
 
         abilities = []
@@ -269,32 +287,25 @@ def export_spells():
         spells[str(num)] = entry
 
     write_json("spells.json", spells)
-    print(f"Spells: {len(spells)} entries")
-
-
-def write_json(filename, data):
-    path = OUTDIR / filename
-    with open(path, "w") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
-    print(f"  Wrote {path} ({path.stat().st_size:,} bytes)")
+    logger.info(f"Spells: {len(spells)} entries")
 
 
 def export_classes():
-    rows = mdb_read("Classes")
+    rows = _parse_table("Classes")
     classes = {}
     for r in rows:
-        num = to_int(r["Number"])
+        num = to_int(r.get("Number"))
         entry = {
             "Number": num,
-            "Name": r["Name"].strip(),
-            "MinHits": to_int(r["MinHits"]),
-            "MaxHits": to_int(r["MaxHits"]),
-            "ExpTable": to_int(r["ExpTable"]),
-            "MageryType": to_int(r["MageryType"]),
-            "MageryLVL": to_int(r["MageryLVL"]),
-            "WeaponType": to_int(r["WeaponType"]),
-            "ArmourType": to_int(r["ArmourType"]),
-            "CombatLVL": to_int(r["CombatLVL"]),
+            "Name": str(r.get("Name", "")).strip(),
+            "MinHits": to_int(r.get("MinHits")),
+            "MaxHits": to_int(r.get("MaxHits")),
+            "ExpTable": to_int(r.get("ExpTable")),
+            "MageryType": to_int(r.get("MageryType")),
+            "MageryLVL": to_int(r.get("MageryLVL")),
+            "WeaponType": to_int(r.get("WeaponType")),
+            "ArmourType": to_int(r.get("ArmourType")),
+            "CombatLVL": to_int(r.get("CombatLVL")),
         }
         abilities = []
         for i in range(10):
@@ -305,26 +316,26 @@ def export_classes():
         entry["abilities"] = abilities
         classes[str(num)] = entry
     write_json("classes.json", classes)
-    print(f"Classes: {len(classes)} entries")
+    logger.info(f"Classes: {len(classes)} entries")
 
 
 def export_races():
-    rows = mdb_read("Races")
+    rows = _parse_table("Races")
     races = {}
     for r in rows:
-        num = to_int(r["Number"])
+        num = to_int(r.get("Number"))
         entry = {
             "Number": num,
-            "Name": r["Name"].strip(),
-            "mINT": to_int(r["mINT"]), "mWIL": to_int(r["mWIL"]),
-            "mSTR": to_int(r["mSTR"]), "mHEA": to_int(r["mHEA"]),
-            "mAGL": to_int(r["mAGL"]), "mCHM": to_int(r["mCHM"]),
-            "xINT": to_int(r["xINT"]), "xWIL": to_int(r["xWIL"]),
-            "xSTR": to_int(r["xSTR"]), "xHEA": to_int(r["xHEA"]),
-            "xAGL": to_int(r["xAGL"]), "xCHM": to_int(r["xCHM"]),
-            "HPPerLVL": to_int(r["HPPerLVL"]),
-            "ExpTable": to_int(r["ExpTable"]),
-            "BaseCP": to_int(r["BaseCP"]),
+            "Name": str(r.get("Name", "")).strip(),
+            "mINT": to_int(r.get("mINT")), "mWIL": to_int(r.get("mWIL")),
+            "mSTR": to_int(r.get("mSTR")), "mHEA": to_int(r.get("mHEA")),
+            "mAGL": to_int(r.get("mAGL")), "mCHM": to_int(r.get("mCHM")),
+            "xINT": to_int(r.get("xINT")), "xWIL": to_int(r.get("xWIL")),
+            "xSTR": to_int(r.get("xSTR")), "xHEA": to_int(r.get("xHEA")),
+            "xAGL": to_int(r.get("xAGL")), "xCHM": to_int(r.get("xCHM")),
+            "HPPerLVL": to_int(r.get("HPPerLVL")),
+            "ExpTable": to_int(r.get("ExpTable")),
+            "BaseCP": to_int(r.get("BaseCP")),
         }
         abilities = []
         for i in range(10):
@@ -335,41 +346,41 @@ def export_races():
         entry["abilities"] = abilities
         races[str(num)] = entry
     write_json("races.json", races)
-    print(f"Races: {len(races)} entries")
+    logger.info(f"Races: {len(races)} entries")
 
 
 def export_lairs():
-    rows = mdb_read("Lairs")
+    rows = _parse_table("Lairs")
     lairs = {}
     for r in rows:
-        key = r["GroupIndex"].strip()
+        key = str(r.get("GroupIndex", "")).strip()
         entry = {
             "GroupIndex": key,
-            "MobList": r["MobList"].strip(),
-            "Mobs": to_int(r["Mobs"]),
-            "TotalLairs": to_int(r["TotalLairs"]),
-            "AvgDelay": to_int(r["AvgDelay"]),
-            "AvgExp": to_float(r["AvgExp"]),
-            "AvgDmg": to_float(r["AvgDmg"]),
-            "AvgHP": to_float(r["AvgHP"]),
+            "MobList": str(r.get("MobList", "")).strip(),
+            "Mobs": to_int(r.get("Mobs")),
+            "TotalLairs": to_int(r.get("TotalLairs")),
+            "AvgDelay": to_int(r.get("AvgDelay")),
+            "AvgExp": to_float(r.get("AvgExp")),
+            "AvgDmg": to_float(r.get("AvgDmg")),
+            "AvgHP": to_float(r.get("AvgHP")),
         }
         lairs[key] = entry
     write_json("lairs.json", lairs)
-    print(f"Lairs: {len(lairs)} entries")
+    logger.info(f"Lairs: {len(lairs)} entries")
 
 
 def export_shops():
-    rows = mdb_read("Shops")
+    rows = _parse_table("Shops")
     shops = {}
     for r in rows:
-        num = to_int(r["Number"])
+        num = to_int(r.get("Number"))
         entry = {
             "Number": num,
-            "Name": r["Name"].strip(),
-            "ShopType": to_int(r["ShopType"]),
-            "MinLVL": to_int(r["MinLVL"]),
-            "MaxLVL": to_int(r["MaxLVL"]),
-            "Markup%": to_int(r["Markup%"]),
+            "Name": str(r.get("Name", "")).strip(),
+            "ShopType": to_int(r.get("ShopType")),
+            "MinLVL": to_int(r.get("MinLVL")),
+            "MaxLVL": to_int(r.get("MaxLVL")),
+            "Markup%": to_int(r.get("Markup%")),
             "In Game": to_int(r.get("In Game", 0)),
         }
         items = []
@@ -387,35 +398,28 @@ def export_shops():
         entry["items"] = items
         shops[str(num)] = entry
     write_json("shops.json", shops)
-    print(f"Shops: {len(shops)} entries")
+    logger.info(f"Shops: {len(shops)} entries")
 
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Export MajorMUD .mdb database to JSON gamedata files")
-    parser.add_argument("mdb", help="Path to the .mdb file")
-    parser.add_argument("--outdir", default=str(DEFAULT_OUTDIR),
-                        help=f"Output directory (default: {DEFAULT_OUTDIR})")
-    args = parser.parse_args()
+def write_json(filename, data):
+    path = OUTDIR / filename
+    with open(path, "w") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
 
-    MDB = args.mdb
-    if not Path(MDB).exists():
-        print(f"Error: MDB file not found: {MDB}", file=sys.stderr)
-        sys.exit(1)
 
-    # Check mdbtools is installed
-    try:
-        subprocess.run(["mdb-export", "--version"], capture_output=True, check=True)
-    except FileNotFoundError:
-        print("Error: mdbtools not installed. Install with: sudo pacman -S mdbtools", file=sys.stderr)
-        sys.exit(1)
+def run_export(mdb_path: str, outdir: str | None = None) -> dict:
+    """Export MDB to JSON. Returns dict with counts. Callable from anywhere."""
+    global OUTDIR, _db
 
-    OUTDIR = Path(args.outdir)
+    from access_parser import AccessParser
+
+    if not Path(mdb_path).exists():
+        raise FileNotFoundError(f"MDB file not found: {mdb_path}")
+
+    OUTDIR = Path(outdir) if outdir else DEFAULT_OUTDIR
     OUTDIR.mkdir(parents=True, exist_ok=True)
 
-    print(f"Exporting: {MDB}")
-    print(f"Output:    {OUTDIR}")
-    print()
+    _db = AccessParser(mdb_path)
 
     export_monsters()
     export_items()
@@ -425,4 +429,34 @@ if __name__ == "__main__":
     export_races()
     export_lairs()
     export_shops()
-    print(f"\nDone. Gamedata exported to {OUTDIR}")
+
+    # Export text blocks (quest/scripting system)
+    try:
+        from mudproxy.textblock import load_from_mdb, export_json
+        blocks = load_from_mdb(mdb_path)
+        export_json(blocks, OUTDIR / "textblocks.json")
+    except Exception as e:
+        logger.warning(f"Text block export failed: {e}")
+
+    # Return summary
+    counts = {}
+    for name in ["monsters", "items", "rooms", "spells", "classes", "races", "lairs", "shops", "textblocks"]:
+        path = OUTDIR / f"{name}.json"
+        if path.exists():
+            counts[name] = len(json.loads(path.read_text()))
+    return counts
+
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+
+    parser = argparse.ArgumentParser(
+        description="Export MajorMUD .mdb database to JSON gamedata files")
+    parser.add_argument("mdb", help="Path to the .mdb file")
+    parser.add_argument("--outdir", default=str(DEFAULT_OUTDIR),
+                        help=f"Output directory (default: {DEFAULT_OUTDIR})")
+    args = parser.parse_args()
+
+    counts = run_export(args.mdb, args.outdir)
+    total = sum(counts.values())
+    print(f"\nDone. Exported {total} records: {counts}")

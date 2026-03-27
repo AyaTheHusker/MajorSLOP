@@ -35,7 +35,8 @@ from .bake import (
 
 logger = logging.getLogger(__name__)
 
-CACHE_BASE = Path.home() / ".cache" / "mudproxy"
+from .paths import default_cache_dir
+CACHE_BASE = default_cache_dir()
 PROMPT_CACHE_DIR = CACHE_BASE / "bake_prompts"
 
 # Room image prompt system prompt (same as room_renderer)
@@ -786,6 +787,13 @@ class DatBakeApp(Gtk.Application):
         self._merge_btn.add_css_class("bake-action-btn")
         toolbar.append(self._merge_btn)
 
+        self._explorer_btn = Gtk.Button(label="Explorer")
+        self._explorer_btn.set_tooltip_text("Browse and fix assets in loaded .slop")
+        self._explorer_btn.connect("clicked", lambda _: self._do_open_explorer())
+        self._explorer_btn.add_css_class("bake-action-btn")
+        self._explorer_btn.set_sensitive(False)
+        toolbar.append(self._explorer_btn)
+
         # Separator
         sep = Gtk.Separator(orientation=Gtk.Orientation.VERTICAL)
         sep.set_margin_start(4)
@@ -1336,6 +1344,7 @@ class DatBakeApp(Gtk.Application):
         )
         self._log(f"Scan complete: {total} bake jobs ({n_done} already done, {n_todo} need generation)")
         self._start_btn.set_sensitive(total > 0)
+        self._explorer_btn.set_sensitive(total > 0)
 
     # ── Start/Cancel/Save ──
 
@@ -1675,6 +1684,7 @@ class DatBakeApp(Gtk.Application):
                                     if j.asset_type == ASSET_ROOM_IMAGE and j.depth_bytes and not j.inpaint_bytes)
 
         self._save_btn.set_sensitive(n_with_image > 0)
+        self._explorer_btn.set_sensitive(True)
         if rooms_without_depth > 0:
             self._log(f"  Ready: {rooms_without_depth} rooms need depth maps")
         if rooms_without_inpaint > 0:
@@ -1777,6 +1787,12 @@ class DatBakeApp(Gtk.Application):
         merge_dlg.present()
 
     # (merge dialog handles the rest — see MergeDialog class below)
+
+    def _do_open_explorer(self):
+        """Open the Slop Explorer window."""
+        from .slop_explorer import SlopExplorer
+        explorer = SlopExplorer(self)
+        explorer.present()
 
     # ── Worker thread ────────────────────────────────────────────────
 
@@ -2215,7 +2231,7 @@ class DatBakeApp(Gtk.Application):
             import spandrel
             from torch.hub import download_url_to_file
 
-            model_cache = Path.home() / ".cache" / "mudproxy" / "models"
+            model_cache = CACHE_BASE / "models"
             model_cache.mkdir(parents=True, exist_ok=True)
             model_path = model_cache / "RealESRGAN_x4plus.pth"
             if not model_path.exists():
@@ -2571,7 +2587,8 @@ class DatBakeApp(Gtk.Application):
 def main():
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
-    DEFAULT_DAT_DIR = Path.home() / "Documents" / "majormud-dats" / "DAT Files V1.11p"
+    from .paths import default_dat_dir
+    DEFAULT_DAT_DIR = default_dat_dir()
 
     if len(sys.argv) >= 2:
         dat_dir = Path(sys.argv[1])

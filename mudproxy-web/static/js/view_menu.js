@@ -23,7 +23,6 @@ class ViewMenu {
             { type: 'toggle', label: 'Scanlines', key: 'showScanlines', default: false },
             { type: 'toggle', label: 'Warp Zoom', key: 'showWarpZoom', default: false },
             { type: 'separator' },
-            { type: 'toggle', label: 'Console', key: 'showConsole', default: true },
             { type: 'toggle', label: 'Monsters', key: 'showMonsters', default: true },
             { type: 'toggle', label: 'Items', key: 'showItems', default: true },
             { type: 'separator' },
@@ -47,12 +46,12 @@ class ViewMenu {
             { type: 'toggle', label: 'Lock Loot Panel', key: 'lootLocked', default: false },
             { type: 'separator' },
             { type: 'submenu', label: 'NPC Scale', items:
-                ['50%','75%','100%','125%','150%','200%'].map(p => ({
+                ['50%','75%','100%','125%','150%','200%','250%','300%','400%'].map(p => ({
                     type: 'radio', label: p, key: 'npcThumbScale', value: p
                 }))
             },
             { type: 'submenu', label: 'Loot Scale', items:
-                ['50%','75%','100%','125%','150%','200%'].map(p => ({
+                ['50%','75%','100%','125%','150%','200%','250%','300%','400%'].map(p => ({
                     type: 'radio', label: p, key: 'lootThumbScale', value: p
                 }))
             },
@@ -101,6 +100,143 @@ class ViewMenu {
             { type: 'slider', label: 'Vignette', key: 'vignetteAmount', min: 0, max: 1.0, step: 0.05 },
             { type: 'slider', label: 'Vignette Size', key: 'vignetteFeather', min: 0.2, max: 1.5, step: 0.05 },
         ]);
+
+        // Proxy menu — server-side proxy toggles and injection settings
+        this._addMenu(bar, 'Proxy', [
+            { type: 'submenu', label: 'Pro (Location)', items: [
+                { type: 'radio', label: 'Silent Pro (ParaMUD)', key: 'proMode', value: 'silent',
+                  onChange: (val) => this._sendProMode(val) },
+                { type: 'radio', label: 'Loud Pro (ParaMUD)', key: 'proMode', value: 'loud',
+                  onChange: (val) => this._sendProMode(val) },
+                { type: 'radio', label: 'No Pro (Legacy MMUD)', key: 'proMode', value: 'off',
+                  onChange: (val) => this._sendProMode(val) },
+            ]},
+            { type: 'separator' },
+            { type: 'toggle', label: 'Filter Ambient Messages', key: 'ambientFilter', default: true,
+              onChange: () => {
+                  if (ws && ws.readyState === 1) {
+                      ws.send(JSON.stringify({ command: 'toggle_ambient_filter' }));
+                  }
+              }
+            },
+            { type: 'separator' },
+            { type: 'action', label: `Ghost: ${localStorage.getItem('ghostName') || 'Yoder'}`,
+              id: 'ghost-name-item',
+              action: () => this._promptGhostName() },
+        ]);
+
+        // Help menu
+        this._addMenu(bar, 'Help', [
+            { type: 'action', label: 'Quick Start Guide', action: () => this._showHelp() },
+            { type: 'action', label: 'Keyboard Shortcuts', action: () => this._showShortcuts() },
+            { type: 'separator' },
+            { type: 'action', label: 'HuggingFace (SLOP Downloads)', action: () => window.open('https://huggingface.co/Bellgaffer/MajorSLOP', '_blank') },
+        ]);
+    }
+
+    _promptGhostName() {
+        const current = localStorage.getItem('ghostName') || 'Yoder';
+        const name = prompt('Ghost character name (injects @ commands via telepath):', current);
+        if (name !== null && name.trim()) {
+            localStorage.setItem('ghostName', name.trim());
+            // Update the menu item label
+            const el = document.getElementById('ghost-name-item');
+            if (el) el.querySelector('span').textContent = `Ghost: ${name.trim()}`;
+            // Update global if it exists
+            if (typeof GHOST_NAME !== 'undefined') window.GHOST_NAME = name.trim();
+        }
+    }
+
+    _sendProMode(value) {
+        if (ws && ws.readyState === 1) {
+            ws.send(JSON.stringify({ command: 'set_pro_mode', mode: value }));
+        }
+    }
+
+    _showHelp() {
+        const overlay = document.createElement('div');
+        overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.85);z-index:10000;display:flex;align-items:center;justify-content:center;';
+        overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+
+        const box = document.createElement('div');
+        box.style.cssText = 'background:#1a1a2e;color:#e0e0e0;border:1px solid #444;border-radius:8px;padding:28px 36px;max-width:700px;max-height:80vh;overflow-y:auto;font-family:monospace;font-size:14px;line-height:1.6;';
+        box.innerHTML = `
+<h2 style="color:#7af;margin:0 0 16px">MajorSLOP! - Quick Start</h2>
+
+<h3 style="color:#fa5">What is this?</h3>
+<p>MajorSLOP is a visual proxy for MajorMUD. It sits between MegaMud and the BBS,
+intercepts game data, and shows room images, entity portraits, 3D effects, and more
+in this browser interface.</p>
+
+<h3 style="color:#fa5">Setup</h3>
+<ol>
+<li><b>Download a .slop image pack</b> from
+<a href="https://huggingface.co/Bellgaffer/MajorSLOP" target="_blank" style="color:#7af">HuggingFace</a>
+and place it in the <code>slop/</code> folder next to MajorSLOP.exe</li>
+<li><b>Run MajorSLOP.exe</b> and click Start</li>
+<li><b>Configure MegaMud</b> to connect to <code>127.0.0.1</code> port <code>9999</code>
+(Setup &rarr; Comm Parameters)</li>
+<li><b>Open this page</b> at <code>http://127.0.0.1:8000</code></li>
+</ol>
+
+<h3 style="color:#fa5">Ports</h3>
+<table style="border-collapse:collapse;width:100%">
+<tr><td style="padding:4px 12px;color:#7af">Proxy Port (9999)</td><td>MegaMud connects here. MajorSLOP forwards to the BBS.</td></tr>
+<tr><td style="padding:4px 12px;color:#7af">Web Port (8000)</td><td>This browser UI. Open http://127.0.0.1:8000</td></tr>
+</table>
+
+<h3 style="color:#fa5">Terminal</h3>
+<p>Click <b>Terminal</b> in the header to open a full ANSI terminal. You can play
+the MUD directly from the browser. Toggle between DIRECT mode (type on the terminal)
+and INPUT mode (text box with command history).</p>
+
+<h3 style="color:#fa5">Troubleshooting</h3>
+<ul>
+<li><b>No images?</b> Make sure a .slop file is loaded (Data menu)</li>
+<li><b>Can't connect?</b> MegaMud host must be 127.0.0.1, port must match Proxy Port</li>
+<li><b>Port in use?</b> Change the port in the MajorSLOP GUI</li>
+</ul>
+
+<p style="margin-top:20px;color:#666;text-align:center">Click outside to close</p>`;
+
+        overlay.appendChild(box);
+        document.body.appendChild(overlay);
+    }
+
+    _showShortcuts() {
+        const overlay = document.createElement('div');
+        overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.85);z-index:10000;display:flex;align-items:center;justify-content:center;';
+        overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+
+        const box = document.createElement('div');
+        box.style.cssText = 'background:#1a1a2e;color:#e0e0e0;border:1px solid #444;border-radius:8px;padding:28px 36px;max-width:500px;font-family:monospace;font-size:14px;line-height:1.8;';
+        box.innerHTML = `
+<h2 style="color:#7af;margin:0 0 16px">Keyboard Shortcuts</h2>
+<table style="border-collapse:collapse;width:100%">
+<tr><td style="padding:4px 12px;color:#fa5">Alt+B</td><td>Open backscroll window</td></tr>
+<tr><td style="padding:4px 12px;color:#fa5">Escape</td><td>Close backscroll / overlays</td></tr>
+<tr><td style="padding:4px 12px;color:#fa5">Up/Down</td><td>Command history (INPUT mode)</td></tr>
+<tr><td style="padding:4px 12px;color:#fa5">Enter</td><td>Send command</td></tr>
+</table>
+
+<h3 style="color:#7af;margin-top:16px">Terminal Modes</h3>
+<table style="border-collapse:collapse;width:100%">
+<tr><td style="padding:4px 12px;color:#fa5">DIRECT</td><td>Type directly on the terminal surface. Arrow keys, escape sequences sent raw.</td></tr>
+<tr><td style="padding:4px 12px;color:#fa5">INPUT</td><td>Text box with command history (Up/Down). Familiar input style.</td></tr>
+</table>
+
+<h3 style="color:#7af;margin-top:16px">Backscroll (Alt+B)</h3>
+<table style="border-collapse:collapse;width:100%">
+<tr><td style="padding:4px 12px;color:#fa5">Ctrl+F</td><td>Search backscroll</td></tr>
+<tr><td style="padding:4px 12px;color:#fa5">Ctrl+A</td><td>Select all</td></tr>
+<tr><td style="padding:4px 12px;color:#fa5">Ctrl+C</td><td>Copy selection</td></tr>
+<tr><td style="padding:4px 12px;color:#fa5">Escape</td><td>Close backscroll</td></tr>
+</table>
+
+<p style="margin-top:20px;color:#666;text-align:center">Click outside to close</p>`;
+
+        overlay.appendChild(box);
+        document.body.appendChild(overlay);
     }
 
     _addMenu(bar, label, items) {
@@ -177,6 +313,7 @@ class ViewMenu {
                     const newVal = !this.rv.settings[item.key];
                     this.rv.updateSetting(item.key, newVal);
                     el.querySelector('.menu-check').textContent = newVal ? '✓' : '';
+                    if (item.onChange) item.onChange(newVal);
                 });
                 dd.appendChild(el);
                 continue;
@@ -197,6 +334,7 @@ class ViewMenu {
                         if (check) check.textContent = '○';
                     }
                     el.querySelector('.menu-check').textContent = '●';
+                    if (item.onChange) item.onChange(item.value);
                 });
                 dd.appendChild(el);
                 continue;
@@ -205,6 +343,7 @@ class ViewMenu {
             if (item.type === 'action') {
                 const el = document.createElement('div');
                 el.className = 'menu-item action';
+                if (item.id) el.id = item.id;
                 el.innerHTML = `<span>${item.label}</span>`;
                 el.addEventListener('click', (e) => {
                     e.stopPropagation();

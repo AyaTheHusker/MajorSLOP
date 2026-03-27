@@ -26,13 +26,14 @@ from gi.repository import Gtk, Gdk, GLib, Gio, Pango
 
 logger = logging.getLogger(__name__)
 
-CACHE_BASE = Path.home() / ".cache" / "mudproxy"
+from .paths import default_cache_dir, default_slop_dir
+CACHE_BASE = default_cache_dir()
 ENTITY_DIR = CACHE_BASE / "entities"
 NPC_THUMB_DIR = CACHE_BASE / "npc"
 ITEM_THUMB_DIR = CACHE_BASE / "item"
 ROOM_CACHE_DIR = CACHE_BASE / "room"
 DEPTH_CACHE_DIR = CACHE_BASE / "depth"
-SLOP_DIR = Path.home() / ".local" / "share" / "mudproxy" / "slop"
+SLOP_DIR = default_slop_dir()
 
 OLLAMA_URL = "http://localhost:11434/api/generate"
 OLLAMA_MODEL = "llama3.2:3b"

@@ -45,6 +45,12 @@ function handleEvent(msg) {
             if (typeof chatPanel !== 'undefined' && msg.broadcast_channel !== undefined) {
                 chatPanel.setBroadcastChannel(msg.broadcast_channel);
             }
+            // Sync proxy settings from server state
+            if (typeof roomView !== 'undefined') {
+                if (msg.pro_mode) roomView.updateSetting('proMode', msg.pro_mode);
+                if (msg.ambient_filter_enabled !== undefined)
+                    roomView.updateSetting('ambientFilter', msg.ambient_filter_enabled);
+            }
             break;
 
         case 'room_update':
@@ -103,9 +109,17 @@ function handleEvent(msg) {
             if (typeof charPanel !== 'undefined') charPanel.setCharName(msg.name);
             break;
 
+        case 'char_portrait':
+            if (typeof charPanel !== 'undefined') charPanel.setPortraitKey(msg.key);
+            break;
+
         case 'pro_data':
             if (typeof chatPanel !== 'undefined' && msg.broadcast_channel !== undefined) {
                 chatPanel.setBroadcastChannel(msg.broadcast_channel);
+            }
+            if (msg.map_num !== undefined && msg.room_num !== undefined) {
+                document.getElementById('room-location').textContent =
+                    `[Map ${msg.map_num}, Room ${msg.room_num}]`;
             }
             break;
 
@@ -116,6 +130,12 @@ function handleEvent(msg) {
                     charPanel.setEquipment(slotId, item);
                 }
                 charPanel.setInventory(msg.carried || []);
+            }
+            break;
+
+        case 'raw_data':
+            if (typeof mudTerminal !== 'undefined') {
+                mudTerminal.feedRaw(msg.data);
             }
             break;
     }
@@ -168,9 +188,13 @@ function updateRoom(data) {
         }
     }
 
-    // Entity thumbnails
+    // Entity thumbnails — split monsters and players into separate rows
     hideTooltip();
-    updateThumbnails('npc-thumbs', data.entities || []);
+    const allEntities = data.entities || [];
+    const monsters = allEntities.filter(e => e.type !== 'player');
+    const players = allEntities.filter(e => e.type === 'player');
+    updateThumbnails('npc-thumbs', monsters);
+    updateThumbnails('player-thumbs', players);
     updateThumbnails('item-thumbs', data.items || []);
 }
 
@@ -182,11 +206,12 @@ function updateThumbnails(containerId, entities) {
     container.innerHTML = '';
 
     const isItem = containerId === 'item-thumbs';
+    const isPlayer = containerId === 'player-thumbs';
 
     for (let ei = 0; ei < entities.length; ei++) {
         const ent = entities[ei];
         const div = document.createElement('div');
-        div.className = isItem ? 'thumb item-thumb' : 'thumb';
+        div.className = isItem ? 'thumb item-thumb' : (isPlayer ? 'thumb player-thumb' : 'thumb');
         div.title = ent.name + (ent.quantity > 1 ? ` (${ent.quantity})` : '');
         div.dataset.entityName = ent.name;
         div.dataset.entityType = ent.type;
@@ -715,8 +740,10 @@ function showContextMenu(x, y, entity) {
 
 function initDraggablePanels() {
     const npcRow = document.getElementById('npc-thumbs');
+    const playerRow = document.getElementById('player-thumbs');
     const itemRow = document.getElementById('item-thumbs');
     if (npcRow) _makeDraggable(npcRow, 'npc-panel-pos');
+    if (playerRow) _makeDraggable(playerRow, 'player-panel-pos');
     if (itemRow) _makeDraggable(itemRow, 'item-panel-pos');
 }
 

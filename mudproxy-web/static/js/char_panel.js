@@ -3,25 +3,28 @@
 // and an inventory grid below.
 
 const EQUIP_SLOTS = {
-    2:    { name: 'Head',      col: 2, row: 0 },
+    //            Outer ring around portrait
     15:   { name: 'Ears',      col: 0, row: 0 },
+    2:    { name: 'Head',      col: 2, row: 0 },
     17:   { name: 'Light',     col: 4, row: 0 },
     19:   { name: 'Face',      col: 0, row: 1 },
     8:    { name: 'Neck',      col: 4, row: 1 },
     1:    { name: 'Weapon',    col: 0, row: 2 },
-    6:    { name: 'Arms',      col: 0, row: 3 },
     7:    { name: 'Back',      col: 4, row: 2 },
+    6:    { name: 'Arms',      col: 0, row: 3 },
     12:   { name: 'Off-hand',  col: 4, row: 3 },
-    '14a': { name: 'Wrist 1',  col: 0, row: 4 },
-    '14b': { name: 'Wrist 2',  col: 0, row: 5 },
-    '4a':  { name: 'Ring 1',   col: 4, row: 4 },
-    '4b':  { name: 'Ring 2',   col: 4, row: 5 },
-    3:    { name: 'Hands',     col: 0, row: 6 },
-    11:   { name: 'Torso',     col: 2, row: 6 },
-    10:   { name: 'Waist',     col: 4, row: 6 },
-    16:   { name: 'Worn',      col: 0, row: 7 },
-    9:    { name: 'Legs',      col: 2, row: 7 },
-    5:    { name: 'Feet',      col: 2, row: 8 },
+    3:    { name: 'Hands',     col: 0, row: 4 },
+    11:   { name: 'Torso',     col: 4, row: 4 },
+    9:    { name: 'Legs',      col: 0, row: 5 },
+    5:    { name: 'Feet',      col: 4, row: 5 },
+    //            Bottom row: wrists, waist, worn
+    '14a': { name: 'Wrist 1',  col: 0, row: 6 },
+    10:   { name: 'Waist',     col: 1, row: 6 },
+    16:   { name: 'Worn',      col: 2, row: 6 },
+    '14b': { name: 'Wrist 2',  col: 3, row: 6 },
+    //            Top row: rings flanking helm
+    '4a':  { name: 'Ring 1',   col: 1, row: 0 },
+    '4b':  { name: 'Ring 2',   col: 3, row: 0 },
 };
 
 // Portrait spans the center area (cols 1-3, rows 1-5)
@@ -38,6 +41,7 @@ class CharPanel {
         this._inventory = [];   // [{name, key, item_data}, ...]
         this._charName = '';
         this._portraitUrl = '';
+        this._portraitKey = '';
         this._el = null;
         this._build();
         this._initDrag();
@@ -103,6 +107,14 @@ class CharPanel {
         portraitImg.textContent = '?';
         this._portraitImg = portraitImg;
         portrait.appendChild(portraitImg);
+
+        // Right-click portrait to set a custom image
+        portrait.addEventListener('contextmenu', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            this._pickPortrait();
+        });
+
         equipGrid.appendChild(portrait);
 
         // Equipment slots
@@ -206,6 +218,7 @@ class CharPanel {
     setCharName(name) {
         this._charName = name;
         this._titleEl.textContent = name || 'Character';
+        this.loadPortrait();
     }
 
     setPortrait(url) {
@@ -301,6 +314,54 @@ class CharPanel {
             }
 
             this._invGrid.appendChild(cell);
+        }
+    }
+
+    _pickPortrait() {
+        const input = document.createElement('input');
+        input.type = 'file';
+        input.accept = 'image/*';
+        input.onchange = async () => {
+            const file = input.files[0];
+            if (!file) return;
+            const name = this._charName || 'default';
+            const form = new FormData();
+            form.append('file', file);
+            form.append('char_name', name);
+            try {
+                const res = await fetch('/api/portrait/upload', { method: 'POST', body: form });
+                const data = await res.json();
+                if (data.ok) {
+                    this.setPortrait(`/api/portrait/${encodeURIComponent(name)}?_=${Date.now()}`);
+                }
+            } catch (e) {
+                console.error('Portrait upload failed:', e);
+            }
+        };
+        input.click();
+    }
+
+    loadPortrait() {
+        const name = this._charName || 'default';
+        // Check custom upload first, then fall back to slop portrait
+        fetch(`/api/portrait/${encodeURIComponent(name)}`)
+            .then(res => {
+                if (res.ok) {
+                    this.setPortrait(`/api/portrait/${encodeURIComponent(name)}?_=${Date.now()}`);
+                } else if (this._portraitKey) {
+                    this.setPortrait(`/api/asset/${encodeURIComponent(this._portraitKey)}`);
+                }
+            })
+            .catch(() => {});
+    }
+
+    setPortraitKey(key) {
+        this._portraitKey = key;
+        // If no custom portrait loaded, use the slop portrait
+        if (!this._portraitUrl || this._portraitUrl.includes('/api/asset/')) {
+            if (key) {
+                this.setPortrait(`/api/asset/${encodeURIComponent(key)}`);
+            }
         }
     }
 

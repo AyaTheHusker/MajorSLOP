@@ -14,7 +14,8 @@ from typing import Optional, Callable
 
 logger = logging.getLogger(__name__)
 
-CACHE_DIR = Path.home() / ".cache" / "mudproxy" / "depth"
+from .paths import default_cache_dir
+CACHE_DIR = default_cache_dir() / "depth"
 SCURRY_SCRIPTS = Path.home() / "CodeBase" / "Scurry" / "scripts"
 DEPTH_SCRIPT = SCURRY_SCRIPTS / "depth_estimate.py"
 INPAINT_SCRIPT = SCURRY_SCRIPTS / "depth_inpaint.py"

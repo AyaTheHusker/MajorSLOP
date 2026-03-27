@@ -10,7 +10,7 @@ import re
 import threading
 import time
 import urllib.request
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, fields, asdict
 from pathlib import Path
 from typing import Optional, Callable
 
@@ -19,7 +19,8 @@ from .gamedata import GameData
 
 logger = logging.getLogger(__name__)
 
-CACHE_BASE = Path.home() / ".cache" / "mudproxy"
+from .paths import default_cache_dir
+CACHE_BASE = default_cache_dir()
 ENTITY_DIR = CACHE_BASE / "entities"
 NPC_THUMB_DIR = CACHE_BASE / "npc"
 ITEM_THUMB_DIR = CACHE_BASE / "item"
@@ -61,6 +62,19 @@ class EntityInfo:
     equipment: list[str] = field(default_factory=list)  # for players
     full_name: str = ""  # full display name (e.g., "Bisquent Souleb" from brackets)
     last_seen: float = 0.0
+    race: str = ""  # parsed from player description (e.g., "Halfling")
+    class_name: str = ""  # parsed from player description (e.g., "Bard")
+    gender: str = ""  # "male" or "female" from pronouns in description
+    hair: str = ""  # hair description (e.g., "short brown")
+    eyes: str = ""  # eye color (e.g., "crimson")
+
+    @property
+    def portrait_key(self) -> str | None:
+        """Get slop key for pre-generated portrait based on race/class/gender."""
+        if self.race and self.class_name and self.gender:
+            key = f"portrait_{self.race}_{self.class_name}_{self.gender}"
+            return key.lower().replace(" ", "_").replace("-", "_")
+        return None
 
 
 class EntityDB:
@@ -131,14 +145,25 @@ class EntityDB:
 
     def _load_from_disk(self) -> None:
         """Load all persisted entity JSON files."""
+        reparsed = 0
         for f in ENTITY_DIR.glob("*.json"):
             try:
                 data = json.loads(f.read_text())
+                # Strip unknown fields that don't match EntityInfo
+                known = {fld.name for fld in fields(EntityInfo)}
+                data = {k: v for k, v in data.items() if k in known}
                 info = EntityInfo(**data)
                 self._entities[info.name.lower()] = info
+                # Re-parse player descriptions missing race/class from old cache
+                if info.entity_type == "player" and info.description and not info.race:
+                    self._parse_player_description(info)
+                    if info.race:
+                        self._save_entity(info)
+                        reparsed += 1
             except Exception as e:
                 logger.warning(f"Failed to load entity {f}: {e}")
-        logger.info(f"Loaded {len(self._entities)} entities from cache")
+        logger.info(f"Loaded {len(self._entities)} entities from cache"
+                     + (f" (re-parsed {reparsed} players)" if reparsed else ""))
 
     def _load_known_players(self) -> None:
         """Load known player names from disk."""
@@ -166,6 +191,39 @@ class EntityDB:
                 self._save_entity(info)
         self._save_known_players()
         logger.info(f"Known players updated: {self._known_players}")
+
+    def update_players_from_top(self, players: list[tuple[str, str]]) -> None:
+        """Add player names + classes from 'top' command output.
+        players: [(full_name, class_name), ...]"""
+        rerolled = []
+        for full_name, class_name in players:
+            first_name = full_name.split()[0]
+            self._known_players.add(first_name)
+            # Create or update entity with class info
+            key = first_name.lower()
+            info = self._entities.get(key)
+            if info is None:
+                info = EntityInfo(name=first_name, entity_type="player")
+                self._entities[key] = info
+            info.entity_type = "player"
+            info.full_name = full_name
+            # Detect reroll — class changed, invalidate cached description
+            new_class = class_name.title()
+            if info.class_name and info.class_name != new_class:
+                logger.info(f"Player {first_name} rerolled: {info.class_name} -> {new_class}")
+                info.description = ""
+                info.race = ""
+                info.gender = ""
+                info.hair = ""
+                info.eyes = ""
+                # Allow re-look
+                self._pending_looks.pop(key, None)
+                rerolled.append(first_name)
+            info.class_name = new_class
+            self._save_entity(info)
+        self._save_known_players()
+        logger.info(f"Top list: updated {len(players)} players with class info"
+                     + (f" ({len(rerolled)} rerolled)" if rerolled else ""))
 
     def is_known_player(self, name: str) -> bool:
         """Check if a name is a known player character."""
@@ -554,6 +612,7 @@ class EntityDB:
             if entity_type == "player":
                 existing.description = description
                 existing.equipment = self._parse_equipment(description)
+                self._parse_player_description(existing)
                 bracket_name = getattr(self, '_look_bracket_name', None)
                 if bracket_name:
                     existing.full_name = bracket_name
@@ -596,9 +655,10 @@ class EntityDB:
             info.full_name = bracket_name
             self._look_bracket_name = None
 
-        # Extract equipment for players
+        # Extract equipment and race/class/gender for players
         if entity_type == "player":
             info.equipment = self._parse_equipment(description)
+            self._parse_player_description(info)
 
         self._entities[base_lower] = info
         self._save_entity(info)
@@ -611,6 +671,95 @@ class EntityDB:
         threading.Thread(
             target=self._generate_entity_prompt, args=(info,), daemon=True
         ).start()
+
+    # ── Player description parser ──
+    # MajorMUD look format:
+    #   "Tripmunk is a healthy, moderately built Halfling Bard with short brown
+    #    hair and crimson eyes. He moves with catlike agility..."
+
+    _MAJORMUD_RACES = {
+        "human", "dwarf", "gnome", "halfling", "elf", "half-elf",
+        "dark-elf", "half-orc", "goblin", "half-ogre", "kang",
+        "nekojin", "gaunt one",
+    }
+    _MAJORMUD_CLASSES = {
+        "warrior", "witchunter", "paladin", "cleric", "priest",
+        "missionary", "ninja", "thief", "bard", "gypsy",
+        "warlock", "mage", "druid", "ranger", "mystic",
+    }
+
+    # Pattern: "{Name} is a/an {descriptors} {Race} {Class} with {hair} hair and {eye} eyes."
+    _RE_PLAYER_DESC = re.compile(
+        r'(\w+)\s+is\s+(?:a|an)\s+(.+?)\s+with\s+(.+?)\s+hair\s+and\s+(.+?)\s+eyes\b',
+        re.IGNORECASE | re.DOTALL,
+    )
+    # Fallback for bald/hairless races: "{Name} is a/an {descriptors} {Race} {Class} with {eye} eyes."
+    _RE_PLAYER_DESC_NO_HAIR = re.compile(
+        r'(\w+)\s+is\s+(?:a|an)\s+(.+?)\s+with\s+(.+?)\s+eyes\b',
+        re.IGNORECASE | re.DOTALL,
+    )
+
+    def _parse_player_description(self, info: EntityInfo) -> None:
+        """Extract race, class, gender, hair, eyes from a player's look description."""
+        if not info.description or info.entity_type != "player":
+            return
+
+        desc = " ".join(info.description.split())  # normalize whitespace
+
+        # Extract gender from pronoun usage
+        desc_lower = desc.lower()
+        if re.search(r'\bhe\b', desc_lower):
+            info.gender = "male"
+        elif re.search(r'\bshe\b', desc_lower):
+            info.gender = "female"
+
+        # Try full pattern first (with hair and eyes)
+        m = self._RE_PLAYER_DESC.search(desc)
+        if m:
+            info.hair = m.group(3).strip()
+            info.eyes = m.group(4).strip()
+            middle = m.group(2).strip()
+        else:
+            # Fallback: no hair mention (bald races like Kang, Gaunt One)
+            m = self._RE_PLAYER_DESC_NO_HAIR.search(desc)
+            if not m:
+                return
+            info.eyes = m.group(3).strip()
+            middle = m.group(2).strip()
+
+        # The middle part has build descriptors + race + class
+        # e.g., "healthy, moderately built Halfling Bard"
+        words = middle.split()
+
+        # Scan backwards to find class then race
+        # Class is always one word, race can be two ("Gaunt One", "Half-Elf", etc.)
+        found_class = ""
+        found_race = ""
+        for i in range(len(words) - 1, -1, -1):
+            w = words[i].lower().rstrip(",")
+            if not found_class and w in self._MAJORMUD_CLASSES:
+                found_class = w
+                continue
+            if not found_race:
+                # Check two-word races first
+                if i > 0:
+                    two_word = f"{words[i-1]} {words[i]}".lower().rstrip(",")
+                    if two_word in self._MAJORMUD_RACES:
+                        found_race = two_word
+                        break
+                if w in self._MAJORMUD_RACES:
+                    found_race = w
+                    break
+
+        if found_race:
+            # Title case for storage
+            info.race = found_race.title()
+        if found_class:
+            info.class_name = found_class.title()
+
+        if info.race and info.class_name and info.gender:
+            logger.info(f"Parsed player {info.name}: {info.gender} {info.race} {info.class_name} "
+                        f"(hair={info.hair}, eyes={info.eyes}, portrait={info.portrait_key})")
 
     # MajorMUD wound/health status phrases (shown at end of look responses)
     _WOUND_PATTERNS = re.compile(

@@ -42,8 +42,9 @@ class SlopEntry:
 
 class SlopLoader:
     def __init__(self, slop_dir: Path | None = None, cache_dir: Path | None = None):
-        self._slop_dir = slop_dir or (Path.home() / ".local" / "share" / "mudproxy" / "slop")
-        self._cache_dir = cache_dir or (Path.home() / ".cache" / "mudproxy")
+        from mudproxy.paths import default_slop_dir, default_cache_dir
+        self._slop_dir = slop_dir or default_slop_dir()
+        self._cache_dir = cache_dir or default_cache_dir()
         # key -> SlopEntry (indexed for fast seek-based reads)
         self._index: dict[str, SlopEntry] = {}
         # Alternate quality variant (lo-res if primary is hi-res, or vice versa)
