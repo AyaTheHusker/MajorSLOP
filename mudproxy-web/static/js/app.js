@@ -308,20 +308,39 @@ function _findItemDest(itemName) {
     return { x: window.innerWidth - 100, y: 80 };
 }
 
-function _findItemSrc() {
-    // Same logic in reverse for drops
+function _findItemSrc(itemName) {
+    // Find the specific item slot by name, falling back to last slot
+    const lowerName = (itemName || '').toLowerCase();
+
     if (typeof charPanel !== 'undefined' && charPanel._visible) {
         const cells = charPanel._invGrid?.querySelectorAll('.inv-cell.has-item');
-        if (cells && cells.length > 0) {
-            const last = cells[cells.length - 1];
-            const r = last.getBoundingClientRect();
-            return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+        if (cells) {
+            // Try matching by name first
+            for (const c of cells) {
+                const img = c.querySelector('img');
+                if (img && img.alt && img.alt.toLowerCase() === lowerName) {
+                    const r = c.getBoundingClientRect();
+                    return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+                }
+            }
+            if (cells.length > 0) {
+                const last = cells[cells.length - 1];
+                const r = last.getBoundingClientRect();
+                return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+            }
         }
     }
     if (typeof inventoryPanel !== 'undefined' && inventoryPanel.isOpen) {
         const grid = document.getElementById('inventory-grid');
         if (grid) {
             const slots = grid.querySelectorAll('.inv-item-slot');
+            // Try matching by name
+            for (const s of slots) {
+                if ((s.dataset.itemName || '').toLowerCase() === lowerName) {
+                    const r = s.getBoundingClientRect();
+                    return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+                }
+            }
             const last = slots[slots.length - 1];
             if (last) {
                 const r = last.getBoundingClientRect();
@@ -340,6 +359,40 @@ function _findItemSrc() {
 function handleItemTransfer(msg) {
     const { action, name, key } = msg;
     const imgSrc = key ? `/api/asset/${encodeURIComponent(key)}` : null;
+
+    // If no imgSrc from server, try to grab it from existing UI slots
+    if (!imgSrc) {
+        const lowerName = (name || '').toLowerCase();
+        // Check char panel inv cells
+        if (typeof charPanel !== 'undefined' && charPanel._visible && charPanel._invGrid) {
+            for (const img of charPanel._invGrid.querySelectorAll('img')) {
+                if (img.alt && img.alt.toLowerCase() === lowerName) {
+                    imgSrc = img.src; break;
+                }
+            }
+        }
+        // Check inventory panel slots
+        if (!imgSrc && typeof inventoryPanel !== 'undefined' && inventoryPanel.isOpen) {
+            const grid = document.getElementById('inventory-grid');
+            if (grid) {
+                for (const slot of grid.querySelectorAll('.inv-item-slot')) {
+                    if ((slot.dataset.itemName || '').toLowerCase() === lowerName) {
+                        const img = slot.querySelector('img');
+                        if (img) { imgSrc = img.src; break; }
+                    }
+                }
+            }
+        }
+        // Check ground loot thumbs
+        if (!imgSrc) {
+            for (const t of document.querySelectorAll('#item-thumbs .thumb')) {
+                if ((t.dataset.entityName || '').toLowerCase() === lowerName) {
+                    const img = t.querySelector('img');
+                    if (img) { imgSrc = img.src; break; }
+                }
+            }
+        }
+    }
 
     if (action === 'pickup') {
         // Source: ground item thumbnail
@@ -373,8 +426,31 @@ function handleItemTransfer(msg) {
             }
         }
     } else if (action === 'drop') {
-        const srcPos = _findItemSrc();
-        const destPos = { x: window.innerWidth / 2, y: window.innerHeight * 0.7 };
+        const srcPos = _findItemSrc(name);
+        // Find existing ground loot slot with this item, or target end of loot row
+        let destPos = null;
+        const groundThumbs = document.querySelectorAll('#item-thumbs .thumb');
+        for (const t of groundThumbs) {
+            if ((t.dataset.entityName || '').toLowerCase() === name.toLowerCase()) {
+                const r = t.getBoundingClientRect();
+                destPos = { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+                break;
+            }
+        }
+        if (!destPos) {
+            // No existing slot — target the loot row area (next to last item, or center)
+            const itemRow = document.getElementById('item-thumbs');
+            if (itemRow && groundThumbs.length > 0) {
+                const last = groundThumbs[groundThumbs.length - 1];
+                const r = last.getBoundingClientRect();
+                destPos = { x: r.right + 35, y: r.top + r.height / 2 };
+            } else if (itemRow) {
+                const r = itemRow.getBoundingClientRect();
+                destPos = { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+            } else {
+                destPos = { x: window.innerWidth / 2, y: window.innerHeight * 0.7 };
+            }
+        }
         _flyItemIcon(imgSrc, name, srcPos, destPos);
     }
 }
@@ -479,38 +555,70 @@ function updateRoom(data) {
     updateThumbnails('npc-thumbs', monsters);
     _scaleNpcRow(monsters.length);
     updateThumbnails('player-thumbs', players);
+    _scalePlayerRow(players.length);
     updateThumbnails('item-thumbs', data.items || []);
+    _scaleItemRow((data.items || []).length);
 }
 
-// ── NPC thumbnail scaling — cubic growth (sqrt cols), smooth shrink ──
-const NPC_BUDGET = 220;     // px — max container width
-const NPC_FULL_SIZE = 67;   // px — base thumb size at 1-3 count
-const NPC_GAP_BASE = 6;     // px
-const NPC_MIN_SCALE = 0.35; // floor for ~20 mobs
+// ── Cube grid scaling — always-square grid, shrinks to fit ──
+const CUBE_GAP = 4;          // px gap between thumbs
+const CUBE_MIN_SCALE = 0.30; // floor
+
+function _scaleCubeRow(rowId, count, baseSize, budget) {
+    const row = document.getElementById(rowId);
+    if (!row) return 1;
+    const isNpc = rowId === 'npc-thumbs';
+    const prefix = isNpc ? '--npc' : '--row';
+
+    if (count === 0) {
+        row.style.setProperty(prefix + '-cols', '1');
+        return 1;
+    }
+
+    // Square grid: cols = ceil(sqrt(count))
+    const cols = Math.ceil(Math.sqrt(count));
+    const rows = Math.ceil(count / cols);
+
+    // Shrink thumbs so the grid fits in the budget cube
+    const availW = budget - (cols - 1) * CUBE_GAP;
+    const availH = budget - (rows - 1) * CUBE_GAP;
+    const fitW = availW / cols;
+    const fitH = availH / rows;
+    const thumbSize = Math.min(baseSize, fitW, fitH);
+    const scale = Math.max(CUBE_MIN_SCALE, thumbSize / baseSize);
+    const finalSize = baseSize * scale;
+
+    row.style.setProperty(prefix + '-cols', cols);
+    row.style.setProperty(prefix + '-scale', scale.toFixed(3));
+    row.style.setProperty(prefix + '-thumb-size', finalSize.toFixed(1) + 'px');
+    row.style.setProperty(prefix + '-gap', CUBE_GAP + 'px');
+
+    return scale;
+}
+
+function _getScaleMult(settingKey) {
+    if (typeof roomView === 'undefined') return 1;
+    const pct = roomView.settings[settingKey] || '100%';
+    const scales = { '50%': 0.5, '75%': 0.75, '100%': 1.0, '125%': 1.25, '150%': 1.5,
+                     '200%': 2.0, '250%': 2.5, '300%': 3.0, '400%': 4.0 };
+    return scales[pct] || 1.0;
+}
 
 function _scaleNpcRow(count) {
-    const row = document.getElementById('npc-thumbs');
-    if (!row) return;
-    if (count === 0) { row.style.maxWidth = ''; return; }
-
-    // Cubic growth: cols = ceil(sqrt(count)), keeps it roughly square
-    const cols = Math.ceil(Math.sqrt(count));
-    // Scale: fit `cols` thumbs + gaps into the budget
-    const neededWidth = cols * NPC_FULL_SIZE + (cols - 1) * NPC_GAP_BASE;
-    let scale = Math.min(1, NPC_BUDGET / neededWidth);
-    scale = Math.max(NPC_MIN_SCALE, scale);
-
-    const thumbSize = NPC_FULL_SIZE * scale;
-    const gap = Math.max(2, NPC_GAP_BASE * scale);
-
-    row.style.setProperty('--npc-scale', scale.toFixed(3));
-    row.style.setProperty('--npc-thumb-size', thumbSize.toFixed(1) + 'px');
-    row.style.setProperty('--npc-gap', gap.toFixed(1) + 'px');
-    row.style.maxWidth = (cols * thumbSize + (cols - 1) * gap + 20) + 'px';
-
-    // Expose for combat effects — text scales gently (floor 0.75)
+    const mult = _getScaleMult('npcThumbScale');
+    const scale = _scaleCubeRow('npc-thumbs', count, Math.round(67 * mult), Math.round(220 * mult));
     window._npcScale = scale;
     window._npcCombatTextScale = Math.max(0.75, 0.6 + scale * 0.4);
+}
+
+function _scalePlayerRow(count) {
+    const mult = _getScaleMult('playerThumbScale');
+    _scaleCubeRow('player-thumbs', count, Math.round(67 * mult), Math.round(220 * mult));
+}
+
+function _scaleItemRow(count) {
+    const mult = _getScaleMult('lootThumbScale');
+    _scaleCubeRow('item-thumbs', count, Math.round(64 * mult), Math.round(220 * mult));
 }
 
 function updateThumbnails(containerId, entities) {
@@ -1079,6 +1187,7 @@ function initDraggablePanels() {
     if (playerRow) _makeDraggable(playerRow, 'player-panel-pos');
     if (itemRow) _makeDraggable(itemRow, 'item-panel-pos');
 }
+
 
 function _makeDraggable(el, storageKey) {
     let dragging = false;

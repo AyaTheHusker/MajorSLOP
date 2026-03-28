@@ -31,17 +31,6 @@ class ViewMenu {
                     type: 'radio', label: `${n}px`, key: 'scanlineThickness', value: n
                 }))
             },
-            { type: 'submenu', label: 'NPC Location', items: [
-                { type: 'radio', label: 'Above Image', key: 'npcLocation', value: 'above' },
-                { type: 'radio', label: 'Below Image', key: 'npcLocation', value: 'below' },
-                { type: 'radio', label: 'Floating', key: 'npcLocation', value: 'floating' },
-            ]},
-            { type: 'submenu', label: 'Loot Location', items: [
-                { type: 'radio', label: 'Above Image', key: 'lootLocation', value: 'above' },
-                { type: 'radio', label: 'Below Image', key: 'lootLocation', value: 'below' },
-                { type: 'radio', label: 'Floating', key: 'lootLocation', value: 'floating' },
-            ]},
-            { type: 'separator' },
             { type: 'toggle', label: 'Lock NPC Panel', key: 'npcLocked', default: false },
             { type: 'toggle', label: 'Lock Loot Panel', key: 'lootLocked', default: false },
             { type: 'toggle', label: 'EXP Bar', key: 'showExpBar', default: true },
@@ -49,6 +38,11 @@ class ViewMenu {
             { type: 'submenu', label: 'NPC Scale', items:
                 ['50%','75%','100%','125%','150%','200%','250%','300%','400%'].map(p => ({
                     type: 'radio', label: p, key: 'npcThumbScale', value: p
+                }))
+            },
+            { type: 'submenu', label: 'Player Scale', items:
+                ['50%','75%','100%','125%','150%','200%','250%','300%','400%'].map(p => ({
+                    type: 'radio', label: p, key: 'playerThumbScale', value: p
                 }))
             },
             { type: 'submenu', label: 'Loot Scale', items:
@@ -62,6 +56,13 @@ class ViewMenu {
                 }))
             },
         ]);
+
+        // Theme menu
+        const themeItems = Object.entries(UI_THEMES).map(([id, t]) => ({
+            type: 'radio', label: `${t.name} — ${t.desc}`, key: 'uiTheme', value: id,
+            onChange: (val) => applyTheme(val),
+        }));
+        this._addMenu(bar, 'Theme', themeItems);
 
         // Data menu — MDB + SLOP file selection
         this._addMenu(bar, 'Data', [

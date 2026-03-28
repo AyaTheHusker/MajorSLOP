@@ -143,6 +143,41 @@ class MudTerminal {
         });
         this._opSlider = opSlider;
 
+        // FX palette dropdown
+        const fxBtn = document.createElement('span');
+        fxBtn.className = 'mud-terminal-btn fx-btn';
+        fxBtn.textContent = 'FX';
+        fxBtn.title = 'Typing glow palette';
+        const fxMenu = document.createElement('div');
+        fxMenu.className = 'fx-palette-menu';
+        fxMenu.style.display = 'none';
+        const palettes = ['none','fire','ice','poison','electric','rainbow','purple','blood','gold'];
+        for (const p of palettes) {
+            const opt = document.createElement('div');
+            opt.className = 'fx-palette-opt';
+            const info = MudTerminal.FX_PALETTES[p];
+            opt.textContent = p === 'none' ? 'None' : info.name;
+            opt.dataset.palette = p;
+            opt.addEventListener('click', (e) => {
+                e.stopPropagation();
+                this._setFxPalette(p);
+                fxMenu.style.display = 'none';
+                // Update active marker
+                for (const o of fxMenu.querySelectorAll('.fx-palette-opt')) {
+                    o.classList.toggle('active', o.dataset.palette === p);
+                }
+            });
+            if (p === this._fxPalette) opt.classList.add('active');
+            fxMenu.appendChild(opt);
+        }
+        fxBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            fxMenu.style.display = fxMenu.style.display === 'none' ? 'block' : 'none';
+        });
+        document.addEventListener('click', () => { fxMenu.style.display = 'none'; });
+        fxBtn.appendChild(fxMenu);
+
+        controls.appendChild(fxBtn);
         controls.appendChild(opSlider);
         controls.appendChild(modeBtn);
         controls.appendChild(lockBtn);
@@ -157,41 +192,80 @@ class MudTerminal {
         this._termContainer = termContainer;
         panel.appendChild(termContainer);
 
-        // Input bar
+        // ── Input bar with auto-expanding textarea + chunk preview ──
         const inputBar = document.createElement('div');
         inputBar.className = 'mud-terminal-input-bar';
+
+        // Chunk preview area (shows above input when multi-chunk)
+        const chunkPreview = document.createElement('div');
+        chunkPreview.className = 'mud-chunk-preview';
+        chunkPreview.style.display = 'none';
+        this._chunkPreview = chunkPreview;
+        inputBar.appendChild(chunkPreview);
+
+        const inputRow = document.createElement('div');
+        inputRow.className = 'mud-input-row';
 
         const prompt = document.createElement('span');
         prompt.className = 'mud-terminal-prompt';
         prompt.textContent = '>';
 
-        const input = document.createElement('input');
-        input.type = 'text';
+        const input = document.createElement('textarea');
         input.className = 'mud-terminal-input';
         input.placeholder = 'Type command...';
         input.autocomplete = 'off';
         input.spellcheck = false;
+        input.rows = 1;
+
+        // Max chars per MUD line (after prefix)
+        this._maxLineLen = 76;
+        this._sending = false;
+
+        // Auto-resize textarea height
+        const autoResize = () => {
+            input.style.height = 'auto';
+            input.style.height = Math.min(input.scrollHeight, 120) + 'px';
+        };
+
+        input.addEventListener('input', () => {
+            autoResize();
+            this._onInputChange();
+            this._updateChunkPreview();
+        });
 
         input.addEventListener('keydown', (e) => {
-            if (e.key === 'Enter') {
-                const cmd = input.value;
-                if (cmd.length > 0) {
-                    this._cmdHistory.push(cmd);
-                    if (this._cmdHistory.length > 200) this._cmdHistory.shift();
-                    this._saveHistory();
-                }
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                if (this._sending) return; // already sending chunks
+                const raw = input.value;
+                if (raw.length === 0) return;
+
+                // Save to history
+                this._cmdHistory.push(raw);
+                if (this._cmdHistory.length > 200) this._cmdHistory.shift();
+                this._saveHistory();
                 this._historyIdx = -1;
                 this._currentInput = '';
-                if (cmd.startsWith('#')) {
-                    // Ghost command: #stop → @stop via ghost telepath
+
+                if (raw.startsWith('#')) {
                     const ghostName = localStorage.getItem('ghostName') || 'Yoder';
-                    const atCmd = _fuzzyGhostCmd(cmd.slice(1));
+                    const atCmd = _fuzzyGhostCmd(raw.slice(1));
                     this._send('ghost', { name: ghostName, at_cmd: atCmd });
+                    input.value = '';
+                    this._charTimestamps = [];
+                    autoResize();
+                    this._updateChunkPreview();
                 } else {
-                    this._send('inject', { text: cmd });
+                    const chunks = this._buildChunks(raw);
+                    input.value = '';
+                    this._charTimestamps = [];
+                    autoResize();
+                    this._updateChunkPreview();
+                    this._sendChunks(chunks);
                 }
-                input.value = '';
-            } else if (e.key === 'ArrowUp') {
+            } else if (e.key === 'Enter' && e.shiftKey) {
+                // Allow Shift+Enter for manual newline
+            } else if (e.key === 'ArrowUp' && input.selectionStart === 0) {
                 e.preventDefault();
                 if (this._historyIdx === -1) {
                     this._currentInput = input.value;
@@ -201,8 +275,11 @@ class MudTerminal {
                 }
                 if (this._historyIdx >= 0) {
                     input.value = this._cmdHistory[this._historyIdx];
+                    autoResize();
+                    this._onInputChange();
+                    this._updateChunkPreview();
                 }
-            } else if (e.key === 'ArrowDown') {
+            } else if (e.key === 'ArrowDown' && input.selectionStart === input.value.length) {
                 e.preventDefault();
                 if (this._historyIdx >= 0) {
                     this._historyIdx++;
@@ -212,19 +289,43 @@ class MudTerminal {
                     } else {
                         input.value = this._cmdHistory[this._historyIdx];
                     }
+                    autoResize();
+                    this._onInputChange();
+                    this._updateChunkPreview();
                 }
             }
         });
         this._input = input;
 
-        inputBar.appendChild(prompt);
-        inputBar.appendChild(input);
+        // Canvas overlay for glow typing FX
+        const inputWrap = document.createElement('div');
+        inputWrap.className = 'mud-input-wrap';
+
+        const fxCanvas = document.createElement('canvas');
+        fxCanvas.className = 'mud-input-fx';
+        fxCanvas.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;';
+        this._fxCanvas = fxCanvas;
+        this._fxCtx = fxCanvas.getContext('2d');
+        this._charTimestamps = [];
+        this._fxPalette = localStorage.getItem('termFxPalette') || 'none';
+        this._fxRaf = null;
+
+        inputWrap.appendChild(input);
+        inputWrap.appendChild(fxCanvas);
+
+        inputRow.appendChild(prompt);
+        inputRow.appendChild(inputWrap);
+        inputBar.appendChild(inputRow);
         panel.appendChild(inputBar);
+
+        // Start FX loop and apply saved palette
+        this._startFxLoop();
+        if (this._fxPalette !== 'none') this._setFxPalette(this._fxPalette);
 
         // ── MegaMUD Remote Actions slide-out ──
         const toggleArrow = document.createElement('div');
         toggleArrow.className = 'mega-tray-toggle';
-        toggleArrow.innerHTML = '&#x25BC;';
+        toggleArrow.innerHTML = 'MEGAMUD GHOST\u{1F47B} \u25BC INJECTION PANEL';
         toggleArrow.title = 'MegaMUD Remote Actions';
         panel.appendChild(toggleArrow);
 
@@ -246,7 +347,9 @@ class MudTerminal {
             e.stopPropagation();
             this._megaTrayOpen = !this._megaTrayOpen;
             tray.style.display = this._megaTrayOpen ? '' : 'none';
-            toggleArrow.innerHTML = this._megaTrayOpen ? '&#x25B2;' : '&#x25BC;';
+            toggleArrow.innerHTML = this._megaTrayOpen
+                ? 'MEGAMUD GHOST\u{1F47B} \u25B2 INJECTION PANEL'
+                : 'MEGAMUD GHOST\u{1F47B} \u25BC INJECTION PANEL';
             toggleArrow.classList.toggle('open', this._megaTrayOpen);
             this._positionTray();
         });
@@ -866,5 +969,293 @@ class MudTerminal {
             const h = JSON.parse(localStorage.getItem('termHistory') || '[]');
             if (Array.isArray(h)) this._cmdHistory = h.slice(-200);
         } catch {}
+    }
+
+    // ── Typing Glow FX ──
+
+    static FX_PALETTES = {
+        none:     null,
+        fire:     { colors: ['#ff4400','#ff8800','#ffcc00','#ffee88'], glow: '#ff6600', name: 'Fire' },
+        ice:      { colors: ['#00ccff','#44ddff','#88eeff','#ccf8ff'], glow: '#00aaff', name: 'Ice' },
+        poison:   { colors: ['#00ff44','#44ff88','#88ffaa','#ccffcc'], glow: '#00ff44', name: 'Poison' },
+        electric: { colors: ['#ffff00','#ffee44','#eedd88','#ddddaa'], glow: '#ffff00', name: 'Electric' },
+        rainbow:  { colors: null, glow: null, name: 'Rainbow', rainbow: true },
+        purple:   { colors: ['#cc44ff','#dd88ff','#eeaaff','#f0ccff'], glow: '#bb44ff', name: 'Arcane' },
+        blood:    { colors: ['#ff0000','#cc0022','#ff4444','#ff8888'], glow: '#ff0000', name: 'Blood' },
+        gold:     { colors: ['#ffd700','#ffcc00','#eeaa00','#ddcc88'], glow: '#ffcc00', name: 'Gold' },
+    };
+
+    _onInputChange() {
+        const val = this._input.value;
+        const now = performance.now();
+        // Grow timestamps array to match, trimming if chars deleted
+        while (this._charTimestamps.length < val.length) {
+            this._charTimestamps.push(now);
+        }
+        this._charTimestamps.length = val.length;
+    }
+
+    _startFxLoop() {
+        const loop = () => {
+            this._fxRaf = requestAnimationFrame(loop);
+            if (this._fxPalette === 'none' || !this._visible) return;
+            this._renderFx();
+        };
+        loop();
+    }
+
+    _renderFx() {
+        const canvas = this._fxCanvas;
+        const ctx = this._fxCtx;
+        const input = this._input;
+        const val = input.value;
+        const dpr = window.devicePixelRatio || 1;
+        const rect = input.getBoundingClientRect();
+        const w = rect.width, h = rect.height;
+        const cw = Math.round(w * dpr);
+        const ch = Math.round(h * dpr);
+
+        // Resize backing store to match input at device resolution
+        if (canvas.width !== cw || canvas.height !== ch) {
+            canvas.width = cw;
+            canvas.height = ch;
+        }
+
+        // MUST set transform every frame (canvas state resets on resize)
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        ctx.clearRect(0, 0, w, h);
+
+        if (!val) return;
+
+        const palette = MudTerminal.FX_PALETTES[this._fxPalette];
+        if (!palette) return;
+
+        const style = getComputedStyle(input);
+        const fontSize = parseFloat(style.fontSize) || 13;
+        const fontFamily = style.fontFamily || 'monospace';
+        ctx.font = `${fontSize}px ${fontFamily}`;
+        ctx.textBaseline = 'middle';
+
+        const now = performance.now();
+        const fadeMs = 2000;
+        const padLeft = (parseFloat(style.paddingLeft) || 8) + (parseFloat(style.borderLeftWidth) || 1);
+        const scrollLeft = input.scrollLeft || 0;
+        const yMid = h / 2;
+
+        let x = padLeft - scrollLeft;
+        for (let i = 0; i < val.length; i++) {
+            const c = val[i];
+            const charW = ctx.measureText(c).width;
+            const age = now - (this._charTimestamps[i] || now);
+            const t = Math.min(1, age / fadeMs); // 0 = fresh, 1 = fully faded
+
+            // ── Per-character color from palette ──
+            let r, g, b;
+            if (palette.rainbow) {
+                const hue = (i * 47) % 360;
+                // HSL → RGB for smooth fade
+                const s = 1 - t * 0.7;
+                const l = 0.65 - t * 0.2;
+                const [cr, cg, cb] = this._hsl2rgb(hue / 360, s, l);
+                r = cr; g = cg; b = cb;
+            } else {
+                // Interpolate through palette colors based on age
+                const pos = t * (palette.colors.length - 1);
+                const idx = Math.min(Math.floor(pos), palette.colors.length - 2);
+                const frac = pos - idx;
+                const c1 = this._hexToRgb(palette.colors[idx]);
+                const c2 = this._hexToRgb(palette.colors[idx + 1]);
+                r = Math.round(c1[0] + (c2[0] - c1[0]) * frac);
+                g = Math.round(c1[1] + (c2[1] - c1[1]) * frac);
+                b = Math.round(c1[2] + (c2[2] - c1[2]) * frac);
+            }
+
+            // Fade to dull white in the last 30%
+            if (t > 0.7) {
+                const f = (t - 0.7) / 0.3;
+                r = Math.round(r + (180 - r) * f);
+                g = Math.round(g + (180 - g) * f);
+                b = Math.round(b + (180 - b) * f);
+            }
+
+            // Glow halo — strong when fresh, fades out
+            const glow = Math.max(0, 1 - t);
+            if (glow > 0.05) {
+                const glowAlpha = (glow * 0.7).toFixed(2);
+                if (palette.rainbow) {
+                    ctx.shadowColor = `rgba(${r},${g},${b},${glowAlpha})`;
+                } else {
+                    const gc = this._hexToRgb(palette.glow);
+                    ctx.shadowColor = `rgba(${gc[0]},${gc[1]},${gc[2]},${glowAlpha})`;
+                }
+                ctx.shadowBlur = 12 * glow;
+            } else {
+                ctx.shadowColor = 'transparent';
+                ctx.shadowBlur = 0;
+            }
+
+            ctx.fillStyle = `rgb(${r},${g},${b})`;
+            ctx.fillText(c, x, yMid);
+            x += charW;
+        }
+
+        ctx.shadowColor = 'transparent';
+        ctx.shadowBlur = 0;
+    }
+
+    _hexToRgb(hex) {
+        const m = hex.match(/^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i);
+        if (m) return [parseInt(m[1],16), parseInt(m[2],16), parseInt(m[3],16)];
+        return [180, 180, 180];
+    }
+
+    _hsl2rgb(h, s, l) {
+        let r, g, b;
+        if (s === 0) { r = g = b = l; }
+        else {
+            const hue2rgb = (p, q, t) => {
+                if (t < 0) t += 1; if (t > 1) t -= 1;
+                if (t < 1/6) return p + (q - p) * 6 * t;
+                if (t < 1/2) return q;
+                if (t < 2/3) return p + (q - p) * (2/3 - t) * 6;
+                return p;
+            };
+            const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+            const p = 2 * l - q;
+            r = hue2rgb(p, q, h + 1/3);
+            g = hue2rgb(p, q, h);
+            b = hue2rgb(p, q, h - 1/3);
+        }
+        return [Math.round(r * 255), Math.round(g * 255), Math.round(b * 255)];
+    }
+
+    _setFxPalette(name) {
+        this._fxPalette = name;
+        localStorage.setItem('termFxPalette', name);
+        // Make input text transparent when FX active so canvas shows through
+        if (name === 'none') {
+            this._input.style.color = '';
+        } else {
+            this._input.style.color = 'transparent';
+            this._input.style.caretColor = '#88ff88';
+        }
+        // Reset timestamps so current text glows fresh
+        const now = performance.now();
+        this._charTimestamps = Array(this._input.value.length).fill(now);
+    }
+
+    // ── Chat command prefixes and chunking ──
+
+    // Known MUD chat prefixes: command → what to prepend on continuation lines
+    static CHAT_PREFIXES = [
+        { re: /^(gos(?:sip)?)\s+/i,      prefix: 'gos ' },
+        { re: /^(br(?:oadcast)?)\s+/i,    prefix: 'br ' },
+        { re: /^(say)\s+/i,              prefix: 'say ' },
+        { re: /^\.\s*/,                   prefix: '. ' },      // say shorthand
+        { re: /^(tell)\s+(\S+)\s+/i,     prefix: null, build: (m) => `tell ${m[2]} ` },
+        { re: /^(bg|gb)\s+/i,            prefix: 'bg ' },     // gangpath
+        { re: /^(yell)\s+/i,             prefix: 'yell ' },
+        { re: /^\/(\S+)\s+/i,            prefix: null, build: (m) => `/${m[1]} ` },  // telepath
+        { re: /^>(\S+)\s+/i,             prefix: null, build: (m) => `>${m[1]} ` },  // diverted say
+        { re: /^(auction)\s+/i,          prefix: 'auction ' },
+    ];
+
+    _detectPrefix(text) {
+        for (const p of MudTerminal.CHAT_PREFIXES) {
+            const m = text.match(p.re);
+            if (m) {
+                const pfx = p.build ? p.build(m) : p.prefix;
+                const body = text.slice(m[0].length);
+                return { prefix: pfx, body, fullFirst: m[0] };
+            }
+        }
+        return null; // not a chat command — send as-is
+    }
+
+    _buildChunks(raw) {
+        const detected = this._detectPrefix(raw);
+        if (!detected) return [raw]; // single command, no chunking
+
+        const { prefix, body, fullFirst } = detected;
+        const maxBody = this._maxLineLen - prefix.length;
+        if (maxBody <= 10) return [raw]; // prefix too long, just send raw
+
+        // Split body into word-wrapped chunks
+        const words = body.split(/\s+/);
+        const chunks = [];
+        let current = '';
+
+        for (const word of words) {
+            if (!word) continue;
+            const test = current ? current + ' ' + word : word;
+            if (test.length > maxBody && current) {
+                chunks.push(current);
+                current = word;
+            } else {
+                current = test;
+            }
+        }
+        if (current) chunks.push(current);
+
+        // Build final commands: first uses original prefix, rest use continuation prefix
+        return chunks.map((chunk, i) => {
+            if (i === 0) return fullFirst + chunk;
+            return prefix + chunk;
+        });
+    }
+
+    _updateChunkPreview() {
+        const raw = this._input.value;
+        const preview = this._chunkPreview;
+        if (!raw || raw.length <= this._maxLineLen) {
+            preview.style.display = 'none';
+            preview.innerHTML = '';
+            return;
+        }
+
+        const chunks = this._buildChunks(raw);
+        if (chunks.length <= 1) {
+            preview.style.display = 'none';
+            preview.innerHTML = '';
+            return;
+        }
+
+        preview.style.display = '';
+        preview.innerHTML = '';
+        const colors = ['rgba(60,80,120,0.3)', 'rgba(80,60,100,0.3)'];
+        for (let i = 0; i < chunks.length; i++) {
+            const row = document.createElement('div');
+            row.className = 'mud-chunk-row';
+            row.style.background = colors[i % 2];
+            const label = document.createElement('span');
+            label.className = 'mud-chunk-label';
+            label.textContent = `${i + 1}`;
+            const text = document.createElement('span');
+            text.className = 'mud-chunk-text';
+            text.textContent = chunks[i];
+            row.appendChild(label);
+            row.appendChild(text);
+            preview.appendChild(row);
+        }
+    }
+
+    async _sendChunks(chunks) {
+        if (chunks.length <= 1) {
+            this._send('inject', { text: chunks[0] || '' });
+            return;
+        }
+        this._sending = true;
+        this._input.disabled = true;
+        this._input.placeholder = 'Sending...';
+        for (let i = 0; i < chunks.length; i++) {
+            this._send('inject', { text: chunks[i] });
+            if (i < chunks.length - 1) {
+                await new Promise(r => setTimeout(r, 3000));
+            }
+        }
+        this._input.disabled = false;
+        this._input.placeholder = 'Type command...';
+        this._sending = false;
+        this._input.focus();
     }
 }

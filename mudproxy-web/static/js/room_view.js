@@ -63,8 +63,10 @@ class RoomView {
             npcLocked: false,
             lootLocked: false,
             npcThumbScale: '100%',
+            playerThumbScale: '100%',
             lootThumbScale: '100%',
             dmgTextScale: '100%',
+            uiTheme: localStorage.getItem('uiTheme') || 'greylord',
             proMode: 'off',
             ambientFilter: false,
         };
@@ -153,12 +155,11 @@ class RoomView {
             case 'npcThumbScale':
                 this._applyThumbScale('npc-thumbs', value);
                 break;
+            case 'playerThumbScale':
+                this._applyThumbScale('player-thumbs', value);
+                break;
             case 'lootThumbScale':
                 this._applyThumbScale('item-thumbs', value);
-                break;
-            case 'npcLocation':
-            case 'lootLocation':
-                this._applyEntityPanelMode();
                 break;
             case 'showExpBar':
                 if (typeof expBar !== 'undefined') expBar.toggle(value);
@@ -168,18 +169,8 @@ class RoomView {
 
     _applyEntityPanelMode() {
         const panel = document.getElementById('entity-panel');
-        const npcLoc = this.settings.npcLocation || 'floating';
-        const lootLoc = this.settings.lootLocation || 'floating';
-
-        panel.classList.remove('dock-above', 'dock-below', 'floating');
-
-        if (npcLoc === 'floating' || lootLoc === 'floating') {
-            panel.classList.add('floating');
-        } else if (npcLoc === 'above') {
-            panel.classList.add('dock-above');
-        } else {
-            panel.classList.add('dock-below');
-        }
+        panel.classList.remove('dock-above', 'dock-below');
+        panel.classList.add('floating');
     }
 
     _applyThumbScale(containerId, pct) {
@@ -188,26 +179,19 @@ class RoomView {
         const mult = scales[pct] || 1.0;
         const isItem = containerId === 'item-thumbs';
         const baseSize = isItem ? 64 : 67;
+        const budget = Math.round(220 * mult);
         const container = document.getElementById(containerId);
         const count = container.querySelectorAll('.thumb').length;
 
-        let size;
-        if (isItem && count > 4) {
-            // Auto-grid: pack into a square-ish block, shrink as count grows
-            const fullSize = Math.round(baseSize * mult);
-            const maxBox = Math.round(fullSize * 3.5);
-            const cols = Math.ceil(Math.sqrt(count));
-            const fitSize = Math.floor((maxBox - (cols - 1) * 4) / cols);
-            size = Math.max(Math.min(fitSize, fullSize), 20);
-            container.style.maxWidth = `${maxBox + 16}px`;
-        } else {
-            size = Math.round(baseSize * mult);
-            container.style.maxWidth = '';
-        }
-
-        for (const thumb of container.querySelectorAll('.thumb')) {
-            thumb.style.width = `${size}px`;
-            thumb.style.height = `${size}px`;
+        // Re-run cube scaling with the new budget
+        if (typeof _scaleCubeRow === 'function') {
+            if (containerId === 'npc-thumbs') {
+                _scaleCubeRow('npc-thumbs', count, Math.round(baseSize * mult), budget);
+            } else if (containerId === 'player-thumbs') {
+                _scaleCubeRow('player-thumbs', count, Math.round(baseSize * mult), budget);
+            } else {
+                _scaleCubeRow('item-thumbs', count, Math.round(baseSize * mult), budget);
+            }
         }
     }
 
