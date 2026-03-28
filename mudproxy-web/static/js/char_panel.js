@@ -152,6 +152,15 @@ class CharPanel {
                 if (typeof hideTooltip === 'function') hideTooltip();
             });
 
+            // Right-click context menu for equipped items
+            slot.addEventListener('contextmenu', (e) => {
+                const item = this._equipment[slotId];
+                if (!item || !item.name) return;
+                e.preventDefault();
+                e.stopPropagation();
+                this._showEquipMenu(e.clientX, e.clientY, item);
+            });
+
             equipGrid.appendChild(slot);
             this._slotEls[slotId] = { el: slot, icon, label };
         }
@@ -195,8 +204,12 @@ class CharPanel {
             if (!dragging) return;
             const dx = e.clientX - startX;
             const dy = e.clientY - startY;
-            this._el.style.left = `${origLeft + dx}px`;
-            this._el.style.top = `${origTop + dy}px`;
+            const r = this._el.getBoundingClientRect();
+            let nl = origLeft + dx, nt = origTop + dy;
+            nt = Math.max(0, Math.min(nt, window.innerHeight - 32));
+            nl = Math.max(-r.width + 80, Math.min(nl, window.innerWidth - 80));
+            this._el.style.left = `${nl}px`;
+            this._el.style.top = `${nt}px`;
         });
 
         document.addEventListener('mouseup', () => {
@@ -230,6 +243,70 @@ class CharPanel {
             this._portraitImg.textContent = '?';
             this._portraitImg.style.backgroundImage = '';
         }
+    }
+
+    _showInvItemMenu(x, y, item) {
+        document.querySelectorAll('.inv-context-menu').forEach(m => m.remove());
+
+        const menu = document.createElement('div');
+        menu.className = 'inv-context-menu';
+        menu.style.left = `${x}px`;
+        menu.style.top = `${y}px`;
+
+        const actions = [
+            ['Equip', () => sendCommand('inject', { text: `equ ${item.name}` })],
+            ['Drop', () => sendCommand('inject', { text: `dro ${item.name}` })],
+            ['Sell', () => sendCommand('inject', { text: `sel ${item.name}` })],
+        ];
+
+        for (const [label, action] of actions) {
+            const menuItem = document.createElement('div');
+            menuItem.className = 'inv-context-item';
+            menuItem.textContent = label;
+            menuItem.onclick = () => { menu.remove(); action(); };
+            menu.appendChild(menuItem);
+        }
+
+        document.body.appendChild(menu);
+        const closeHandler = (e) => {
+            if (!menu.contains(e.target)) {
+                menu.remove();
+                document.removeEventListener('click', closeHandler);
+            }
+        };
+        setTimeout(() => document.addEventListener('click', closeHandler), 0);
+    }
+
+    _showEquipMenu(x, y, item) {
+        document.querySelectorAll('.inv-context-menu').forEach(m => m.remove());
+
+        const menu = document.createElement('div');
+        menu.className = 'inv-context-menu';
+        menu.style.left = `${x}px`;
+        menu.style.top = `${y}px`;
+
+        const actions = [
+            ['Unequip', () => sendCommand('inject', { text: `rem ${item.name}` })],
+            ['Drop', () => sendCommand('inject', { text: `dro ${item.name}` })],
+            ['Sell', () => sendCommand('inject', { text: `sel ${item.name}` })],
+        ];
+
+        for (const [label, action] of actions) {
+            const menuItem = document.createElement('div');
+            menuItem.className = 'inv-context-item';
+            menuItem.textContent = label;
+            menuItem.onclick = () => { menu.remove(); action(); };
+            menu.appendChild(menuItem);
+        }
+
+        document.body.appendChild(menu);
+        const closeHandler = (e) => {
+            if (!menu.contains(e.target)) {
+                menu.remove();
+                document.removeEventListener('click', closeHandler);
+            }
+        };
+        setTimeout(() => document.addEventListener('click', closeHandler), 0);
     }
 
     setEquipment(slotId, item) {
@@ -310,6 +387,13 @@ class CharPanel {
                 });
                 cell.addEventListener('mouseleave', () => {
                     if (typeof hideTooltip === 'function') hideTooltip();
+                });
+
+                // Right-click context menu for inventory items
+                cell.addEventListener('contextmenu', (e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    this._showInvItemMenu(e.clientX, e.clientY, item);
                 });
             }
 

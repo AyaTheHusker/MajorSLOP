@@ -1,11 +1,11 @@
 // ── Chat Panel — unified chat window with channel filters and command history ──
 
 const CHAT_CHANNELS = {
-    gossip:    { label: 'Gos',   color: '#44cc66' },
-    broadcast: { label: 'Broad', color: '#cc8844' },
-    gangpath:  { label: 'Gang',  color: '#cc44cc' },
-    telepath:  { label: 'Tell',  color: '#44cccc' },
-    say:       { label: 'Say',   color: '#cccccc' },
+    gossip:    { label: 'Gos',   color: '#ffb088' },
+    broadcast: { label: 'Broad', color: '#eedd44' },
+    gangpath:  { label: 'Gang',  color: '#aa8844' },
+    telepath:  { label: 'Tell',  color: '#dd88cc' },
+    say:       { label: 'Say',   color: '#8888dd' },
     auction:   { label: 'Auct',  color: '#cccc44' },
 };
 
@@ -71,6 +71,21 @@ class ChatPanel {
             this.toggle(false);
         });
 
+        // Transparency slider
+        const opSlider = document.createElement('input');
+        opSlider.type = 'range';
+        opSlider.className = 'panel-opacity-slider';
+        opSlider.min = '10';
+        opSlider.max = '100';
+        opSlider.value = '92';
+        opSlider.title = 'Panel transparency';
+        opSlider.addEventListener('input', () => {
+            this._applyOpacity(Number(opSlider.value));
+            this._saveState();
+        });
+        this._opSlider = opSlider;
+
+        controls.appendChild(opSlider);
         controls.appendChild(lockBtn);
         controls.appendChild(closeBtn);
         header.appendChild(title);
@@ -116,7 +131,7 @@ class ChatPanel {
         const input = document.createElement('input');
         input.type = 'text';
         input.className = 'chat-input';
-        input.placeholder = 'gos hello / tel player msg / say hi';
+        input.placeholder = '';
         input.autocomplete = 'off';
         input.spellcheck = false;
 
@@ -138,6 +153,17 @@ class ChatPanel {
         panel.appendChild(inputRow);
         document.body.appendChild(panel);
         this._el = panel;
+    }
+
+    _applyOpacity(val) {
+        const alpha = val / 100;
+        const blur = Math.round((1 - alpha) * 20);
+        this._el.style.background = `rgba(16, 16, 28, ${alpha * 0.3})`;
+        this._el.style.backdropFilter = blur > 0 ? `blur(${blur}px)` : 'none';
+        this._el.style.webkitBackdropFilter = blur > 0 ? `blur(${blur}px)` : 'none';
+        this._opacity = val;
+        // Make message area semi-transparent too
+        this._msgArea.style.background = `rgba(16, 16, 28, ${alpha * 0.5})`;
     }
 
     _send() {
@@ -255,6 +281,7 @@ class ChatPanel {
         header.addEventListener('mousedown', (e) => {
             if (this._locked) return;
             if (e.button !== 0) return;
+            if (e.target.closest('.panel-opacity-slider') || e.target.closest('.chat-panel-controls')) return;
             dragging = true;
             startX = e.clientX;
             startY = e.clientY;
@@ -269,8 +296,12 @@ class ChatPanel {
             if (!dragging) return;
             const dx = e.clientX - startX;
             const dy = e.clientY - startY;
-            this._el.style.left = `${origLeft + dx}px`;
-            this._el.style.top = `${origTop + dy}px`;
+            const r = this._el.getBoundingClientRect();
+            let nl = origLeft + dx, nt = origTop + dy;
+            nt = Math.max(0, Math.min(nt, window.innerHeight - 32));
+            nl = Math.max(-r.width + 80, Math.min(nl, window.innerWidth - 80));
+            this._el.style.left = `${nl}px`;
+            this._el.style.top = `${nt}px`;
         });
 
         document.addEventListener('mouseup', () => {
@@ -291,6 +322,7 @@ class ChatPanel {
                 visible: this._visible,
                 locked: this._locked,
                 filters: this._filters,
+                opacity: this._opacity,
             };
             localStorage.setItem('panelPositions', JSON.stringify(saved));
         } catch {}
@@ -306,6 +338,10 @@ class ChatPanel {
                 if (s.locked) {
                     this._locked = true;
                     this._lockBtn.textContent = '\u{1F512}';
+                }
+                if (s.opacity != null) {
+                    this._opSlider.value = s.opacity;
+                    this._applyOpacity(s.opacity);
                 }
                 if (s.filters) {
                     for (const [key, val] of Object.entries(s.filters)) {

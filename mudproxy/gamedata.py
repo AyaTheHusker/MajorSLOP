@@ -354,6 +354,14 @@ class GameData:
     def get_spell(self, num: int) -> dict | None:
         return self._spells.get(num)
 
+    def get_heal_spell_names(self) -> set[str]:
+        """Return lowercase names of all spells with Ability 18 (heal flag)."""
+        names = set()
+        for spell in self._spells.values():
+            if any(a.get('Abil') == 18 for a in spell.get('abilities', [])):
+                names.add(spell['Name'].lower())
+        return names
+
     # ── Validation ──
 
     def is_valid_entity(self, name: str, entity_type: str = "creature") -> bool:

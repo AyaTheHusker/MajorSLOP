@@ -24,7 +24,7 @@ class NavPanel {
             const tag = e.target.tagName.toLowerCase();
             const skip = e.target.closest('#header, #side-panel, .menu-dropdown, .nav-panel-overlay, ' +
                 '.context-menu, .thumb, .char-panel, .chat-panel, .mud-terminal-container, ' +
-                '.data-picker-overlay, .thumb-tooltip');
+                '.data-picker-overlay, .thumb-tooltip, .inventory-panel');
             if (skip) return;
             if (tag === 'input' || tag === 'textarea' || tag === 'button' || tag === 'select') return;
 
@@ -432,10 +432,8 @@ class NavPanel {
         const ghostName = localStorage.getItem('ghostName') || 'Yoder';
         let atCmd;
         if (type === 'loop') {
-            // @loop takes the .mp filename
-            atCmd = `@loop ${file || code}`;
+            atCmd = `@loop ${(file || name).toLowerCase()}.mp`;
         } else {
-            // @goto takes the full room name
             atCmd = `@goto ${name}`;
         }
         this._sendCommand('ghost', { name: ghostName, at_cmd: atCmd });

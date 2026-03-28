@@ -146,6 +146,7 @@ class Orchestrator:
         self.proxy = MudProxy(config)
         self.parser = MudParser()
         self.gamedata = GameData()  # loads from ~/.cache/mudproxy/gamedata/
+        self._heal_spell_names: set[str] = self.gamedata.get_heal_spell_names() if self.gamedata.is_loaded else set()
         self.hp_tracker = HPTracker(self.gamedata)
         self.entity_db = EntityDB(on_look_complete=self._on_look_complete)
 
@@ -163,6 +164,7 @@ class Orchestrator:
         self._combat_target: str | None = None
         self._char_name = ""
         self._broadcast_channel = ""
+        self._exp_status: dict | None = None  # {exp, level, needed, total_for_level, percent}
         self._online_players: list[str] = []
         self._self_looked = False
         self._last_bracket_player = None  # tracks "[ Name ]" bracket line for player detection
@@ -170,9 +172,9 @@ class Orchestrator:
         self._inv_sync_task: asyncio.Task | None = None
         self._last_inv_sync = 0
         self._last_entity_move = 0.0  # cooldown for entity movement Enter
-        self.ambient_filter_enabled = True  # strip ambient sounds from MegaMud
+        self.ambient_filter_enabled = False  # strip ambient sounds from MegaMud
         # Pro mode: "silent" (ParaMUD, invisible), "loud" (ParaMUD, visible), "off" (Legacy MMUD)
-        self.pro_mode = "loud"
+        self.pro_mode = "off"
         self._stealthed = False  # True after "Attempting to sneak..." until broken
         self._hidden = False     # True after "Attempting to hide..." until broken
         self._last_room_update = 0.0  # timestamp of last on_room_update
@@ -180,6 +182,31 @@ class Orchestrator:
         self._room_count_since_pro = 0  # rooms visited since last pro
         self._pro_every_n_rooms = 5     # fire pro every N rooms
         self._spellbook: dict | None = None  # parsed from 'spells'/'powers' command
+        self._inventory: dict | None = None  # parsed from inventory command
+        self._last_missing_check = 0.0  # cooldown for _check_missing_data
+        self._portrait_confirmed = False  # True once l firstname has been sent AND portrait emitted
+        self._last_item_refresh = 0.0  # cooldown for i+enter after item pickup/drop
+
+        # ── Permanent ANSI log — rolling 50K lines ──
+        self._ansi_log_path = Path('/tmp/mudproxy_ansi.log')
+        self._ansi_log_max = 50000
+        self._ansi_log_lines = 0
+        try:
+            self._ansi_log_f = open(self._ansi_log_path, 'a', encoding='utf-8')
+        except Exception:
+            self._ansi_log_f = None
+
+        # ── Smart command queue ──
+        # Combat Engaged: instant burst (0.3s window), then done
+        # Resting: 2s confirm wait, burst, then 5s slow roll
+        # Walking: 60s cooldown, almost never fires
+        self._cmd_queue: list[str] = []
+        self._in_combat = False
+        self._is_resting = False
+        self._rest_confirmed = False  # True after 2s resting confirmation
+        self._last_cmd_inject = 0.0
+        self._last_move_cmd = 0.0
+        self._cmd_drain_task: asyncio.Task | None = None
 
         # Room position tracking — ground truth from pro, predictions from MDB exits
         self._current_map: int | None = None
@@ -213,6 +240,8 @@ class Orchestrator:
         self.parser.on_combat = self._on_combat
         self.parser.on_death = self._on_death
         self.parser.on_xp = self._on_xp
+        self.parser.on_coin_drop = self._on_coin_drop
+        self.parser.on_coin_transfer = self._on_coin_transfer
         self.parser.on_chat = self._on_chat
         self.parser.on_char_name = self._on_char_name
         self.parser.on_who_list = self._on_who_list
@@ -222,6 +251,8 @@ class Orchestrator:
         self.parser.on_stat_advanced = self._on_stat_advanced
         self.parser.on_inventory = self._on_inventory
         self.parser.on_spellbook = self._on_spellbook
+        self.parser.on_exp_status = self._on_exp_status
+        self.parser.on_item_transfer = self._on_item_transfer
 
     async def start(self):
         """Initialize and load data, start TCP proxy listener for MegaMud."""
@@ -286,6 +317,20 @@ class Orchestrator:
         return stripped.strip() in _AMBIENT_MESSAGES
 
     def _on_raw_line(self, stripped: str, ansi: str):
+        # Permanent ANSI log — every line with raw escape codes
+        if self._ansi_log_f:
+            try:
+                self._ansi_log_f.write(repr(ansi) + '\n')
+                self._ansi_log_f.flush()
+                self._ansi_log_lines += 1
+                # Rotate: truncate when over max
+                if self._ansi_log_lines > self._ansi_log_max:
+                    self._ansi_log_f.close()
+                    self._ansi_log_f = open(self._ansi_log_path, 'w', encoding='utf-8')
+                    self._ansi_log_lines = 0
+            except Exception:
+                pass
+
         try:
             self.parser.feed_line(stripped, ansi)
         except Exception as e:
@@ -314,6 +359,36 @@ class Orchestrator:
                 self._try_parse_player_inline(self._last_bracket_player, joined)
                 self._last_bracket_player = None
                 self._player_desc_buf = None
+
+        # ── Combat state tracking ──
+        if s == '*Combat Engaged*':
+            self._in_combat = True
+            self._is_resting = False
+            self._rest_confirmed = False
+            # Emit engage event when active target changes (switch targets)
+            cur_target = self._combat_target
+            prev_target = getattr(self, '_active_engage_target', None)
+            if cur_target and cur_target != prev_target:
+                self._active_engage_target = cur_target
+                self._emit("combat_engage", {"target": cur_target})
+            # Instant burst — dump all queued commands in ~0.3s window
+            if self._cmd_queue and self._loop and self.proxy.connected:
+                self._loop.create_task(self._combat_burst())
+        elif s == '*Combat Off*':
+            self._in_combat = False
+
+        # ── Resting detection ──
+        if '(Resting)' in s:
+            if not self._is_resting:
+                self._is_resting = True
+                self._rest_confirmed = False
+                # Wait 2 sec to confirm actually resting, then burst
+                if self._loop and self.proxy.connected:
+                    self._loop.create_task(self._rest_confirm_and_burst())
+        elif self._is_resting and ('[HP=' in s and '(Resting)' not in s):
+            # Got a prompt without (Resting) — stopped resting
+            self._is_resting = False
+            self._rest_confirmed = False
 
         # ── Stealth tracking ──
         if s == 'Attempting to sneak...':
@@ -397,20 +472,100 @@ class Orchestrator:
             pass
 
     async def _inv_sync_loop(self):
-        """Periodically inject 'i' to keep inventory synced."""
+        """Periodically inject 'i' to keep inventory synced.
+        Waits until in-game before sending anything."""
         import time
-        await asyncio.sleep(2)  # initial delay after connect
+        # Wait until we're actually in the MUD (first HP prompt)
+        while not self._in_game:
+            await asyncio.sleep(1)
+        await asyncio.sleep(2)  # short settle after entering game
         try:
-            await self.proxy.inject_command("i")
-            self._last_inv_sync = time.monotonic()
+            if self.proxy.connected:
+                await self.proxy.inject_command("i")
+                self._last_inv_sync = time.monotonic()
         except Exception:
             pass
         while True:
             await asyncio.sleep(60)  # sync every 60 seconds
             try:
-                if self.proxy.connected:
+                if self.proxy.connected and self._in_game:
                     await self.proxy.inject_command("i")
                     self._last_inv_sync = time.monotonic()
+            except Exception:
+                pass
+
+    # ── Smart Command Queue ──
+    # Combat Engaged: instant 0.3s burst window, dump everything, done
+    # Resting: 2s confirm, burst, then 5s slow roll for new items
+    # Walking: 60s cooldown, almost never fires
+
+    def queue_info_cmd(self, cmd: str):
+        """Queue an info command for smart injection."""
+        if cmd not in self._cmd_queue:
+            self._cmd_queue.append(cmd)
+        # If resting (confirmed), start slow-roll drain
+        if self._rest_confirmed and self._is_resting:
+            self._start_drain()
+        # Walking drain — only if cooldown elapsed
+        elif not self._in_combat and not self._is_resting:
+            self._start_drain()
+
+    def _start_drain(self):
+        if not self._cmd_queue:
+            return
+        if self._cmd_drain_task and not self._cmd_drain_task.done():
+            return
+        if self._loop and self.proxy.connected:
+            self._cmd_drain_task = self._loop.create_task(self._walk_drain_loop())
+
+    async def _combat_burst(self):
+        """Instant burst: dump all queued commands in ~0.3s, then stop."""
+        cmds = list(self._cmd_queue)
+        self._cmd_queue.clear()
+        for cmd in cmds:
+            if not self.proxy.connected:
+                break
+            try:
+                await self.proxy.inject_command(cmd)
+            except Exception:
+                pass
+            await asyncio.sleep(0.05)  # tiny stagger, whole burst < 0.3s
+        self._last_cmd_inject = time.monotonic()
+
+    async def _rest_confirm_and_burst(self):
+        """Wait 2s to confirm resting, then burst + start slow roll."""
+        await asyncio.sleep(2.0)
+        if not self._is_resting:
+            return  # stopped resting during confirm window
+        self._rest_confirmed = True
+        # Burst all queued commands
+        cmds = list(self._cmd_queue)
+        self._cmd_queue.clear()
+        for cmd in cmds:
+            if not self.proxy.connected or not self._is_resting:
+                break
+            try:
+                await self.proxy.inject_command(cmd)
+            except Exception:
+                pass
+            await asyncio.sleep(0.05)
+        self._last_cmd_inject = time.monotonic()
+        # Start slow roll for any new commands that arrive during rest
+        self._start_drain()
+
+    async def _walk_drain_loop(self):
+        """Drain commands with appropriate cooldown: 5s while resting, 60s while walking."""
+        while self._cmd_queue and self.proxy.connected:
+            cooldown = 5.0 if (self._is_resting and self._rest_confirmed) else 60.0
+            elapsed = time.monotonic() - self._last_cmd_inject
+            if elapsed < cooldown:
+                await asyncio.sleep(cooldown - elapsed)
+            if not self._cmd_queue or not self.proxy.connected:
+                break
+            cmd = self._cmd_queue.pop(0)
+            try:
+                await self.proxy.inject_command(cmd)
+                self._last_cmd_inject = time.monotonic()
             except Exception:
                 pass
 
@@ -432,6 +587,132 @@ class Orchestrator:
         elif self.pro_mode == "loud":
             self.proxy._web_hiding_pro = True
             asyncio.ensure_future(self.proxy.inject_command("pro"))
+
+    async def _initial_populate(self):
+        """Triggered by first HP line. Waits 8s then sends stat, i, l firstname.
+        Retries l firstname every 10s until portrait is no longer '?' (up to 5 tries)."""
+        await asyncio.sleep(8)
+        if not self._in_game or not self.proxy.connected:
+            return
+
+        # stat first — gets char name
+        logger.info("Initial populate: sending 'stat'")
+        await self.proxy.inject_command("stat")
+        await asyncio.sleep(3)
+
+        # i — gets inventory
+        logger.info("Initial populate: sending 'i'")
+        await self.proxy.inject_command("i")
+        await asyncio.sleep(3)
+
+        # exp — gets experience bar data
+        logger.info("Initial populate: sending 'exp'")
+        await self.proxy.inject_command("exp")
+        await asyncio.sleep(3)
+
+        # l firstname — ALWAYS send it to get fresh portrait data
+        # Wait for char_name (stat might take a while during combat)
+        for _ in range(10):
+            if self._char_name:
+                break
+            logger.info("Initial populate: waiting for char_name from stat...")
+            await asyncio.sleep(2)
+        if not self._char_name:
+            logger.warning("Initial populate: no char_name after 20s, giving up (will retry via _check_missing_data)")
+            return
+        first_name = self._char_name.split()[0]
+        logger.info(f"Initial populate: sending 'l {first_name}'")
+        self.entity_db.start_look(first_name, "player")
+        await self.proxy.inject_command(f"l {first_name}")
+
+    async def _look_self_on_reconnect(self, first_name: str):
+        """Send 'l firstname' immediately when client reconnects with missing portrait."""
+        await asyncio.sleep(2)
+        if not self._in_game or not self.proxy.connected:
+            return
+        logger.info(f"Client reconnect: sending 'l {first_name}'")
+        self.entity_db.start_look(first_name, "player")
+        await self.proxy.inject_command(f"l {first_name}")
+
+    async def _check_missing_data(self):
+        """Called on every HP line. Checks what UI data is missing and re-queues
+        commands through the smart command system every 15s until filled.
+        queue_info_cmd dedupes, so this just keeps pushing until the data arrives."""
+        now = time.monotonic()
+        if now - self._last_missing_check < 15:
+            return
+        self._last_missing_check = now
+
+        if not self.proxy.connected:
+            return
+
+        # 1. Need char name → stat
+        if not self._char_name:
+            self.queue_info_cmd("stat")
+            logger.info("_check_missing_data: queued 'stat' (no char name)")
+
+        # 2. Need portrait → l firstname  (TOP PRIORITY once we have name)
+        #    Always send until _portrait_confirmed — don't trust cached portrait_key
+        if self._char_name and not self._portrait_confirmed:
+            first_name = self._char_name.split()[0]
+            cmd = f"l {first_name}"
+            self.entity_db.start_look(first_name, "player")
+            self.queue_info_cmd(cmd)
+            logger.info(f"_check_missing_data: queued '{cmd}' (portrait not confirmed)")
+
+        # 3. Need inventory → i
+        if self._inventory is None:
+            self.queue_info_cmd("i")
+            logger.info("_check_missing_data: queued 'i' (no inventory)")
+
+        # 4. Need exp → exp
+        if self._exp_status is None:
+            self.queue_info_cmd("exp")
+            logger.info("_check_missing_data: queued 'exp' (no exp data)")
+
+    async def _portrait_poll_loop(self):
+        """Dedicated loop: keeps sending 'l firstname' until portrait is confirmed.
+        10s in combat, 60s while walking. Direct inject, no queue."""
+        while self._in_game and self.proxy.connected and not self._portrait_confirmed:
+            # Wait for char_name first
+            if not self._char_name:
+                await asyncio.sleep(3)
+                continue
+            first_name = self._char_name.split()[0]
+            logger.info(f"PORTRAIT POLL: sending 'l {first_name}'")
+            self.entity_db.start_look(first_name, "player")
+            try:
+                await self.proxy.inject_command(f"l {first_name}")
+            except Exception as e:
+                logger.error(f"PORTRAIT POLL: inject failed: {e}")
+            # 10s in combat, 60s otherwise
+            delay = 10 if self._in_combat else 60
+            await asyncio.sleep(delay)
+        logger.info(f"PORTRAIT POLL: done (confirmed={self._portrait_confirmed})")
+
+    async def _exp_refresh_loop(self):
+        """Queue 'exp' every 2 minutes through the smart command system."""
+        while self._in_game:
+            await asyncio.sleep(120)
+            if not self._in_game or not self.proxy.connected:
+                break
+            self.queue_info_cmd("exp")
+
+    def on_client_connect(self):
+        """Called when a web client connects/refreshes. Re-emits cached state."""
+        # Reset portrait flag and restart portrait poll loop
+        self._portrait_confirmed = False
+        self._last_missing_check = 0.0
+        if self._in_game and self._loop and self.proxy.connected:
+            self._loop.create_task(self._portrait_poll_loop())
+
+        # Instant re-emit of whatever we have
+        if self._char_name:
+            self._emit("char_name", {"name": self._char_name})
+        if self._inventory:
+            self._emit("inventory", self._inventory)
+        if self._exp_status:
+            self._emit("exp_status", self._exp_status)
 
     _TOP_CACHE_FILE = Path.home() / ".cache" / "mudproxy" / "top_list_last.json"
     _TOP_STALE_DAYS = 3
@@ -473,7 +754,7 @@ class Orchestrator:
         if self._in_game and self.proxy.connected:
             logger.info(f"Auto-looking at self: {name}")
             self.entity_db.start_look(name, "player")
-            await self.proxy.inject_command(f"look {name}")
+            await self.proxy.inject_command(f"l {name}")
 
     def _on_disconnect(self):
         self._emit("connection", {"status": "disconnected"})
@@ -512,6 +793,9 @@ class Orchestrator:
 
         # Movement command — track direction and predict destination
         if first_word in self._MOVE_CMDS and self._in_game:
+            self._last_move_cmd = time.monotonic()
+            self._is_resting = False  # movement breaks rest
+            self._rest_confirmed = False
             move_dir = self._normalize_direction(first_word)
             if move_dir:
                 self._last_move_dir = move_dir
@@ -584,10 +868,11 @@ class Orchestrator:
             self._predicted_room = int(parts[1])
             pred_room_data = self.gamedata.get_room(self._predicted_map, self._predicted_room)
             pred_name = pred_room_data['Name'] if pred_room_data else '???'
-            logger.info(
-                f"Walked {direction} → Expected Map {self._predicted_map}/"
-                f"Room {self._predicted_room} ({pred_name})"
-            )
+            if self.pro_mode != "off":
+                logger.info(
+                    f"Walked {direction} → Expected Map {self._predicted_map}/"
+                    f"Room {self._predicted_room} ({pred_name})"
+                )
             self._emit("room_prediction", {
                 "direction": direction,
                 "predicted_map": self._predicted_map,
@@ -651,6 +936,9 @@ class Orchestrator:
 
     def _on_room_update(self, room):
         old_room = self._room_name
+        # New room = clear engage target so next combat pulses fresh
+        if room.name != old_room:
+            self._active_engage_target = None
         self._room_name = room.name
         self._room_desc = room.description
         self._room_exits = room.exits
@@ -672,16 +960,17 @@ class Orchestrator:
             pred_room = self.gamedata.get_room(self._current_map, self._current_room)
             pred_name = pred_room['Name'] if pred_room else '???'
             # Verify room name matches what parser saw
-            if pred_room and pred_room['Name'].lower() == room.name.lower():
-                logger.info(
-                    f"Dead reckoning: Map {self._current_map}/Room {self._current_room} "
-                    f"({pred_name}) — name matches"
-                )
-            else:
-                logger.warning(
-                    f"Dead reckoning: Map {self._current_map}/Room {self._current_room} "
-                    f"({pred_name}) — name MISMATCH (saw: {room.name!r})"
-                )
+            if self.pro_mode != "off":
+                if pred_room and pred_room['Name'].lower() == room.name.lower():
+                    logger.info(
+                        f"Dead reckoning: Map {self._current_map}/Room {self._current_room} "
+                        f"({pred_name}) — name matches"
+                    )
+                else:
+                    logger.warning(
+                        f"Dead reckoning: Map {self._current_map}/Room {self._current_room} "
+                        f"({pred_name}) — name MISMATCH (saw: {room.name!r})"
+                    )
             self._predicted_map = None
             self._predicted_room = None
             self._emit("room_position", {
@@ -781,6 +1070,11 @@ class Orchestrator:
             self._in_game = True
             self._fire_pro()
             self._maybe_schedule_top()
+            # Populate inventory + stats after entering game
+            if self._loop:
+                self._loop.create_task(self._initial_populate())
+                self._loop.create_task(self._exp_refresh_loop())
+                self._loop.create_task(self._portrait_poll_loop())
         self._hp = hp
         self._max_hp = max_hp
         self._mana = mana
@@ -789,8 +1083,39 @@ class Orchestrator:
             "hp": hp, "max_hp": max_hp,
             "mana": mana, "max_mana": max_mana,
         })
+        # Every HP line: check if we're missing critical data and fix it
+        if self._loop:
+            self._loop.create_task(self._check_missing_data())
 
     def _on_combat(self, line: str):
+        # Any combat line breaks resting
+        if self._is_resting:
+            self._is_resting = False
+            self._rest_confirmed = False
+        # "at you" means enemy can see you — stealth is broken
+        # Exceptions: heal spells (from MDB, Ability 18) and known players (PvE realm)
+        line_lower = line.lower()
+        if ' at you' in line_lower:
+            # Check if line contains a known heal spell name from the MDB
+            is_heal = any(name in line_lower for name in self._heal_spell_names)
+            # Check if actor is a known player (from who list or room entities)
+            is_player_action = False
+            if not is_heal:
+                known_players = set(p.lower() for p in self._online_players)
+                # Also include players currently in the room
+                for m in self._room_monsters:
+                    # Players in "Also here" have bracket names but room_monsters
+                    # may contain them — check against known player list
+                    if m.strip().lower() in known_players:
+                        is_player_action = any(
+                            m.strip().lower().split()[0] in line_lower
+                            for _ in [1]  # check first name
+                        )
+                        if is_player_action:
+                            break
+            if not is_heal and not is_player_action:
+                self._stealthed = False
+                self._hidden = False
         # Parse damage from combat line and update HP tracker
         import re
 
@@ -835,10 +1160,49 @@ class Orchestrator:
 
     def _on_death(self):
         self._combat_target = None
+        self._active_engage_target = None
         self._emit("death", {})
+
+    def _on_coin_drop(self, amount: int, coin_type: str):
+        self._emit("coin_drop", {
+            "amount": amount,
+            "coin_type": coin_type,
+            "target": self._combat_target,
+        })
+
+    def _on_coin_transfer(self, data: dict):
+        self._emit("coin_transfer", data)
+        # Queue room refresh after pickup/drop so ground piles update
+        action = data.get("action")
+        if action in ("pickup", "drop"):
+            self.queue_info_cmd("")  # empty enter = room refresh
+
+    def _on_item_transfer(self, data: dict):
+        """Handle item pickup/drop — emit with thumbnail key for fly animation.
+        Both pickup and drop: send 'i' + enter to refresh inventory AND ground.
+        10s cooldown after the first burst."""
+        name = data.get("name", "")
+        key = self.slop.get_entity_thumb_key(name) if name else None
+        data["key"] = key
+        self._emit("item_transfer", data)
+        if self.proxy.connected and self._loop:
+            asyncio.ensure_future(self._item_refresh_burst())
+
+    async def _item_refresh_burst(self):
+        """Send 'i' then two enters to refresh both inventory and ground items."""
+        try:
+            await self.proxy.inject_command("i")
+            await asyncio.sleep(0.1)
+            await self.proxy.inject_command("")
+            await asyncio.sleep(0.1)
+            await self.proxy.inject_command("")
+        except Exception:
+            pass
 
     def _on_xp(self, amount: int):
         self._emit("xp_gain", {"amount": amount})
+        # Queue exp refresh through the smart command system
+        self.queue_info_cmd("exp")
 
     def _on_chat(self, sender: str, message: str, channel: str):
         self._emit("chat", {
@@ -868,13 +1232,11 @@ class Orchestrator:
     def _on_char_name(self, name: str):
         self._char_name = name
         self._emit("char_name", {"name": name})
-        # Auto-look at ourselves once to populate our own portrait
-        if not self._self_looked:
+        # Always look at self when we learn our name — no cache checks
+        if not self._self_looked and self._loop and self.proxy.connected:
+            self._self_looked = True
             first_name = name.split()[0]
-            entity_info = self.entity_db.get_entity(first_name)
-            if not entity_info or not entity_info.portrait_key:
-                self._self_looked = True
-                asyncio.ensure_future(self._delayed_self_look(first_name))
+            asyncio.ensure_future(self._delayed_self_look(first_name))
 
     def _try_parse_player_inline(self, full_name: str, desc_line: str):
         """Parse player race/class/gender directly from description line in the stream."""
@@ -895,6 +1257,7 @@ class Orchestrator:
             my_first = self._char_name.split()[0] if self._char_name else ""
             if my_first and first_name.lower() == my_first.lower() and info.portrait_key:
                 self._emit("char_portrait", {"key": info.portrait_key})
+                self._portrait_confirmed = True
 
     def _on_look_complete(self, target: str, info):
         """Called when a look response is fully parsed for any entity."""
@@ -903,6 +1266,7 @@ class Orchestrator:
             first_name = self._char_name.split()[0] if self._char_name else ""
             if first_name and target.lower().startswith(first_name.lower()):
                 self._emit("char_portrait", {"key": info.portrait_key})
+                self._portrait_confirmed = True
 
     def _on_wound_status(self, monster_name: str, wound_level: str):
         """Handle wound status from looking at a monster — update HP estimate."""
@@ -998,12 +1362,17 @@ class Orchestrator:
         for e in carried:
             logger.info(f"  carried: {e['name']}")
 
-        self._emit("inventory", {
+        # Use structured currency from parser (parsed from carrying line items)
+        currency = inv_data.currency if inv_data.currency else {}
+
+        self._inventory = {
             "equipped": equipped,
             "carried": carried,
             "wealth": inv_data.wealth,
+            "currency": currency,
             "encumbrance": getattr(inv_data, 'encumbrance', ''),
-        })
+        }
+        self._emit("inventory", self._inventory)
 
     def _on_pro(self, pro_data: dict):
         bc = pro_data.get("broadcast_channel", "")
@@ -1014,6 +1383,10 @@ class Orchestrator:
 
     def _on_stat_advanced(self, data: dict):
         self._emit("stat_advanced", data)
+
+    def _on_exp_status(self, data: dict):
+        self._exp_status = data
+        self._emit("exp_status", data)
 
     def _on_spellbook(self, data: dict):
         """Player typed 'spells' or 'powers' — store and broadcast their spellbook."""
@@ -1089,6 +1462,14 @@ class Orchestrator:
                 entry["currency"] = currency
             items.append(entry)
 
+        # Resolve own portrait key from entity_db
+        char_portrait_key = None
+        if self._char_name:
+            first_name = self._char_name.split()[0]
+            entity_info = self.entity_db.get_entity(first_name)
+            if entity_info and entity_info.portrait_key:
+                char_portrait_key = entity_info.portrait_key
+
         return {
             "room_name": self._room_name,
             "name": self._room_name,
@@ -1104,6 +1485,7 @@ class Orchestrator:
             "max_mana": self._max_mana,
             "combat_target": self._combat_target,
             "char_name": self._char_name,
+            "char_portrait_key": char_portrait_key,
             "broadcast_channel": self._broadcast_channel,
             "connected": self.proxy.connected,
             "slop_stats": self.slop.get_stats(),
@@ -1115,4 +1497,6 @@ class Orchestrator:
                 "confirmed": self._position_confirmed,
             } if self._current_map is not None else None,
             "online_players": self._online_players,
+            "inventory": self._inventory,
+            "exp_status": self._exp_status,
         }

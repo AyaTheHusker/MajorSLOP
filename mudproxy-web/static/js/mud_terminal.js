@@ -3,6 +3,58 @@
 // Supports direct typing on the terminal surface (arrow keys, escape seqs for BBS menus)
 // and a convenience input box with command history.
 
+// ── Fuzzy ghost command matching ──
+// All known MegaMUD @commands in exact format
+const _GHOST_CMDS = [
+    'version','health','exp','level','status','lives','where','path','seen','who',
+    'what','wealth','enc','have','home','settings','stop','rego','goto','loop',
+    'looponce','get-all','drop-all','equip-all','deposit-all','do','hangup','relog',
+    'reset','invite','join','forget','roam','attack-last','auto-all','auto-combat',
+    'auto-nuke','auto-heal','auto-bless','auto-light','auto-cash','auto-get',
+    'auto-sneak','auto-hide','auto-search','divert','wait','ok','comeback','heal',
+    'blind','diseased','held','party','kill','share','panic!',
+];
+
+function _levenshtein(a, b) {
+    const m = a.length, n = b.length;
+    if (m === 0) return n;
+    if (n === 0) return m;
+    const d = Array.from({length: m + 1}, (_, i) => [i]);
+    for (let j = 1; j <= n; j++) d[0][j] = j;
+    for (let i = 1; i <= m; i++) {
+        for (let j = 1; j <= n; j++) {
+            d[i][j] = a[i-1] === b[j-1]
+                ? d[i-1][j-1]
+                : 1 + Math.min(d[i-1][j], d[i][j-1], d[i-1][j-1]);
+        }
+    }
+    return d[m][n];
+}
+
+function _fuzzyGhostCmd(raw) {
+    // Split into command word + args: "#goto SBNK" → ["goto", "SBNK"]
+    const parts = raw.trim().split(/\s+/);
+    let typed = parts[0].toLowerCase();
+    const args = parts.slice(1).join(' ');
+
+    // Exact match first
+    if (_GHOST_CMDS.includes(typed)) return '@' + typed + (args ? ' ' + args : '');
+
+    // Fuzzy: find closest command within edit distance 2
+    let bestCmd = null, bestDist = 999;
+    for (const cmd of _GHOST_CMDS) {
+        const dist = _levenshtein(typed, cmd);
+        if (dist < bestDist) { bestDist = dist; bestCmd = cmd; }
+    }
+
+    // Only accept if distance <= 2 (or <= 3 for longer commands)
+    const maxDist = bestCmd && bestCmd.length >= 6 ? 3 : 2;
+    if (bestDist <= maxDist) typed = bestCmd;
+    // else: send as-is, let it fail naturally
+
+    return '@' + typed + (args ? ' ' + args : '');
+}
+
 class MudTerminal {
     constructor(sendFn) {
         this._send = sendFn;
@@ -77,6 +129,21 @@ class MudTerminal {
             this.toggle(false);
         });
 
+        // Transparency slider
+        const opSlider = document.createElement('input');
+        opSlider.type = 'range';
+        opSlider.className = 'panel-opacity-slider';
+        opSlider.min = '10';
+        opSlider.max = '100';
+        opSlider.value = '95';
+        opSlider.title = 'Panel transparency';
+        opSlider.addEventListener('input', () => {
+            this._applyOpacity(Number(opSlider.value));
+            this._saveState();
+        });
+        this._opSlider = opSlider;
+
+        controls.appendChild(opSlider);
         controls.appendChild(modeBtn);
         controls.appendChild(lockBtn);
         controls.appendChild(closeBtn);
@@ -115,7 +182,14 @@ class MudTerminal {
                 }
                 this._historyIdx = -1;
                 this._currentInput = '';
-                this._send('inject', { text: cmd });
+                if (cmd.startsWith('#')) {
+                    // Ghost command: #stop → @stop via ghost telepath
+                    const ghostName = localStorage.getItem('ghostName') || 'Yoder';
+                    const atCmd = _fuzzyGhostCmd(cmd.slice(1));
+                    this._send('ghost', { name: ghostName, at_cmd: atCmd });
+                } else {
+                    this._send('inject', { text: cmd });
+                }
                 input.value = '';
             } else if (e.key === 'ArrowUp') {
                 e.preventDefault();
@@ -147,8 +221,143 @@ class MudTerminal {
         inputBar.appendChild(input);
         panel.appendChild(inputBar);
 
+        // ── MegaMUD Remote Actions slide-out ──
+        const toggleArrow = document.createElement('div');
+        toggleArrow.className = 'mega-tray-toggle';
+        toggleArrow.innerHTML = '&#x25BC;';
+        toggleArrow.title = 'MegaMUD Remote Actions';
+        panel.appendChild(toggleArrow);
+
+        const tray = document.createElement('div');
+        tray.className = 'mega-tray';
+        tray.style.display = 'none';
+        this._megaTray = tray;
+        this._megaTrayOpen = false;
+
+        this._positionTray = () => {
+            if (!this._megaTrayOpen) return;
+            const r = panel.getBoundingClientRect();
+            tray.style.left = r.left + 'px';
+            tray.style.width = r.width + 'px';
+            tray.style.top = r.bottom + 'px';
+        };
+
+        toggleArrow.addEventListener('click', (e) => {
+            e.stopPropagation();
+            this._megaTrayOpen = !this._megaTrayOpen;
+            tray.style.display = this._megaTrayOpen ? '' : 'none';
+            toggleArrow.innerHTML = this._megaTrayOpen ? '&#x25B2;' : '&#x25BC;';
+            toggleArrow.classList.toggle('open', this._megaTrayOpen);
+            this._positionTray();
+        });
+
+        // Helper: create glossy button
+        const ghostName = () => localStorage.getItem('ghostName') || 'Yoder';
+        const mkBtn = (emoji, label, atCmd, color) => {
+            const btn = document.createElement('button');
+            btn.className = 'mega-btn' + (color ? ' mega-btn-' + color : '');
+            btn.innerHTML = emoji;
+            btn.title = label;
+            btn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                this._send('ghost', { name: ghostName(), at_cmd: atCmd });
+                btn.classList.add('mega-btn-pulse');
+                setTimeout(() => btn.classList.remove('mega-btn-pulse'), 400);
+            });
+            return btn;
+        };
+
+        // Row 1: Action commands
+        const row1 = document.createElement('div');
+        row1.className = 'mega-row';
+        row1.appendChild(mkBtn('\u{1F6D1}', 'Stop',        '@stop'));       // stop sign
+        row1.appendChild(mkBtn('\u{25B6}\u{FE0F}',  'Resume (Rego)', '@rego'));       // play
+        row1.appendChild(mkBtn('\u{1F91A}', 'Get All',      '@get-all'));    // grabbing hand
+        row1.appendChild(mkBtn('\u{1F6BD}', 'Drop All',     '@drop-all'));   // toilet
+        row1.appendChild(mkBtn('\u{1F6E1}\u{FE0F}',  'Equip All',    '@equip-all')); // shield
+        row1.appendChild(mkBtn('\u{1F3E6}', 'Deposit All',  '@deposit-all'));// bank
+        tray.appendChild(row1);
+
+        // Divider
+        const div1 = document.createElement('div');
+        div1.className = 'mega-divider';
+        tray.appendChild(div1);
+
+        // Row 2+3: Toggle commands (ON green / OFF red stacked pairs)
+        const toggles = [
+            ['\u{2694}\u{FE0F}',  'Attack Last',  'attack-last'],
+            ['\u{1F4A5}', 'Auto Combat',  'auto-combat'],
+            ['\u{2622}\u{FE0F}',  'Auto Nuke',    'auto-nuke'],
+            ['\u{2764}\u{FE0F}',  'Auto Heal',    'auto-heal'],
+            ['\u{1F64F}', 'Auto Bless',   'auto-bless'],
+            ['\u{1F4A1}', 'Auto Light',   'auto-light'],
+            ['\u{1FA99}', 'Auto Cash',    'auto-cash'],
+            ['\u{1F9F2}', 'Auto Get',     'auto-get'],
+            ['\u{1F977}', 'Auto Sneak',   'auto-sneak'],
+            ['\u{1F648}', 'Auto Hide',    'auto-hide'],
+            ['\u{1F50D}', 'Auto Search',  'auto-search'],
+        ];
+
+        const rowOn = document.createElement('div');
+        rowOn.className = 'mega-row';
+        const rowOff = document.createElement('div');
+        rowOff.className = 'mega-row';
+
+        for (const [emoji, label, cmd] of toggles) {
+            rowOn.appendChild(mkBtn(emoji, label + ' ON',  '@' + cmd + ' on',  'green'));
+            rowOff.appendChild(mkBtn(emoji, label + ' OFF', '@' + cmd + ' off', 'red'));
+        }
+        tray.appendChild(rowOn);
+        tray.appendChild(rowOff);
+
+        // Divider
+        const div2 = document.createElement('div');
+        div2.className = 'mega-divider';
+        tray.appendChild(div2);
+
+        // Roam ON/OFF
+        const roamRow = document.createElement('div');
+        roamRow.className = 'mega-row';
+        roamRow.appendChild(mkBtn('\u{1F9ED}', 'Roam ON',  '@roam on',  'green'));  // compass
+        roamRow.appendChild(mkBtn('\u{1F9ED}', 'Roam OFF', '@roam off', 'red'));
+        tray.appendChild(roamRow);
+
         document.body.appendChild(panel);
+        document.body.appendChild(tray);
         this._el = panel;
+    }
+
+    _applyOpacity(val) {
+        const alpha = val / 100;
+        const blur = Math.round((1 - alpha) * 20);
+        // Panel outer shell — light tint + blur
+        this._el.style.background = `rgba(10, 10, 20, ${(alpha * 0.3).toFixed(2)})`;
+        this._el.style.backdropFilter = blur > 0 ? `blur(${blur}px)` : 'none';
+        this._el.style.webkitBackdropFilter = blur > 0 ? `blur(${blur}px)` : 'none';
+        this._opacity = val;
+
+        // Terminal body container
+        this._termContainer.style.background = `rgba(10, 10, 20, ${(alpha * 0.5).toFixed(2)})`;
+
+        // xterm renders to a canvas — override the viewport/screen DOM layers
+        if (this._term) {
+            const vp = this._termContainer.querySelector('.xterm-viewport');
+            const screen = this._termContainer.querySelector('.xterm-screen');
+            if (vp) {
+                vp.style.background = `rgba(10, 10, 20, ${(alpha * 0.6).toFixed(2)})`;
+            }
+            if (screen) {
+                screen.style.background = 'transparent';
+            }
+            // The canvas itself draws cells with the theme bg color.
+            // We can make the text layer canvas transparent by setting its opacity.
+            const canvases = this._termContainer.querySelectorAll('canvas');
+            for (const c of canvases) {
+                // The text layer canvas should remain visible;
+                // the background is rendered by a separate canvas or the viewport div
+                c.style.background = 'transparent';
+            }
+        }
     }
 
     _initXterm() {
@@ -202,6 +411,11 @@ class MudTerminal {
 
         this._term = term;
 
+        // Re-apply opacity now that xterm DOM exists
+        if (this._opacity != null) {
+            setTimeout(() => this._applyOpacity(this._opacity), 50);
+        }
+
         // Replay buffer
         for (const chunk of this._buffer) {
             term.write(chunk);
@@ -244,6 +458,10 @@ class MudTerminal {
         if (show === undefined) show = !this._visible;
         this._visible = show;
         this._el.style.display = show ? 'flex' : 'none';
+        // Hide mega tray when panel is hidden
+        if (!show && this._megaTray) {
+            this._megaTray.style.display = 'none';
+        }
         if (show) {
             this._initXterm();
             if (this._fitAddon) {
@@ -537,10 +755,18 @@ class MudTerminal {
             if (!dragging) return;
             const dx = e.clientX - startX;
             const dy = e.clientY - startY;
-            this._el.style.left = `${origLeft + dx}px`;
-            this._el.style.top = `${origTop + dy}px`;
+            // Clamp so the header always stays on screen
+            let newLeft = origLeft + dx;
+            let newTop = origTop + dy;
+            const rect = this._el.getBoundingClientRect();
+            const headerH = 32; // approximate header height
+            newTop = Math.max(0, Math.min(newTop, window.innerHeight - headerH));
+            newLeft = Math.max(-rect.width + 80, Math.min(newLeft, window.innerWidth - 80));
+            this._el.style.left = `${newLeft}px`;
+            this._el.style.top = `${newTop}px`;
             this._el.style.right = 'auto';
             this._el.style.bottom = 'auto';
+            if (this._positionTray) this._positionTray();
         });
 
         document.addEventListener('mouseup', () => {
@@ -562,6 +788,7 @@ class MudTerminal {
             if (w !== lastW || h !== lastH) {
                 lastW = w; lastH = h;
                 if (this._fitAddon) this._fitAddon.fit();
+                if (this._positionTray) this._positionTray();
             }
         };
         // Poll during active resize (mousedown on panel)
@@ -590,6 +817,7 @@ class MudTerminal {
                 height: this._el.style.height,
                 visible: this._visible,
                 locked: this._locked,
+                opacity: this._opacity,
             };
             localStorage.setItem('panelPositions', JSON.stringify(saved));
         } catch {}
@@ -608,8 +836,22 @@ class MudTerminal {
                     this._locked = true;
                     this._lockBtn.textContent = '\u{1F512}';
                 }
+                if (s.opacity != null) {
+                    this._opSlider.value = s.opacity;
+                    this._applyOpacity(s.opacity);
+                }
                 if (s.visible) this.toggle(true);
             }
+            // Clamp position to keep header on screen
+            requestAnimationFrame(() => {
+                const r = this._el.getBoundingClientRect();
+                let changed = false;
+                if (r.top < 0) { this._el.style.top = '0px'; changed = true; }
+                if (r.top > window.innerHeight - 32) { this._el.style.top = (window.innerHeight - 32) + 'px'; changed = true; }
+                if (r.left > window.innerWidth - 80) { this._el.style.left = (window.innerWidth - 80) + 'px'; changed = true; }
+                if (r.right < 80) { this._el.style.left = (-r.width + 80) + 'px'; changed = true; }
+                if (changed) this._saveState();
+            });
         } catch {}
     }
 

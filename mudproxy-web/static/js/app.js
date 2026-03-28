@@ -1,3 +1,20 @@
+// ── NPC name title-case formatter ──
+const _MINOR_WORDS = new Set(['of', 'or', 'and', 'the', 'in', 'a', 'an', 'to', 'for', 'on', 'at', 'by', 'from']);
+function npcTitleCase(name) {
+    return name.split(' ').map((w, i) => {
+        const lower = w.toLowerCase();
+        if (i > 0 && _MINOR_WORDS.has(lower)) return lower;
+        return lower.charAt(0).toUpperCase() + lower.slice(1);
+    }).join(' ');
+}
+
+// ── Glossy HP bar gradient helper ──
+function hpBarGradient(frac) {
+    if (frac > 0.5) return 'linear-gradient(180deg, #44dd66 0%, #22aa44 40%, #1a8833 100%)';
+    if (frac > 0.25) return 'linear-gradient(180deg, #ddcc33 0%, #aa9922 40%, #887718 100%)';
+    return 'linear-gradient(180deg, #dd4444 0%, #aa2222 40%, #881818 100%)';
+}
+
 // ── WebSocket connection and event routing ──
 
 let ws = null;
@@ -51,6 +68,27 @@ function handleEvent(msg) {
                 if (msg.ambient_filter_enabled !== undefined)
                     roomView.updateSetting('ambientFilter', msg.ambient_filter_enabled);
             }
+            if (typeof inventoryPanel !== 'undefined' && msg.inventory) {
+                inventoryPanel.update(msg.inventory);
+            }
+            // Restore char panel state on refresh
+            if (typeof charPanel !== 'undefined') {
+                if (msg.char_name) charPanel.setCharName(msg.char_name);
+                if (msg.char_portrait_key) charPanel.setPortraitKey(msg.char_portrait_key);
+                if (msg.inventory) {
+                    for (const [slotId, item] of Object.entries(msg.inventory.equipped || {})) {
+                        charPanel.setEquipment(slotId, item);
+                    }
+                    charPanel.setInventory(msg.inventory.carried || []);
+                }
+            }
+            if (typeof expBar !== 'undefined' && msg.exp_status) {
+                expBar.update(msg.exp_status);
+            }
+            break;
+
+        case 'exp_status':
+            if (typeof expBar !== 'undefined') expBar.update(msg);
             break;
 
         case 'room_update':
@@ -76,13 +114,59 @@ function handleEvent(msg) {
             hideTooltip();
             break;
 
+        case 'combat_engage':
+            if (typeof combatFx !== 'undefined' && msg.target) {
+                combatFx.showEngageSword(msg.target);
+            }
+            break;
+
+        case 'coin_drop':
+            if (typeof combatFx !== 'undefined') {
+                combatFx.queueCoinDrop(msg.amount, msg.coin_type, msg.target);
+            }
+            break;
+
+        case 'coin_transfer':
+            if (typeof combatFx !== 'undefined' && typeof inventoryPanel !== 'undefined') {
+                handleCoinTransfer(msg);
+            }
+            break;
+
+        case 'item_transfer':
+            handleItemTransfer(msg);
+            break;
+
         case 'xp_gain':
             addLog(`+${msg.amount.toLocaleString()} XP`, 'xp');
             hideTooltip();
-            // XP gain usually means the combat target just died — shatter it
+            // Flash exp bar and show floating +XP
+            if (typeof expBar !== 'undefined') {
+                expBar.flashGain(msg.amount);
+            }
+            // If no coin drops captured the shatter, do it now as fallback
             if (typeof combatFx !== 'undefined' && gameState.combat_target) {
-                const targetEl = combatFx._findTargetThumb(gameState.combat_target);
-                if (targetEl) combatFx.spawnShatter(targetEl);
+                if (!combatFx._shatterFired) {
+                    const targetEl = combatFx._findTargetThumb(gameState.combat_target);
+                    if (targetEl) {
+                        combatFx.captureShatter(targetEl);
+                    }
+                }
+                // Reset for next kill
+                combatFx._shatterCaptured = null;
+                combatFx._shatterFired = false;
+            }
+            break;
+
+        case 'inventory':
+            if (typeof inventoryPanel !== 'undefined') {
+                inventoryPanel.update(msg);
+            }
+            if (typeof charPanel !== 'undefined') {
+                charPanel.clearEquipment();
+                for (const [slotId, item] of Object.entries(msg.equipped || {})) {
+                    charPanel.setEquipment(slotId, item);
+                }
+                charPanel.setInventory(msg.carried || []);
             }
             break;
 
@@ -123,22 +207,221 @@ function handleEvent(msg) {
             }
             break;
 
-        case 'inventory':
-            if (typeof charPanel !== 'undefined') {
-                charPanel.clearEquipment();
-                for (const [slotId, item] of Object.entries(msg.equipped || {})) {
-                    charPanel.setEquipment(slotId, item);
-                }
-                charPanel.setInventory(msg.carried || []);
-            }
-            break;
-
         case 'raw_data':
             if (typeof mudTerminal !== 'undefined') {
                 mudTerminal.feedRaw(msg.data);
             }
             break;
     }
+}
+
+// ── Coin Transfer Animations ──
+
+function handleCoinTransfer(msg) {
+    const { action, amount, coin_type, player } = msg;
+    const invSlot = inventoryPanel.getCurrencySlotRect(coin_type);
+    const groundPile = combatFx._findCoinPileDest(coin_type);
+
+    // Optimistically update inventory currency counts
+    if (action === 'drop' || action === 'give' || action === 'deposit') {
+        inventoryPanel.adjustCurrency(coin_type, -amount);
+    } else if (action === 'pickup' || action === 'receive') {
+        inventoryPanel.adjustCurrency(coin_type, amount);
+    }
+
+    if (action === 'drop' && invSlot) {
+        combatFx.coinTransfer(amount, coin_type, invSlot, groundPile, true, true);
+    } else if (action === 'pickup') {
+        const dest = invSlot || { x: window.innerWidth - 100, y: 80 };
+        combatFx.coinTransfer(amount, coin_type, groundPile, dest, true, true);
+    } else if (action === 'give' && invSlot) {
+        const playerThumb = combatFx._findPlayerThumb(player);
+        const destPos = playerThumb
+            ? combatFx._getElementCenter(playerThumb)
+            : { x: window.innerWidth / 2, y: window.innerHeight / 2 };
+        combatFx.coinTransfer(amount, coin_type, invSlot, destPos, true, true);
+    } else if (action === 'receive') {
+        const playerThumb = combatFx._findPlayerThumb(player);
+        const srcPos = playerThumb
+            ? combatFx._getElementCenter(playerThumb)
+            : { x: window.innerWidth / 2, y: window.innerHeight / 2 };
+        const dest = invSlot || { x: window.innerWidth - 100, y: 80 };
+        combatFx.coinTransfer(amount, coin_type, srcPos, dest, true, true);
+    } else if (action === 'deposit' && invSlot) {
+        const bankPos = { x: invSlot.x, y: invSlot.y - 40 };
+        combatFx.coinTransfer(amount, coin_type, invSlot, bankPos, true, false);
+    }
+
+}
+
+function _findItemDest(itemName) {
+    const nameLower = (itemName || '').toLowerCase();
+    // 1. Char panel open?
+    if (typeof charPanel !== 'undefined' && charPanel._visible && charPanel._invGrid) {
+        // Try to find existing stack with same name
+        if (nameLower) {
+            for (const cell of charPanel._invGrid.querySelectorAll('.inv-cell.has-item')) {
+                const img = cell.querySelector('img');
+                if (img && img.alt && img.alt.toLowerCase() === nameLower) {
+                    const r = cell.getBoundingClientRect();
+                    return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+                }
+            }
+        }
+        // Otherwise first empty cell
+        const empty = charPanel._invGrid.querySelectorAll('.inv-cell:not(.has-item)');
+        if (empty.length > 0) {
+            const r = empty[0].getBoundingClientRect();
+            return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+        }
+    }
+    // 2. Inventory panel open?
+    if (typeof inventoryPanel !== 'undefined' && inventoryPanel.isOpen) {
+        const grid = document.getElementById('inventory-grid');
+        if (grid) {
+            // Try to find existing slot with same name
+            if (nameLower) {
+                for (const slot of grid.querySelectorAll('.inv-item-slot')) {
+                    if ((slot.dataset.itemName || '').toLowerCase() === nameLower) {
+                        const r = slot.getBoundingClientRect();
+                        return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+                    }
+                }
+            }
+            // Otherwise after last slot
+            const slots = grid.querySelectorAll('.inv-item-slot');
+            if (slots.length > 0) {
+                const last = slots[slots.length - 1];
+                const r = last.getBoundingClientRect();
+                return { x: r.right + r.width / 2 + 4, y: r.top + r.height / 2 };
+            }
+            const r = grid.getBoundingClientRect();
+            return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+        }
+    }
+    // 3. Fallback: Inv button
+    const invBtn = document.getElementById('btn-inv');
+    if (invBtn) {
+        const r = invBtn.getBoundingClientRect();
+        return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+    }
+    return { x: window.innerWidth - 100, y: 80 };
+}
+
+function _findItemSrc() {
+    // Same logic in reverse for drops
+    if (typeof charPanel !== 'undefined' && charPanel._visible) {
+        const cells = charPanel._invGrid?.querySelectorAll('.inv-cell.has-item');
+        if (cells && cells.length > 0) {
+            const last = cells[cells.length - 1];
+            const r = last.getBoundingClientRect();
+            return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+        }
+    }
+    if (typeof inventoryPanel !== 'undefined' && inventoryPanel.isOpen) {
+        const grid = document.getElementById('inventory-grid');
+        if (grid) {
+            const slots = grid.querySelectorAll('.inv-item-slot');
+            const last = slots[slots.length - 1];
+            if (last) {
+                const r = last.getBoundingClientRect();
+                return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+            }
+        }
+    }
+    const invBtn = document.getElementById('btn-inv');
+    if (invBtn) {
+        const r = invBtn.getBoundingClientRect();
+        return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+    }
+    return { x: window.innerWidth - 100, y: 80 };
+}
+
+function handleItemTransfer(msg) {
+    const { action, name, key } = msg;
+    const imgSrc = key ? `/api/asset/${encodeURIComponent(key)}` : null;
+
+    if (action === 'pickup') {
+        // Source: ground item thumbnail
+        let srcPos = null;
+        const groundThumbs = document.querySelectorAll('#item-thumbs .thumb');
+        for (const t of groundThumbs) {
+            if ((t.dataset.entityName || '').toLowerCase() === name.toLowerCase()) {
+                const r = t.getBoundingClientRect();
+                srcPos = { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+                break;
+            }
+        }
+        if (!srcPos) srcPos = { x: window.innerWidth / 2, y: window.innerHeight * 0.7 };
+
+        // Fly to matching stack or next open slot
+        const destPos = _findItemDest(name);
+        _flyItemIcon(imgSrc, name, srcPos, destPos);
+
+        // If both panels open, send a second one to the other panel
+        if (typeof charPanel !== 'undefined' && charPanel._visible &&
+            typeof inventoryPanel !== 'undefined' && inventoryPanel.isOpen) {
+            const invGrid = document.getElementById('inventory-grid');
+            if (invGrid) {
+                const slots = invGrid.querySelectorAll('.inv-item-slot');
+                if (slots.length > 0) {
+                    const last = slots[slots.length - 1];
+                    const r = last.getBoundingClientRect();
+                    setTimeout(() => _flyItemIcon(imgSrc, name, srcPos,
+                        { x: r.right + r.width / 2 + 4, y: r.top + r.height / 2 }), 50);
+                }
+            }
+        }
+    } else if (action === 'drop') {
+        const srcPos = _findItemSrc();
+        const destPos = { x: window.innerWidth / 2, y: window.innerHeight * 0.7 };
+        _flyItemIcon(imgSrc, name, srcPos, destPos);
+    }
+}
+
+function _flyItemIcon(imgSrc, name, from, to) {
+    const el = document.createElement('div');
+    el.className = 'item-fly';
+
+    if (imgSrc) {
+        const img = document.createElement('img');
+        img.src = imgSrc;
+        img.style.width = '100%';
+        img.style.height = '100%';
+        img.style.objectFit = 'cover';
+        img.style.borderRadius = '4px';
+        el.appendChild(img);
+    } else {
+        el.textContent = name.charAt(0).toUpperCase();
+        el.style.display = 'flex';
+        el.style.alignItems = 'center';
+        el.style.justifyContent = 'center';
+        el.style.color = '#ddd';
+        el.style.fontSize = '18px';
+        el.style.fontWeight = '700';
+        el.style.background = 'rgba(40, 40, 80, 0.8)';
+        el.style.borderRadius = '4px';
+    }
+
+    el.style.left = `${from.x - 24}px`;
+    el.style.top = `${from.y - 24}px`;
+    document.body.appendChild(el);
+
+    const dx = to.x - from.x;
+    const dy = to.y - from.y;
+    const dist = Math.hypot(dx, dy);
+    const duration = Math.max(0.35, Math.min(0.8, dist / 900));
+
+    // Animate with CSS transition
+    requestAnimationFrame(() => {
+        el.style.transition = `left ${duration}s cubic-bezier(0.2, 0.8, 0.3, 1), top ${duration}s cubic-bezier(0.2, 0.8, 0.3, 1), opacity ${duration * 0.3}s ease ${duration * 0.7}s, transform ${duration}s ease`;
+        el.style.left = `${to.x - 24}px`;
+        el.style.top = `${to.y - 24}px`;
+        el.style.transform = 'scale(0.5)';
+        el.style.opacity = '0';
+    });
+
+    setTimeout(() => el.remove(), (duration + 0.3) * 1000);
 }
 
 // ── UI updates ──
@@ -194,8 +477,40 @@ function updateRoom(data) {
     const monsters = allEntities.filter(e => e.type !== 'player');
     const players = allEntities.filter(e => e.type === 'player');
     updateThumbnails('npc-thumbs', monsters);
+    _scaleNpcRow(monsters.length);
     updateThumbnails('player-thumbs', players);
     updateThumbnails('item-thumbs', data.items || []);
+}
+
+// ── NPC thumbnail scaling — cubic growth (sqrt cols), smooth shrink ──
+const NPC_BUDGET = 220;     // px — max container width
+const NPC_FULL_SIZE = 67;   // px — base thumb size at 1-3 count
+const NPC_GAP_BASE = 6;     // px
+const NPC_MIN_SCALE = 0.35; // floor for ~20 mobs
+
+function _scaleNpcRow(count) {
+    const row = document.getElementById('npc-thumbs');
+    if (!row) return;
+    if (count === 0) { row.style.maxWidth = ''; return; }
+
+    // Cubic growth: cols = ceil(sqrt(count)), keeps it roughly square
+    const cols = Math.ceil(Math.sqrt(count));
+    // Scale: fit `cols` thumbs + gaps into the budget
+    const neededWidth = cols * NPC_FULL_SIZE + (cols - 1) * NPC_GAP_BASE;
+    let scale = Math.min(1, NPC_BUDGET / neededWidth);
+    scale = Math.max(NPC_MIN_SCALE, scale);
+
+    const thumbSize = NPC_FULL_SIZE * scale;
+    const gap = Math.max(2, NPC_GAP_BASE * scale);
+
+    row.style.setProperty('--npc-scale', scale.toFixed(3));
+    row.style.setProperty('--npc-thumb-size', thumbSize.toFixed(1) + 'px');
+    row.style.setProperty('--npc-gap', gap.toFixed(1) + 'px');
+    row.style.maxWidth = (cols * thumbSize + (cols - 1) * gap + 20) + 'px';
+
+    // Expose for combat effects — text scales gently (floor 0.75)
+    window._npcScale = scale;
+    window._npcCombatTextScale = Math.max(0.75, 0.6 + scale * 0.4);
 }
 
 function updateThumbnails(containerId, entities) {
@@ -203,7 +518,10 @@ function updateThumbnails(containerId, entities) {
 
     // Clean up old coin canvases
     if (typeof coinRenderer !== 'undefined') coinRenderer.cleanup();
+    // Preserve row label if present
+    const rowLabel = container.querySelector('.row-label, .ground-loot-label');
     container.innerHTML = '';
+    if (rowLabel) container.appendChild(rowLabel);
 
     const isItem = containerId === 'item-thumbs';
     const isPlayer = containerId === 'player-thumbs';
@@ -247,15 +565,24 @@ function updateThumbnails(containerId, entities) {
 
         // HP bar for NPCs
         if (ent.type === 'npc') {
+            const maxHP = (ent.stats && ent.stats.hp) || 0;
+            div.dataset.maxHp = String(maxHP);
             const hpBar = document.createElement('div');
             hpBar.className = 'thumb-hp';
             const hpFill = document.createElement('div');
             hpFill.className = 'thumb-hp-fill';
             const frac = ent.hp_fraction != null ? ent.hp_fraction : 1.0;
             hpFill.style.width = `${frac * 100}%`;
-            hpFill.style.background = frac > 0.5 ? 'var(--hp-green)' :
-                                       frac > 0.25 ? 'var(--hp-yellow)' : 'var(--hp-red)';
+            hpFill.style.background = hpBarGradient(frac);
             hpBar.appendChild(hpFill);
+            // HP text overlay
+            const hpText = document.createElement('span');
+            hpText.className = 'thumb-hp-text';
+            if (maxHP > 0) {
+                const curHP = Math.round(frac * maxHP);
+                hpText.textContent = `${curHP}/${maxHP}`;
+            }
+            hpBar.appendChild(hpText);
             div.appendChild(hpBar);
         }
 
@@ -263,7 +590,7 @@ function updateThumbnails(containerId, entities) {
         if (!ent.currency) {
             const nameEl = document.createElement('div');
             nameEl.className = 'thumb-name';
-            nameEl.textContent = ent.name;
+            nameEl.textContent = ent.type === 'npc' ? npcTitleCase(ent.name) : ent.name;
             div.appendChild(nameEl);
         }
 
@@ -309,7 +636,7 @@ function showTooltip(thumbEl, entity) {
     // Name
     const nameEl = document.createElement('div');
     nameEl.className = 'tt-name';
-    nameEl.textContent = entity.name;
+    nameEl.textContent = entity.type === 'npc' ? npcTitleCase(entity.name) : entity.name;
     tip.appendChild(nameEl);
 
     // HP bar (current/max) — get current fraction from the thumb's HP bar
@@ -326,8 +653,7 @@ function showTooltip(thumbEl, entity) {
         const fill = document.createElement('div');
         fill.className = 'tt-hp-fill';
         fill.style.width = `${hpFrac * 100}%`;
-        fill.style.background = hpFrac > 0.5 ? 'var(--hp-green)' :
-                                 hpFrac > 0.25 ? 'var(--hp-yellow)' : 'var(--hp-red)';
+        fill.style.background = hpBarGradient(hpFrac);
         bar.appendChild(fill);
         const txt = document.createElement('span');
         txt.className = 'tt-hp-text';
@@ -608,8 +934,16 @@ function updateMonsterHP(hpMap) {
             const fill = thumb.querySelector('.thumb-hp-fill');
             if (fill) {
                 fill.style.width = `${frac * 100}%`;
-                fill.style.background = frac > 0.5 ? 'var(--hp-green)' :
-                                         frac > 0.25 ? 'var(--hp-yellow)' : 'var(--hp-red)';
+                fill.style.background = hpBarGradient(frac);
+            }
+            // Update HP text
+            const hpTextEl = thumb.querySelector('.thumb-hp-text');
+            if (hpTextEl) {
+                const maxHP = parseInt(thumb.dataset.maxHp || '0');
+                if (maxHP > 0) {
+                    const curHP = Math.max(0, Math.round(frac * maxHP));
+                    hpTextEl.textContent = `${curHP}/${maxHP}`;
+                }
             }
             // Visual HP state on thumbnail
             thumb.classList.toggle('hp-critical', frac <= 0.25 && frac > 0.10);
@@ -621,8 +955,7 @@ function updateMonsterHP(hpMap) {
                 const ttText = _tooltip.querySelector('.tt-hp-text');
                 if (ttFill) {
                     ttFill.style.width = `${frac * 100}%`;
-                    ttFill.style.background = frac > 0.5 ? 'var(--hp-green)' :
-                                               frac > 0.25 ? 'var(--hp-yellow)' : 'var(--hp-red)';
+                    ttFill.style.background = hpBarGradient(frac);
                 }
                 if (ttText) {
                     const maxHP = parseInt(ttText.textContent.split('/')[1]) || 0;
@@ -786,8 +1119,12 @@ function _makeDraggable(el, storageKey) {
         const dx = e.clientX - startX;
         const dy = e.clientY - startY;
         if (Math.abs(dx) > 3 || Math.abs(dy) > 3) moved = true;
-        el.style.left = `${origLeft + dx}px`;
-        el.style.top = `${origTop + dy}px`;
+        const r = el.getBoundingClientRect();
+        let nl = origLeft + dx, nt = origTop + dy;
+        nt = Math.max(0, Math.min(nt, window.innerHeight - 32));
+        nl = Math.max(-r.width + 80, Math.min(nl, window.innerWidth - 80));
+        el.style.left = `${nl}px`;
+        el.style.top = `${nt}px`;
     });
 
     document.addEventListener('mouseup', () => {

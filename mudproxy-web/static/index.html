@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>MajorSLOP!</title>
-    <link rel="stylesheet" href="/static/css/main.css?v=7">
+    <link rel="stylesheet" href="/static/css/main.css?v=9">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5/css/xterm.css">
 </head>
 <body>
@@ -35,6 +35,7 @@
                 <div class="bar mana-bar"><div class="bar-fill" id="mana-fill"></div><span class="bar-text" id="mana-text">0/0</span></div>
             </div>
             <button id="btn-char" onclick="charPanel.toggle()" title="Character & Inventory">Char</button>
+            <button id="btn-inv" onclick="inventoryPanel.toggle()" title="Inventory & Currency">Inv</button>
             <button id="btn-chat" onclick="chatPanel.toggle()" title="Chat Window">Chat</button>
             <button id="btn-terminal" onclick="mudTerminal.toggle()" title="MUD Terminal (ANSI)">Terminal</button>
             <div class="ghost-box">
@@ -49,9 +50,15 @@
 
     <!-- Entity thumbnails (overlaid on room view) -->
     <div id="entity-panel" class="floating">
-        <div id="npc-thumbs" class="thumb-row npc-row"></div>
-        <div id="player-thumbs" class="thumb-row player-row"></div>
-        <div id="item-thumbs" class="thumb-row item-row"></div>
+        <div id="npc-thumbs" class="thumb-row npc-row">
+            <div class="row-label npc-label">NPCs</div>
+        </div>
+        <div id="player-thumbs" class="thumb-row player-row">
+            <div class="row-label player-label">Players In Room</div>
+        </div>
+        <div id="item-thumbs" class="thumb-row item-row">
+            <div id="ground-loot-label" class="ground-loot-label">Loot</div>
+        </div>
     </div>
 
     <!-- Side panel (overlaid, toggleable, hidden by default) -->
@@ -84,11 +91,13 @@
     <script src="/static/js/room_view.js?v=6"></script>
     <script src="/static/js/combat_effects.js?v=6"></script>
     <script src="/static/js/view_menu.js?v=6"></script>
-    <script src="/static/js/char_panel.js?v=6"></script>
-    <script src="/static/js/chat_panel.js?v=6"></script>
+    <script src="/static/js/char_panel.js?v=7"></script>
+    <script src="/static/js/chat_panel.js?v=7"></script>
     <script src="/static/js/mud_terminal.js?v=6"></script>
     <script src="/static/js/nav_panel.js?v=8"></script>
-    <script src="/static/js/app.js?v=7"></script>
+    <script src="/static/js/inventory_panel.js?v=3"></script>
+    <script src="/static/js/exp_bar.js?v=1"></script>
+    <script src="/static/js/app.js?v=10"></script>
     <script>
         // Initialize
         const roomView = new RoomView(document.getElementById('room-canvas'));
@@ -98,6 +107,8 @@
         const chatPanel = new ChatPanel((cmd, data) => sendCommand(cmd, data));
         const mudTerminal = new MudTerminal(sendCommand);
         const navPanel = new NavPanel((cmd, data) => sendCommand(cmd, data));
+        const inventoryPanel = new InventoryPanel(sendCommand);
+        const expBar = new ExpBar();
         roomView.applyAllSettings();
 
         // Ghost character input

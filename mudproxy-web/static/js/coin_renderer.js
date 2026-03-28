@@ -3,20 +3,20 @@
 // Each currency type gets its own visual style and separate pile.
 
 const COIN_TYPES = {
-    copper:   { color: '#b87333', shine: '#e8a050', edge: '#7a4a1a', size: 5,  label: 'Copper',   order: 0 },
-    silver:   { color: '#c0c0c0', shine: '#f0f0ff', edge: '#808088', size: 6,  label: 'Silver',   order: 1 },
-    gold:     { color: '#ffd700', shine: '#fffacd', edge: '#b8960f', size: 7,  label: 'Gold',     order: 2 },
-    platinum: { color: '#e5e5e5', shine: '#ffffff', edge: '#a0a0b0', size: 8,  label: 'Platinum', order: 3 },
-    runic:    { color: '#8844cc', shine: '#cc88ff', edge: '#5522aa', size: 9,  label: 'Runic',    order: 4 },
+    copper:   { color: '#cd7f32', shine: '#e8a050', edge: '#7a4a1a', size: 5,  label: 'Copper',   abbr: 'COP', order: 0, textColor: '#e8a050' },
+    silver:   { color: '#a8a8b8', shine: '#d0d0e8', edge: '#707080', size: 6,  label: 'Silver',   abbr: 'SIL', order: 1, textColor: '#c8c8e0' },
+    gold:     { color: '#ffd700', shine: '#ffee55', edge: '#b8960f', size: 7,  label: 'Gold',     abbr: 'GLD', order: 2, textColor: '#ffe033' },
+    platinum: { color: '#f0f0ff', shine: '#ffffff', edge: '#c8c8e0', size: 8,  label: 'Platinum', abbr: 'PLT', order: 3, textColor: '#f8f8ff' },
+    runic:    { color: '#bb55ff', shine: '#ee88ff', edge: '#7722cc', size: 9,  label: 'Runic',    abbr: 'RUN', order: 4, textColor: '#dd66ff', glow: '#cc44ff' },
 };
 
 // Conversion rates (for display context, not used in rendering)
 // 10 copper = 1 silver, 10 silver = 1 gold, 100 gold = 1 platinum, 100 platinum = 1 runic
 
 function formatCoinCount(n) {
-    if (n >= 1000000) return (n / 1000000).toFixed(1).replace(/\.0$/, '') + 'M';
-    if (n >= 10000) return Math.round(n / 1000) + 'K';
-    if (n >= 1000) return (n / 1000).toFixed(1).replace(/\.0$/, '') + 'K';
+    // Always floor — never show more currency than you actually have
+    if (n >= 1000000) { const v = Math.floor(n / 1000) / 1000; return v.toFixed(2).replace(/0$/, '') + 'M'; }
+    if (n >= 1000) { const v = Math.floor(n / 10) / 100; return v.toFixed(2).replace(/0$/, '') + 'K'; }
     return String(n);
 }
 
@@ -68,6 +68,7 @@ class CoinRenderer {
         this._sparkles.set(canvas, {
             sparkles,
             coinType: ct,
+            coinKey: coinType,
             coins,
             quantity,
             width,
@@ -192,6 +193,8 @@ class CoinRenderer {
 
         // Draw quantity label
         this._drawQuantityLabel(ctx, state.quantity, width, height);
+        // Draw currency abbreviation at bottom
+        this._drawCurrencyLabel(ctx, state.coinType, state.coinKey, width, height);
     }
 
     _drawQuantityLabel(ctx, quantity, w, h) {
@@ -213,6 +216,30 @@ class CoinRenderer {
         // Text
         ctx.fillStyle = '#ffffff';
         ctx.fillText(text, x, y);
+    }
+
+    _drawCurrencyLabel(ctx, ct, coinKey, w, h) {
+        const abbr = ct.abbr || (coinKey || '').slice(0, 3).toUpperCase();
+        if (!abbr) return;
+        const fontSize = 10;
+        ctx.font = `bold ${fontSize}px 'Segoe UI', sans-serif`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'bottom';
+
+        const x = w / 2;
+        const y = h - 2;
+
+        // Heavy drop shadow for readability
+        ctx.fillStyle = 'rgba(0,0,0,0.95)';
+        ctx.fillText(abbr, x + 1, y + 1);
+        ctx.fillText(abbr, x - 1, y + 1);
+        ctx.fillText(abbr, x, y + 2);
+        ctx.fillText(abbr, x + 1, y - 1);
+        ctx.fillText(abbr, x - 1, y - 1);
+
+        // Coin-colored text
+        ctx.fillStyle = ct.textColor || ct.shine;
+        ctx.fillText(abbr, x, y);
     }
 
     _startSparkleLoop() {

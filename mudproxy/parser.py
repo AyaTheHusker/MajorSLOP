@@ -58,6 +58,7 @@ class InventoryData:
     items: list[dict] = field(default_factory=list)  # [{name, slot}]
     wealth: str = ""  # "51 platinum, 3 gold, ..."
     encumbrance: str = ""
+    currency: dict = field(default_factory=dict)  # {platinum: 14, gold: 1191, ...}
 
 
 class MudParser:
@@ -74,14 +75,50 @@ class MudParser:
         re.IGNORECASE
     )
     RE_XP_GAIN = re.compile(r'^You gain (\d+) experience', re.IGNORECASE)
+    RE_EXP_LINE = re.compile(
+        r'^Exp:\s*([\d,]+)\s+Level:\s*(\d+)\s+Exp needed for next level:\s*([\d,]+)\s+\(([\d,]+)\)\s+\[(\d+)%\]',
+        re.IGNORECASE
+    )
+    RE_COIN_DROP = re.compile(
+        r'^(\d+)\s+(copper|silver|gold|platinum|runic)\s+drops?\s+to\s+the\s+ground',
+        re.IGNORECASE
+    )
     RE_YOU_DIED = re.compile(r'(?:You die|You have been killed|You are dead)', re.IGNORECASE)
+
+    # Coin transfer patterns
+    RE_COIN_DROPPED = re.compile(
+        r'^You dropped (\d+)\s+(copper|silver|gold|platinum|runic)',
+        re.IGNORECASE
+    )
+    RE_COIN_PICKED_UP = re.compile(
+        r'^You (?:picked up|pick up) (\d+)\s+(copper|silver|gold|platinum|runic)',
+        re.IGNORECASE
+    )
+    RE_COIN_GAVE = re.compile(
+        r'^You (?:gave|give) (\d+)\s+(copper|silver|gold|platinum|runic)\s+\w+\s+to\s+(.+?)\.?\s*$',
+        re.IGNORECASE
+    )
+    RE_COIN_RECEIVED = re.compile(
+        r'^(.+?)\s+(?:gives|gave)\s+you\s+(\d+)\s+(copper|silver|gold|platinum|runic)',
+        re.IGNORECASE
+    )
+
+    # Item pickup/drop/equip patterns
+    RE_ITEM_TOOK = re.compile(r'^You took ', re.IGNORECASE)
+    RE_ITEM_DROPPED = re.compile(r'^You dropped ', re.IGNORECASE)
+    RE_ITEM_EQUIPPED = re.compile(r'^You are now (?:wearing|holding) ', re.IGNORECASE)
+    RE_ITEM_REMOVED = re.compile(r'^You have removed ', re.IGNORECASE)
+    RE_COIN_DEPOSITED = re.compile(
+        r'^You deposit(?:ed)?\s+(\d+)\s+copper',
+        re.IGNORECASE
+    )
 
     # Inventory line: "You are carrying ..."
     RE_INVENTORY = re.compile(r'^You are carrying\s+(.+)', re.IGNORECASE)
     # Currency patterns in inventory
     RE_CURRENCY = re.compile(
         r'(\d+)\s+(platinum\s+pieces?|gold\s+crowns?|silver\s+nobles?|'
-        r'copper\s+farthings?|runic\s+copper)',
+        r'copper\s+farthings?|runic\s+coins?|runic\s+copper)',
         re.IGNORECASE
     )
     # Item with slot: "black chainmail hauberk (Torso)" or "golden sickle (Weapon Hand)"
@@ -181,6 +218,9 @@ class MudParser:
         self._spell_type = "spells"  # "spells" or "powers" (kai)
 
         self.on_room_update: Optional[Callable[[RoomData], None]] = None
+        self.on_coin_drop: Optional[Callable[[int, str], None]] = None  # (amount, type)
+        self.on_coin_transfer: Optional[Callable[[dict], None]] = None  # {action, amount, coin_type, player?}
+        self.on_item_transfer: Optional[Callable[[dict], None]] = None  # {action, name}
 
     @staticmethod
     def _replace_last_and(text: str) -> str:
@@ -221,12 +261,20 @@ class MudParser:
         re.IGNORECASE
     )
 
-    # Chat message patterns
-    RE_GANGPATH = re.compile(r'^(\w+)\s+gangpaths:\s*(.+)$', re.IGNORECASE)
-    RE_BROADCAST = re.compile(r'^(\w+)\s+broadcasts:\s*(.+)$', re.IGNORECASE)
-    RE_TELEPATH = re.compile(r'^(\w+)\s+telepaths:\s*(.+)$', re.IGNORECASE)
-    RE_GOSSIP = re.compile(r'^(\w+)\s+gossips:\s*(.+)$', re.IGNORECASE)
-    RE_SAY = re.compile(r'^(\w+)\s+says\s+"(.+)"$', re.IGNORECASE)
+    # Chat message patterns — match actual MajorMUD output formats
+    # Gossip: "PlayerName gossips: msg" / "You gossip: msg"
+    RE_GOSSIP = re.compile(r'^(\w+)\s+gossips?:\s*(.+)$', re.IGNORECASE)
+    # Broadcast: "Broadcast from PlayerName "msg""
+    RE_BROADCAST = re.compile(r'^Broadcast from (\w+)\s+"(.+)"$', re.IGNORECASE)
+    # Telepath: "PlayerName telepaths: msg" / "You telepath: msg"
+    RE_TELEPATH = re.compile(r'^(\w+)\s+telepaths?\s+to\s+you:\s*(.+)$', re.IGNORECASE)
+    RE_TELEPATH2 = re.compile(r'^(\w+)\s+telepaths?:\s*(.+)$', re.IGNORECASE)
+    # Gangpath: "PlayerName gangpaths: msg" / "You gangpath: msg"
+    RE_GANGPATH = re.compile(r'^(\w+)\s+gangpaths?:\s*(.+)$', re.IGNORECASE)
+    # Auction: "PlayerName auctions: msg" / "You auction: msg"
+    RE_AUCTION = re.compile(r'^(\w+)\s+auctions?:\s*(.+)$', re.IGNORECASE)
+    # Say: 'PlayerName says "msg"' / 'You say "msg"'
+    RE_SAY = re.compile(r'^(\w+)\s+says?\s+"(.+)"$', re.IGNORECASE)
 
     def feed_line(self, line: str, ansi_line: str = '') -> None:
         line = line.rstrip()
@@ -279,10 +327,12 @@ class MudParser:
             stripped = line.strip()
             low = stripped.lower()
             for pat, channel in (
-                (self.RE_GANGPATH, "gangpath"),
                 (self.RE_BROADCAST, "broadcast"),
-                (self.RE_TELEPATH, "telepath"),
                 (self.RE_GOSSIP, "gossip"),
+                (self.RE_GANGPATH, "gangpath"),
+                (self.RE_TELEPATH, "telepath"),
+                (self.RE_TELEPATH2, "telepath"),
+                (self.RE_AUCTION, "auction"),
                 (self.RE_SAY, "say"),
             ):
                 m = pat.match(stripped)
@@ -553,6 +603,68 @@ class MudParser:
                 self._you_notice_partial = content
             return
 
+        # Coin drops: "4 gold drop to the ground."
+        coin_match = self.RE_COIN_DROP.match(line)
+        if coin_match:
+            if self.on_coin_drop:
+                self.on_coin_drop(int(coin_match.group(1)), coin_match.group(2).lower())
+            return
+
+        # Coin transfers: drop, pickup, give, receive, deposit
+        dropped = self.RE_COIN_DROPPED.match(line)
+        if dropped:
+            if self.on_coin_transfer:
+                self.on_coin_transfer({"action": "drop", "amount": int(dropped.group(1)),
+                                       "coin_type": dropped.group(2).lower()})
+            return
+        picked = self.RE_COIN_PICKED_UP.match(line)
+        if picked:
+            if self.on_coin_transfer:
+                self.on_coin_transfer({"action": "pickup", "amount": int(picked.group(1)),
+                                       "coin_type": picked.group(2).lower()})
+            return
+        gave = self.RE_COIN_GAVE.match(line)
+        if gave:
+            if self.on_coin_transfer:
+                self.on_coin_transfer({"action": "give", "amount": int(gave.group(1)),
+                                       "coin_type": gave.group(2).lower(), "player": gave.group(3).strip()})
+            return
+        received = self.RE_COIN_RECEIVED.match(line)
+        if received:
+            if self.on_coin_transfer:
+                self.on_coin_transfer({"action": "receive", "amount": int(received.group(2)),
+                                       "coin_type": received.group(3).lower(), "player": received.group(1).strip()})
+            return
+        deposited = self.RE_COIN_DEPOSITED.match(line)
+        if deposited:
+            if self.on_coin_transfer:
+                self.on_coin_transfer({"action": "deposit", "amount": int(deposited.group(1)),
+                                       "coin_type": "copper"})
+            return
+
+        # Item pickup/drop
+        if self.RE_ITEM_TOOK.match(line):
+            if self.on_item_transfer:
+                name = line[9:].rstrip('. ')
+                self.on_item_transfer({"action": "pickup", "name": name})
+            return
+        if self.RE_ITEM_DROPPED.match(line):
+            if self.on_item_transfer:
+                name = line[13:].rstrip('. ')
+                self.on_item_transfer({"action": "drop", "name": name})
+            return
+        if self.RE_ITEM_EQUIPPED.match(line):
+            if self.on_item_transfer:
+                # "You are now wearing X." or "You are now holding X."
+                name = line.split(' ', 4)[-1].rstrip('. ')
+                self.on_item_transfer({"action": "equip", "name": name})
+            return
+        if self.RE_ITEM_REMOVED.match(line):
+            if self.on_item_transfer:
+                name = line[18:].rstrip('. ')
+                self.on_item_transfer({"action": "unequip", "name": name})
+            return
+
         # Combat damage
         if self.RE_DAMAGE.search(line):
             if self.on_combat:
@@ -579,6 +691,19 @@ class MudParser:
         if xp_match:
             if self.on_xp:
                 self.on_xp(int(xp_match.group(1)))
+            return
+
+        # Exp command output: "Exp: 4660532 Level: 15 Exp needed for next level: 0 (4562569) [102%]"
+        exp_match = self.RE_EXP_LINE.match(line)
+        if exp_match:
+            if hasattr(self, 'on_exp_status') and self.on_exp_status:
+                self.on_exp_status({
+                    "exp": int(exp_match.group(1).replace(',', '')),
+                    "level": int(exp_match.group(2)),
+                    "needed": int(exp_match.group(3).replace(',', '')),
+                    "total_for_level": int(exp_match.group(4).replace(',', '')),
+                    "percent": int(exp_match.group(5)),
+                })
             return
 
         # Death
@@ -780,10 +905,30 @@ class MudParser:
         if not wealth and currency_parts:
             wealth = ', '.join(currency_parts)
 
+        # Parse currency_parts into structured dict: {platinum: 14, gold: 1191, ...}
+        currency = {}
+        for cp in currency_parts:
+            m = self.RE_CURRENCY.match(cp)
+            if m:
+                amount = int(m.group(1))
+                coin_name = m.group(2).lower()
+                # Map coin name to type
+                if 'platinum' in coin_name:
+                    currency['platinum'] = amount
+                elif 'gold' in coin_name:
+                    currency['gold'] = amount
+                elif 'silver' in coin_name:
+                    currency['silver'] = amount
+                elif 'runic' in coin_name:
+                    currency['runic'] = amount
+                elif 'copper' in coin_name:
+                    currency['copper'] = amount
+
         inv = InventoryData(
             items=items,
             wealth=wealth,
             encumbrance=encumbrance,
+            currency=currency,
         )
 
         if self.on_inventory:

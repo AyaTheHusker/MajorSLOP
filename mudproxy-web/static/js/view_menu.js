@@ -44,6 +44,7 @@ class ViewMenu {
             { type: 'separator' },
             { type: 'toggle', label: 'Lock NPC Panel', key: 'npcLocked', default: false },
             { type: 'toggle', label: 'Lock Loot Panel', key: 'lootLocked', default: false },
+            { type: 'toggle', label: 'EXP Bar', key: 'showExpBar', default: true },
             { type: 'separator' },
             { type: 'submenu', label: 'NPC Scale', items:
                 ['50%','75%','100%','125%','150%','200%','250%','300%','400%'].map(p => ({

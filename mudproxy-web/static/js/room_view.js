@@ -65,8 +65,8 @@ class RoomView {
             npcThumbScale: '100%',
             lootThumbScale: '100%',
             dmgTextScale: '100%',
-            proMode: 'silent',
-            ambientFilter: true,
+            proMode: 'off',
+            ambientFilter: false,
         };
 
         try {
@@ -159,6 +159,9 @@ class RoomView {
             case 'npcLocation':
             case 'lootLocation':
                 this._applyEntityPanelMode();
+                break;
+            case 'showExpBar':
+                if (typeof expBar !== 'undefined') expBar.toggle(value);
                 break;
         }
     }

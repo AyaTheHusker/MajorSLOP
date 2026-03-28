@@ -78,6 +78,8 @@ def create_app(orchestrator: Orchestrator, event_bus: EventBus, slop: SlopLoader
         try:
             state = orchestrator.get_state()
             await ws.send_json({"type": "state_sync", **state})
+            # Re-populate any missing data (portrait, inventory, etc.)
+            orchestrator.on_client_connect()
         except Exception:
             pass
         try:
@@ -498,15 +500,13 @@ def create_app(orchestrator: Orchestrator, event_bus: EventBus, slop: SlopLoader
         # Under Wine: C:\MegaMUD; on Linux natively: ~/.wine/drive_c/MegaMUD
         if platform.system() == "Windows":
             mm_dir = Path("C:/MegaMUD")
-            loops_dir = Path(os.path.expanduser("~/Documents/Loops"))
         else:
             mm_dir = Path(os.path.expanduser("~/.wine/drive_c/MegaMUD"))
-            loops_dir = Path(os.path.expanduser("~/.wine/drive_c/users/bucka/Documents/Loops"))
         sources = {}
         for rooms_file in [mm_dir / "Default" / "Rooms.md", mm_dir / "Chars" / "All" / "Rooms.md"]:
             if rooms_file.exists():
                 sources[str(rooms_file)] = rooms_file
-        for d in [mm_dir / "Default", loops_dir]:
+        for d in [mm_dir / "Default", mm_dir / "Chars" / "All"]:
             if d.exists():
                 for mp in d.glob("*.mp"):
                     sources[str(mp)] = mp
@@ -535,14 +535,12 @@ def create_app(orchestrator: Orchestrator, event_bus: EventBus, slop: SlopLoader
         """Re-parse MegaMud files and update cache."""
         import sys, os, platform
         sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
-        from parse_megamud_rooms import parse_rooms_md, scan_mp_files, parse_loops
+        from parse_megamud_rooms import parse_rooms_md, scan_mp_files
 
         if platform.system() == "Windows":
             mm_dir = Path("C:/MegaMUD")
-            loops_dir = Path(os.path.expanduser("~/Documents/Loops"))
         else:
             mm_dir = Path(os.path.expanduser("~/.wine/drive_c/MegaMUD"))
-            loops_dir = Path(os.path.expanduser("~/.wine/drive_c/users/bucka/Documents/Loops"))
 
         # Parse rooms
         all_rooms = parse_rooms_md(mm_dir / "Default" / "Rooms.md")
@@ -565,11 +563,11 @@ def create_app(orchestrator: Orchestrator, event_bus: EventBus, slop: SlopLoader
         for cat in categories:
             categories[cat].sort(key=lambda x: x["name"])
 
-        # Parse loops and paths
+        # Parse loops and paths from Default and Chars/All
         default_loops, default_paths = scan_mp_files(mm_dir / "Default")
-        user_loops = parse_loops(loops_dir)
+        char_loops, char_paths = scan_mp_files(mm_dir / "Chars" / "All")
         loop_by_file = {l["file"]: l for l in default_loops}
-        for l in user_loops:
+        for l in char_loops:
             loop_by_file[l["file"]] = l
         all_loops = sorted(loop_by_file.values(), key=lambda x: x.get("start_category", "") + x.get("name", ""))
 
@@ -580,7 +578,10 @@ def create_app(orchestrator: Orchestrator, event_bus: EventBus, slop: SlopLoader
                 loop_categories[cat] = []
             loop_categories[cat].append(l)
 
-        all_paths = sorted(default_paths, key=lambda x: x.get("start_category", "") + x.get("name", ""))
+        path_by_file = {p["file"]: p for p in default_paths}
+        for p in char_paths:
+            path_by_file[p["file"]] = p
+        all_paths = sorted(path_by_file.values(), key=lambda x: x.get("start_category", "") + x.get("name", ""))
         path_categories = {}
         for p in all_paths:
             cat = p.get("start_category") or "Uncategorized"
