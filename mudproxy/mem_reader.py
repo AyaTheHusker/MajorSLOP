@@ -610,11 +610,13 @@ class MegaMUDMemReader:
         self._write_i32(STEPS_REMAINING, total_steps)
         # 8. Clear sentinel
         self._write_i32(UNK_54DC, 0)
-        # 9. MODE = 14 (walking) — CRITICAL: breaks out of rest/idle
-        self._write_i32(MODE, 14)
-        # 10. Set looping flag
+        # 9. ON_ENTRY_ACTION = 1 (resume loop on arrival)
+        self._write_i32(ON_ENTRY_ACTION, 1)
+        # 10. MODE = 15 (looping) — 14=walking, 15=looping
+        self._write_i32(MODE, 15)
+        # 11. Set looping flag
         self._write_i32(LOOPING, 1)
-        # 11-12. Activate
+        # 12-13. Activate
         self._write_u32(GO_FLAG, 1)
         self._write_u32(PATHING_ACTIVE, 1)
 

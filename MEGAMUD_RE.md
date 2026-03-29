@@ -313,7 +313,7 @@ Gated by AUTO_CASH (0x4D14) and AUTO_GET (0x4D18).
 | Offset | Size | Name | Description |
 |---|---|---|---|
 | 0x54B4 | i32 | ON_ENTRY_ACTION | 0=nothing, 1=resume loop, 2=auto-roam, 3=? |
-| 0x54BC | i32 | MODE | 11=idle, 14=walking/running, 17=lost (re-syncing) |
+| 0x54BC | i32 | MODE | 11=idle, 14=walking/running, 15=looping, 17=lost (re-syncing) |
 | 0x54D4 | i32 | MSG_CODE | Last WM_ message code received |
 | 0x54D8 | i32 | STEPS_REMAINING | Countdown of steps remaining in current path segment |
 | 0x54DC | i32 | UNK_54DC | Set to -1 before loop, cleared to 0 on loop start |
@@ -703,10 +703,11 @@ Must be at or near the loop's starting room.
 6. Write 1                → +0x5898 (CUR_PATH_STEP, start at step 1)
 7. Write total_steps      → +0x54D8 (STEPS_REMAINING)
 8. Write 0                → +0x54DC (clear sentinel)
-9. Write 14               → +0x54BC (MODE = walking)
-10. Write 1               → +0x5668 (LOOPING)
-11. Write 1               → +0x564C (GO_FLAG)
-12. Write 1               → +0x5664 (PATHING_ACTIVE)
+9. Write 1                → +0x54B4 (ON_ENTRY_ACTION = resume loop on arrival)
+10. Write 15              → +0x54BC (MODE = looping; 14=walking, 15=looping)
+11. Write 1               → +0x5668 (LOOPING)
+12. Write 1               → +0x564C (GO_FLAG)
+13. Write 1               → +0x5664 (PATHING_ACTIVE)
 ```
 
 MegaMUD will:

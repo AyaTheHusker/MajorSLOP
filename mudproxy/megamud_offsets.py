@@ -125,7 +125,7 @@ PLAYER_MAGIC_RES = 0x5428     # int32
 PLAYER_SPELL_CASTING = 0x542C # int32
 
 # --- Player Flags ---
-ON_ENTRY_ACTION = 0x54B4      # int32 - 0=do nothing, 1=resume loop, 2=auto-roam, 3=?
+ON_ENTRY_ACTION = 0x54B4      # int32 - 0=do nothing, 1=resume loop, 2=auto-roam, 3=resume script/event?
 MSG_CODE = 0x54D4             # int32 - last WM_ message code received
 
 # --- Connection ---
@@ -356,7 +356,7 @@ LAG_WAIT = 0x8A98             # int32 - LagWait (same as LAG_WAIT_SECONDS)
 
 # --- Key runtime flags ---
 GO_FLAG = 0x564C              # int32 - WRITABLE master go/stop toggle. 1=go, 0=stop.
-MODE = 0x54BC                 # int32 - 11=idle, 14=walking/running, 17=lost
+MODE = 0x54BC                 # int32 - 11=idle, 14=walking/running, 15=looping, 17=lost
 STEPS_REMAINING = 0x54D8      # int32 - countdown of steps in current path segment
 AUTO_COMBAT_TOGGLE = AUTO_COMBAT  # alias for backwards compat
 
