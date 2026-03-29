@@ -238,7 +238,11 @@ class MudTerminal {
                 e.preventDefault();
                 if (this._sending) return; // already sending chunks
                 const raw = input.value;
-                if (raw.length === 0) return;
+                if (raw.length === 0) {
+                    // Empty enter — send bare CRLF
+                    this._send('inject', { text: '' });
+                    return;
+                }
 
                 // Save to history
                 this._cmdHistory.push(raw);
@@ -322,111 +326,7 @@ class MudTerminal {
         this._startFxLoop();
         if (this._fxPalette !== 'none') this._setFxPalette(this._fxPalette);
 
-        // ── MegaMUD Remote Actions slide-out ──
-        const toggleArrow = document.createElement('div');
-        toggleArrow.className = 'mega-tray-toggle';
-        toggleArrow.innerHTML = 'MEGAMUD GHOST\u{1F47B} \u25BC INJECTION PANEL';
-        toggleArrow.title = 'MegaMUD Remote Actions';
-        panel.appendChild(toggleArrow);
-
-        const tray = document.createElement('div');
-        tray.className = 'mega-tray';
-        tray.style.display = 'none';
-        this._megaTray = tray;
-        this._megaTrayOpen = false;
-
-        this._positionTray = () => {
-            if (!this._megaTrayOpen) return;
-            const r = panel.getBoundingClientRect();
-            tray.style.left = r.left + 'px';
-            tray.style.width = r.width + 'px';
-            tray.style.top = r.bottom + 'px';
-        };
-
-        toggleArrow.addEventListener('click', (e) => {
-            e.stopPropagation();
-            this._megaTrayOpen = !this._megaTrayOpen;
-            tray.style.display = this._megaTrayOpen ? '' : 'none';
-            toggleArrow.innerHTML = this._megaTrayOpen
-                ? 'MEGAMUD GHOST\u{1F47B} \u25B2 INJECTION PANEL'
-                : 'MEGAMUD GHOST\u{1F47B} \u25BC INJECTION PANEL';
-            toggleArrow.classList.toggle('open', this._megaTrayOpen);
-            this._positionTray();
-        });
-
-        // Helper: create glossy button
-        const ghostName = () => localStorage.getItem('ghostName') || 'Yoder';
-        const mkBtn = (emoji, label, atCmd, color) => {
-            const btn = document.createElement('button');
-            btn.className = 'mega-btn' + (color ? ' mega-btn-' + color : '');
-            btn.innerHTML = emoji;
-            btn.title = label;
-            btn.addEventListener('click', (e) => {
-                e.stopPropagation();
-                this._send('ghost', { name: ghostName(), at_cmd: atCmd });
-                btn.classList.add('mega-btn-pulse');
-                setTimeout(() => btn.classList.remove('mega-btn-pulse'), 400);
-            });
-            return btn;
-        };
-
-        // Row 1: Action commands
-        const row1 = document.createElement('div');
-        row1.className = 'mega-row';
-        row1.appendChild(mkBtn('\u{1F6D1}', 'Stop',        '@stop'));       // stop sign
-        row1.appendChild(mkBtn('\u{25B6}\u{FE0F}',  'Resume (Rego)', '@rego'));       // play
-        row1.appendChild(mkBtn('\u{1F91A}', 'Get All',      '@get-all'));    // grabbing hand
-        row1.appendChild(mkBtn('\u{1F6BD}', 'Drop All',     '@drop-all'));   // toilet
-        row1.appendChild(mkBtn('\u{1F6E1}\u{FE0F}',  'Equip All',    '@equip-all')); // shield
-        row1.appendChild(mkBtn('\u{1F3E6}', 'Deposit All',  '@deposit-all'));// bank
-        tray.appendChild(row1);
-
-        // Divider
-        const div1 = document.createElement('div');
-        div1.className = 'mega-divider';
-        tray.appendChild(div1);
-
-        // Row 2+3: Toggle commands (ON green / OFF red stacked pairs)
-        const toggles = [
-            ['\u{2694}\u{FE0F}',  'Attack Last',  'attack-last'],
-            ['\u{1F4A5}', 'Auto Combat',  'auto-combat'],
-            ['\u{2622}\u{FE0F}',  'Auto Nuke',    'auto-nuke'],
-            ['\u{2764}\u{FE0F}',  'Auto Heal',    'auto-heal'],
-            ['\u{1F64F}', 'Auto Bless',   'auto-bless'],
-            ['\u{1F4A1}', 'Auto Light',   'auto-light'],
-            ['\u{1FA99}', 'Auto Cash',    'auto-cash'],
-            ['\u{1F9F2}', 'Auto Get',     'auto-get'],
-            ['\u{1F977}', 'Auto Sneak',   'auto-sneak'],
-            ['\u{1F648}', 'Auto Hide',    'auto-hide'],
-            ['\u{1F50D}', 'Auto Search',  'auto-search'],
-        ];
-
-        const rowOn = document.createElement('div');
-        rowOn.className = 'mega-row';
-        const rowOff = document.createElement('div');
-        rowOff.className = 'mega-row';
-
-        for (const [emoji, label, cmd] of toggles) {
-            rowOn.appendChild(mkBtn(emoji, label + ' ON',  '@' + cmd + ' on',  'green'));
-            rowOff.appendChild(mkBtn(emoji, label + ' OFF', '@' + cmd + ' off', 'red'));
-        }
-        tray.appendChild(rowOn);
-        tray.appendChild(rowOff);
-
-        // Divider
-        const div2 = document.createElement('div');
-        div2.className = 'mega-divider';
-        tray.appendChild(div2);
-
-        // Roam ON/OFF
-        const roamRow = document.createElement('div');
-        roamRow.className = 'mega-row';
-        roamRow.appendChild(mkBtn('\u{1F9ED}', 'Roam ON',  '@roam on',  'green'));  // compass
-        roamRow.appendChild(mkBtn('\u{1F9ED}', 'Roam OFF', '@roam off', 'red'));
-        tray.appendChild(roamRow);
-
         document.body.appendChild(panel);
-        document.body.appendChild(tray);
         this._el = panel;
     }
 
@@ -561,10 +461,6 @@ class MudTerminal {
         if (show === undefined) show = !this._visible;
         this._visible = show;
         this._el.style.display = show ? 'flex' : 'none';
-        // Hide mega tray when panel is hidden
-        if (!show && this._megaTray) {
-            this._megaTray.style.display = 'none';
-        }
         if (show) {
             this._initXterm();
             if (this._fitAddon) {
@@ -869,7 +765,6 @@ class MudTerminal {
             this._el.style.top = `${newTop}px`;
             this._el.style.right = 'auto';
             this._el.style.bottom = 'auto';
-            if (this._positionTray) this._positionTray();
         });
 
         document.addEventListener('mouseup', () => {
@@ -891,8 +786,7 @@ class MudTerminal {
             if (w !== lastW || h !== lastH) {
                 lastW = w; lastH = h;
                 if (this._fitAddon) this._fitAddon.fit();
-                if (this._positionTray) this._positionTray();
-            }
+                }
         };
         // Poll during active resize (mousedown on panel)
         let interval = null;

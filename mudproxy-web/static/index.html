@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>MajorSLOP!</title>
-    <link rel="stylesheet" href="/static/css/main.css?v=9">
+    <link rel="stylesheet" href="/static/css/main.css?v=18">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5/css/xterm.css">
 </head>
 <body>
@@ -17,30 +17,28 @@
     <!-- Combat effects overlay -->
     <div id="combat-effects"></div>
 
-    <!-- Top bar: menu + room name + HP bars -->
+    <!-- Top bar -->
     <header id="header">
         <div class="header-left">
             <div id="menu-bar"></div>
-            <span id="room-name">Not Connected</span>
-            <span id="room-location" style="color:#888;font-size:0.85em;margin-left:8px;"></span>
             <span id="connection-status" class="status-dot disconnected"></span>
+            <span id="megamud-status" class="mm-status"></span>
         </div>
         <div class="header-right">
-            <div class="hp-bar-container">
-                <label>HP</label>
-                <div class="bar hp-bar"><div class="bar-fill" id="hp-fill"></div><span class="bar-text" id="hp-text">0/0</span></div>
-            </div>
-            <div class="hp-bar-container">
-                <label>MA</label>
-                <div class="bar mana-bar"><div class="bar-fill" id="mana-fill"></div><span class="bar-text" id="mana-text">0/0</span></div>
-            </div>
             <button id="btn-char" onclick="charPanel.toggle()" title="Character & Inventory">Char</button>
             <button id="btn-inv" onclick="inventoryPanel.toggle()" title="Inventory & Currency">Inv</button>
             <button id="btn-chat" onclick="chatPanel.toggle()" title="Chat Window">Chat</button>
             <button id="btn-terminal" onclick="mudTerminal.toggle()" title="MUD Terminal (ANSI)">Terminal</button>
-
         </div>
     </header>
+
+    <!-- MegaMUD toolbar — hanging tab under header -->
+    <div id="mega-toolbar-wrap"></div>
+
+    <!-- Room name — centered under toolbar -->
+    <div id="room-name-float">
+        <span id="room-name">Not Connected</span>
+    </div>
 
     <!-- Entity thumbnails (overlaid on room view) -->
     <div id="entity-panel" class="floating">
@@ -88,11 +86,15 @@
     <script src="/static/js/view_menu.js?v=7"></script>
     <script src="/static/js/char_panel.js?v=7"></script>
     <script src="/static/js/chat_panel.js?v=7"></script>
-    <script src="/static/js/mud_terminal.js?v=6"></script>
+    <script src="/static/js/mud_terminal.js?v=7"></script>
     <script src="/static/js/nav_panel.js?v=8"></script>
     <script src="/static/js/inventory_panel.js?v=3"></script>
     <script src="/static/js/exp_bar.js?v=1"></script>
-    <script src="/static/js/app.js?v=10"></script>
+    <script src="/static/js/round_timer.js?v=2"></script>
+    <script src="/static/js/exp_meter.js?v=2"></script>
+    <script src="/static/js/hp_orbs.js?v=2"></script>
+    <script src="/static/js/toolbar_icons.js?v=3"></script>
+    <script src="/static/js/app.js?v=17"></script>
     <script>
         // Initialize
         const roomView = new RoomView(document.getElementById('room-canvas'));
@@ -104,6 +106,10 @@
         const navPanel = new NavPanel((cmd, data) => sendCommand(cmd, data));
         const inventoryPanel = new InventoryPanel(sendCommand);
         const expBar = new ExpBar();
+        const roundTimer = new RoundTimer((cmd, data) => sendCommand(cmd, data));
+        const expMeter = new ExpMeter();
+        const hpOrbs = new HpOrbs();
+        const toolbarIcons = new ToolbarIcons((cmd, data) => sendCommand(cmd, data));
         roomView.applyAllSettings();
 
 

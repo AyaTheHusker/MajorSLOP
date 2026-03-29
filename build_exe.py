@@ -31,6 +31,8 @@ PyInstaller.__main__.run([
     '--hidden-import', 'mudproxy.entity_db',
     '--hidden-import', 'mudproxy.ansi',
     '--hidden-import', 'mudproxy.textblock',
+    '--hidden-import', 'mudproxy.mem_reader',
+    '--hidden-import', 'mudproxy.megamud_offsets',
     '--hidden-import', 'event_bus',
     '--hidden-import', 'slop_loader',
     '--hidden-import', 'orchestrator',

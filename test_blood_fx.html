@@ -1,0 +1,760 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>WebGL Blood Splat — Raindrop Dome + Ripple Warp</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0a0a0a; color: #eee; font-family: 'Segoe UI', sans-serif; display: flex; flex-direction: column; align-items: center; padding: 30px; gap: 16px; }
+h1 { font-size: 15px; color: #c44; }
+.controls { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; font-size: 12px; }
+.controls label { display: flex; align-items: center; gap: 4px; }
+.controls input[type=range] { width: 90px; }
+.controls button { padding: 4px 14px; background: #c44; border: none; color: #fff; border-radius: 3px; cursor: pointer; }
+.demo-row { display: flex; gap: 40px; flex-wrap: wrap; justify-content: center; }
+.demo-cell { position: relative; display: inline-block; }
+.demo-cell img { display: block; border-radius: 6px; border: 2px solid #333; }
+.demo-cell canvas { position: absolute; top: 0; left: 0; pointer-events: none; border-radius: 6px; }
+.demo-cell .label { text-align: center; font-size: 11px; color: #666; margin-top: 4px; }
+.info { font-size: 11px; color: #555; max-width: 700px; text-align: center; line-height: 1.4; }
+#fps { color: #888; font-size: 11px; }
+</style>
+</head>
+<body>
+
+<h1>Blood Splat DoT — Dome SDF + Ripple Warp + Sobel Normals + Glossy Phong</h1>
+<div id="fps">--</div>
+
+<div class="controls">
+    <label>Drop Rate <input type="range" id="sRate" min="1" max="30" value="8"> <span id="lRate">8</span>/s</label>
+    <label>Max Drops <input type="range" id="sMax" min="4" max="64" value="24"> <span id="lMax">24</span></label>
+    <label>Drop Life <input type="range" id="sLife" min="10" max="80" value="35"> <span id="lLife">3.5</span>s</label>
+    <label>Shininess <input type="range" id="sShin" min="16" max="256" value="80"> <span id="lShin">80</span></label>
+    <label>Warp Str <input type="range" id="sRipple" min="0" max="300" value="100"> <span id="lRipple">1.00</span></label>
+    <label>Warp Speed <input type="range" id="sWarpSpd" min="5" max="200" value="50"> <span id="lWarpSpd">0.50</span></label>
+    <label>Drop Size <input type="range" id="sSize" min="3" max="25" value="10"> <span id="lSize">0.10</span></label>
+    <label>Drip % <input type="range" id="sDrip" min="0" max="80" value="30"> <span id="lDrip">30</span>%</label>
+    <button id="btnToggle">Pause</button>
+    <button id="btnReset">Reset</button>
+    <button id="btnSplat">Splat!</button>
+</div>
+
+<h2 style="font-size:13px;color:#c44;margin-top:8px;">Blood (drips down)</h2>
+<div class="demo-row" id="bloodRow"></div>
+<h2 style="font-size:13px;color:#a4f;margin-top:8px;">Poison (rises up 1.5×)</h2>
+<div class="demo-row" id="poisonRow"></div>
+
+<p class="info">
+    Blood drops splat onto the target like liquid raindrops. Each drop has a dome SDF (surface tension shape),
+    ripple warp propagation from impact, Sobel-derived normals for 3D depth, and Blinn-Phong with high
+    shininess + Fresnel for that wet glossy sheen. Adapted from Scurry's waterDropDistortion pipeline.
+</p>
+
+<script>
+// ════════════════════════════════════════════════════════════════
+// SHADERS
+// ════════════════════════════════════════════════════════════════
+
+const VERT = `#version 300 es
+in vec2 a_pos;
+out vec2 v_uv;
+void main() {
+    v_uv = a_pos * 0.5 + 0.5;
+    gl_Position = vec4(a_pos, 0.0, 1.0);
+}`;
+
+const BLOOD_FRAG = `#version 300 es
+precision highp float;
+
+in vec2 v_uv;
+out vec4 fragColor;
+
+uniform sampler2D u_image;
+uniform vec2 u_resolution;
+uniform vec2 u_texel;
+uniform float u_time;
+uniform float u_shininess;
+uniform float u_rippleStr;
+uniform float u_warpSpeed;
+uniform float u_dripDir;    // 1.0 = drip down (blood), -1.0 = drip up (poison)
+uniform int u_colorMode;    // 0 = blood, 1 = poison
+
+// Drop data: xy = position (0-1), z = birth time, w = radius
+#define MAX_DROPS 64
+uniform vec4 u_drops[MAX_DROPS];
+uniform int u_dropCount;
+
+// ── Hash (from Scurry vk_piano_warp.frag) ──
+float hash21(vec2 p) {
+    p = fract(p * vec2(234.34, 435.345));
+    p += dot(p, p + 34.23);
+    return fract(p.x * p.y);
+}
+
+// ── Smooth noise ──
+float noise2D(vec2 p) {
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    f = f * f * (3.0 - 2.0 * f); // hermite smoothstep
+    float a = hash21(i);
+    float b = hash21(i + vec2(1.0, 0.0));
+    float c = hash21(i + vec2(0.0, 1.0));
+    float d = hash21(i + vec2(1.0, 1.0));
+    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+
+// ── FBM with configurable octaves (from Scurry vk_piano_warp.frag) ──
+float fbm(vec2 p, int octaves) {
+    float value = 0.0;
+    float amp = 0.5;
+    float freq = 1.0;
+    for (int i = 0; i < 6; i++) {
+        if (i >= octaves) break;
+        value += amp * noise2D(p * freq);
+        amp *= 0.5;
+        freq *= 2.0;
+    }
+    return value;
+}
+
+// ── Domain-warped FBM — warp the noise input with noise for organic flow ──
+// This is what makes it look truly liquid — self-similar turbulent flow
+vec2 liquidWarp(vec2 p, float t) {
+    float spd = u_warpSpeed;
+    // First layer: large-scale flow
+    vec2 q = vec2(
+        fbm(p + vec2(0.0, 0.0) + t * 0.08 * spd, 4),
+        fbm(p + vec2(5.2, 1.3) + t * 0.06 * spd, 4)
+    );
+    // Second layer: warp the warp — creates swirling eddies
+    vec2 r = vec2(
+        fbm(p + 4.0 * q + vec2(1.7, 9.2) + t * 0.04 * spd, 3),
+        fbm(p + 4.0 * q + vec2(8.3, 2.8) + t * 0.05 * spd, 3)
+    );
+    return r - 0.5; // center around zero
+}
+
+// ── Easing (from Scurry) ──
+float easeOutBack(float t) {
+    float c1 = 1.70158;
+    float c3 = c1 + 1.0;
+    return 1.0 + c3 * pow(t - 1.0, 3.0) + c1 * pow(t - 1.0, 2.0);
+}
+
+// ── Smooth minimum — merges overlapping drops like liquid surface tension ──
+float smin(float a, float b, float k) {
+    float h = max(k - abs(a - b), 0.0) / k;
+    return min(a, b) - h * h * k * 0.25;
+}
+
+// ── Compute dome height at a UV, with liquid warp applied ──
+// Drops merge when overlapping via smooth-min on distance fields
+float domeHeightAt(vec2 sampleUV, float aspect) {
+    // Track closest distance for smin merging
+    float minDist = 999.0; // smooth-min of normalized distances
+    float totalAlive = 0.0;
+
+    for (int i = 0; i < MAX_DROPS; i++) {
+        if (i >= u_dropCount) break;
+        vec2 dropPos = u_drops[i].xy;
+        float age = u_time - u_drops[i].z;
+        float radius = u_drops[i].w;
+        if (age < 0.0) continue;
+
+        float maxLife = radius * 40.0;
+        float lifeT = clamp(age / maxLife, 0.0, 1.0);
+        float splatScale = easeOutBack(clamp(age / 0.15, 0.0, 1.0));
+        float fadeT = smoothstep(0.5, 1.0, lifeT);
+        float alive = 1.0 - fadeT;
+        float cR = radius * splatScale * (1.0 - fadeT * 0.3);
+
+        vec2 delta = sampleUV - dropPos;
+        delta.x *= aspect;
+
+        // ── Liquid surface warp — domain-warped FBM ──
+        // Double-warped noise creates swirling organic flow like real liquid
+        float dist = length(delta);
+        float normD = dist / max(cR, 0.001);
+
+        // Domain warp: unique per drop, slow time
+        vec2 warpSeed = sampleUV * 3.0 + dropPos * 7.0;
+        vec2 flowDisp = liquidWarp(warpSeed, u_time);
+
+        // Strength: stronger near edges (surface tension flex), gentle at center
+        float edgeFactor = smoothstep(0.15, 0.85, normD);
+        float warpAmt = u_rippleStr * 0.15 * (0.3 + edgeFactor * 0.7) * alive;
+        delta += flowDisp * warpAmt;
+
+        // Subtle gravity pull — direction depends on effect type
+        float sag = min(age * 0.002, 0.01) * alive;
+        delta.y -= sag * u_dripDir;
+
+        float warpedDist = length(delta);
+        float normDist = warpedDist / max(cR, 0.001);
+
+        if (normDist < 1.3) {
+            // Organic edge noise — irregularity
+            float edgeNoise = noise2D(dropPos * 50.0 + sampleUV * 25.0) * 0.1;
+            float edgeND = normDist - edgeNoise;
+
+            // Smooth-min merge: drops flowing into each other
+            // k=0.4 gives a soft blend zone where drops meet
+            minDist = smin(minDist, edgeND, 0.4);
+            totalAlive = max(totalAlive, alive);
+        }
+    }
+
+    if (minDist > 1.1) return 0.0;
+
+    // Parabolic dome from merged distance field
+    float dome = max(0.0, 1.0 - minDist * minDist);
+    dome = pow(dome, 0.5);
+    dome *= smoothstep(1.05, 0.85, minDist); // smooth edge falloff
+    return dome * totalAlive;
+}
+
+void main() {
+    vec2 uv = v_uv;
+    float aspect = u_resolution.x / u_resolution.y;
+
+    // ════════════════════════════════════════════════════════
+    // Compute dome height at this pixel (with ripple warp baked in)
+    // ════════════════════════════════════════════════════════
+
+    float totalHeight = domeHeightAt(uv, aspect);
+
+    if (totalHeight < 0.005) discard;
+
+    // ════════════════════════════════════════════════════════
+    // Sobel normals — sample warped height at 4 neighbors
+    // ════════════════════════════════════════════════════════
+
+    vec2 eps = u_texel * 1.5;
+    float hL = domeHeightAt(uv + vec2(-eps.x, 0.0), aspect);
+    float hR = domeHeightAt(uv + vec2( eps.x, 0.0), aspect);
+    float hU = domeHeightAt(uv + vec2(0.0,  eps.y), aspect);
+    float hD = domeHeightAt(uv + vec2(0.0, -eps.y), aspect);
+
+    float dX = hR - hL;
+    float dY = hU - hD;
+
+    // Flowing micro-surface perturbation — domain-warped for liquid feel
+    vec2 microWarp = liquidWarp(uv * 8.0, u_time * 0.7) * 0.02;
+    dX += microWarp.x;
+    dY += microWarp.y;
+
+    vec3 N = normalize(vec3(-dX * 5.0, -dY * 5.0, 0.2));
+
+    // ════════════════════════════════════════════════════════
+    // Glossy blood lighting — dual light + strong specular
+    // ════════════════════════════════════════════════════════
+
+    vec3 V = vec3(0.0, 0.0, 1.0);
+
+    // Primary light — slowly orbiting for shifting wet glint
+    float lt = u_time * 0.4;
+    vec3 L1 = normalize(vec3(0.4 + sin(lt)*0.15, 0.6 + cos(lt*0.7)*0.1, 1.0));
+    vec3 H1 = normalize(L1 + V);
+
+    // Secondary fill light — opposite side, dimmer
+    vec3 L2 = normalize(vec3(-0.3, -0.4, 0.8));
+    vec3 H2 = normalize(L2 + V);
+
+    // Diffuse — wrap lighting, brighter base
+    float diff = max(dot(N, L1), 0.0) * 0.35 + 0.70;
+    diff += max(dot(N, L2), 0.0) * 0.2; // fill
+
+    // Specular — primary: tight wet highlight
+    float NdH1 = max(dot(N, H1), 0.0);
+    float spec1 = pow(NdH1, u_shininess);
+    // Secondary: broader sheen from fill
+    float NdH2 = max(dot(N, H2), 0.0);
+    float spec2 = pow(NdH2, u_shininess * 0.4) * 0.3;
+    // Wide soft lobe — overall wet sheen
+    float spec3 = pow(NdH1, u_shininess * 0.08) * 0.05;
+
+    // Fresnel rim — wet edge reflection
+    float NdV = max(dot(N, V), 0.0);
+    float fresnel = pow(1.0 - NdV, 3.5);
+
+    // ── Coloring — mode-dependent ──
+    float thickness = smoothstep(0.0, 0.7, totalHeight);
+    vec3 baseColor;
+    float veinNoise = fbm(uv * 15.0 + u_time * 0.05, 3);
+
+    if (u_colorMode == 0) {
+        // BLOOD — rich crimson
+        vec3 bloodThin  = vec3(0.70, 0.03, 0.008);
+        vec3 bloodMid   = vec3(0.48, 0.012, 0.005);
+        vec3 bloodThick = vec3(0.20, 0.003, 0.001);
+        baseColor = mix(bloodThin, bloodMid, smoothstep(0.0, 0.3, thickness));
+        baseColor = mix(baseColor, bloodThick, smoothstep(0.3, 0.85, thickness));
+        baseColor *= 0.88 + veinNoise * 0.12;
+    } else {
+        // POISON — vibrant violet with swirling green veins
+        vec3 poisonThin  = vec3(0.55, 0.05, 0.75);  // bright violet
+        vec3 poisonMid   = vec3(0.35, 0.02, 0.55);  // deep purple
+        vec3 poisonThick = vec3(0.15, 0.01, 0.30);  // dark violet
+
+        baseColor = mix(poisonThin, poisonMid, smoothstep(0.0, 0.3, thickness));
+        baseColor = mix(baseColor, poisonThick, smoothstep(0.3, 0.85, thickness));
+
+        // Swirling glowing green veins — domain-warped for organic flow
+        vec2 veinWarp = liquidWarp(uv * 5.0 + 100.0, u_time * 0.8);
+        float greenVein = fbm(uv * 10.0 + veinWarp * 3.0 + u_time * 0.1, 4);
+        greenVein = smoothstep(0.35, 0.65, greenVein); // sharpen into veins
+        vec3 glowGreen = vec3(0.1, 0.9, 0.15) * greenVein * 0.6;
+        baseColor += glowGreen * (0.5 + thickness * 0.5);
+        // Subtle overall shimmer
+        baseColor *= 0.85 + veinNoise * 0.15;
+    }
+
+    // ── Compose ──
+    vec3 color = baseColor * diff;
+
+    // Specular highlights — warm white, strong
+    vec3 specColor = vec3(1.0, 0.88, 0.8);
+    color += specColor * min(spec1 * 1.3 + spec2 + spec3, 1.5);
+
+    // Fresnel edge — dark blood red, not bright
+    color += vec3(0.15, 0.005, 0.002) * fresnel * 0.5;
+
+    // Meniscus darkening — thin dark ring where blood meets surface
+    float meniscus = smoothstep(0.0, 0.12, totalHeight) * (1.0 - smoothstep(0.12, 0.4, totalHeight));
+    color *= 1.0 - meniscus * 0.3;
+
+    // Heartbeat
+    color *= 0.96 + 0.04 * sin(u_time * 4.0);
+
+    color = clamp(color, vec3(0.0), vec3(1.0));
+    if (u_colorMode == 0) {
+        // Blood: R dominates, never pink
+        color.g = min(color.g, color.r * 0.18);
+        color.b = min(color.b, color.r * 0.1);
+    } else {
+        // Poison: B dominates, keep green veins visible
+        color.r = min(color.r, color.b * 0.8);
+    }
+
+    float alpha = smoothstep(0.005, 0.06, totalHeight) * 0.93;
+    fragColor = vec4(color, alpha);
+}`;
+
+
+// ════════════════════════════════════════════════════════════════
+// WEBGL HELPERS
+// ════════════════════════════════════════════════════════════════
+
+function compileShader(gl, type, src) {
+    const s = gl.createShader(type);
+    gl.shaderSource(s, src);
+    gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+        console.error(gl.getShaderInfoLog(s));
+        return null;
+    }
+    return s;
+}
+
+function linkProgram(gl, vSrc, fSrc) {
+    const vs = compileShader(gl, gl.VERTEX_SHADER, vSrc);
+    const fs = compileShader(gl, gl.FRAGMENT_SHADER, fSrc);
+    if (!vs || !fs) return null;
+    const p = gl.createProgram();
+    gl.attachShader(p, vs);
+    gl.attachShader(p, fs);
+    gl.linkProgram(p);
+    if (!gl.getProgramParameter(p, gl.LINK_STATUS)) {
+        console.error(gl.getProgramInfoLog(p));
+        return null;
+    }
+    return p;
+}
+
+
+// ════════════════════════════════════════════════════════════════
+// BLOOD SPLAT EFFECT
+// ════════════════════════════════════════════════════════════════
+
+class BloodSplatEffect {
+    // mode: 'blood' or 'poison'
+    constructor(canvas, image, mode = 'blood') {
+        this.canvas = canvas;
+        this.image = image;
+        this.mode = mode;
+        this.w = (image.naturalWidth || image.width) * 2;
+        this.h = (image.naturalHeight || image.height) * 2;
+        canvas.width = this.w;
+        canvas.height = this.h;
+
+        const gl = canvas.getContext('webgl2', {
+            alpha: true, premultipliedAlpha: false, antialias: false,
+        });
+        if (!gl) return;
+        this.gl = gl;
+
+        gl.enable(gl.BLEND);
+        gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+
+        this.prog = linkProgram(gl, VERT, BLOOD_FRAG);
+        if (!this.prog) { console.error('Shader failed'); return; }
+
+        // Quad VAO
+        this.vao = gl.createVertexArray();
+        gl.bindVertexArray(this.vao);
+        const buf = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1,1,-1,-1,1,1,1]), gl.STATIC_DRAW);
+        const loc = gl.getAttribLocation(this.prog, 'a_pos');
+        gl.enableVertexAttribArray(loc);
+        gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+        gl.bindVertexArray(null);
+
+        // Image texture
+        this.imgTex = gl.createTexture();
+        gl.bindTexture(gl.TEXTURE_2D, this.imgTex);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, image);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
+        // Uniform locations
+        gl.useProgram(this.prog);
+        this.u = {};
+        for (const n of ['u_image','u_resolution','u_texel','u_time','u_shininess',
+                          'u_rippleStr','u_warpSpeed','u_dripDir','u_colorMode','u_dropCount']) {
+            this.u[n] = gl.getUniformLocation(this.prog, n);
+        }
+        // Cache drop uniform locations
+        this.uDrops = [];
+        for (let i = 0; i < 64; i++) {
+            this.uDrops.push(gl.getUniformLocation(this.prog, `u_drops[${i}]`));
+        }
+
+        this.drops = [];
+        this.running = true;
+        this.startTime = performance.now() / 1000;
+        this.lastSpawn = 0;
+
+        // Build edge map for spawn positions
+        this._buildEdgeMap(image);
+
+        this.settings = {
+            dropRate: 30,
+            maxDrops: 64,
+            dropLife: 6.5,
+            shininess: 256,
+            rippleStr: 0.15,
+            warpSpeed: 2.00,
+            dropSize: 0.06,
+            dripPct: 80,
+        };
+    }
+
+    _buildEdgeMap(img) {
+        const c = document.createElement('canvas');
+        const iw = img.naturalWidth || img.width;
+        const ih = img.naturalHeight || img.height;
+        c.width = iw; c.height = ih;
+        const ctx = c.getContext('2d');
+        ctx.drawImage(img, 0, 0, iw, ih);
+        const px = ctx.getImageData(0, 0, iw, ih).data;
+
+        function lum(x, y) {
+            if (x < 0 || x >= iw || y < 0 || y >= ih) return 0;
+            const i = (y * iw + x) * 4;
+            return px[i] * 0.299 + px[i+1] * 0.587 + px[i+2] * 0.114;
+        }
+
+        this.spawnPoints = [];
+        for (let y = 1; y < ih - 1; y++) {
+            for (let x = 1; x < iw - 1; x++) {
+                const gx = lum(x+1,y-1)+2*lum(x+1,y)+lum(x+1,y+1)
+                         - lum(x-1,y-1)-2*lum(x-1,y)-lum(x-1,y+1);
+                const gy = lum(x-1,y+1)+2*lum(x,y+1)+lum(x+1,y+1)
+                         - lum(x-1,y-1)-2*lum(x,y-1)-lum(x+1,y-1);
+                const mag = Math.sqrt(gx*gx + gy*gy) / 255;
+                if (mag > 0.06) {
+                    this.spawnPoints.push({ u: x/iw, v: y/ih, s: Math.min(mag, 1) });
+                }
+            }
+        }
+        // Also add some random interior points so blood can land anywhere
+        for (let i = 0; i < 50; i++) {
+            this.spawnPoints.push({
+                u: 0.15 + Math.random() * 0.7,
+                v: 0.1 + Math.random() * 0.8,
+                s: 0.3,
+            });
+        }
+    }
+
+    spawnDrop() {
+        if (!this.spawnPoints.length) return;
+        const sp = this.spawnPoints[Math.floor(Math.random() * this.spawnPoints.length)];
+        const now = performance.now() / 1000 - this.startTime;
+        const sizeVar = 0.5 + Math.random() * 1.0;
+
+        // Some drops drip — they slide slowly downward
+        const isDrip = Math.random() * 100 < this.settings.dripPct;
+        // Drip speed varies: slow lazy drips to slightly faster runs
+        const dripSpeed = isDrip ? (0.01 + Math.random() * 0.03) : 0;
+        // Drippers are slightly smaller and elongated (smaller radius)
+        const dripSizeMul = isDrip ? (0.4 + Math.random() * 0.4) : 1.0;
+
+        this.drops.push({
+            x: sp.u + (Math.random() - 0.5) * 0.05,
+            y: sp.v + (Math.random() - 0.5) * 0.05,
+            birth: now,
+            radius: this.settings.dropSize * sizeVar * dripSizeMul,
+            dripSpeed,         // 0 = stationary splat, >0 = sliding drip
+            dripVx: isDrip ? (Math.random() - 0.5) * 0.003 : 0, // tiny horizontal wobble
+            dripUp: this.mode === 'poison',
+        });
+    }
+
+    update(dt) {
+        if (!this.running) return;
+        const now = performance.now() / 1000 - this.startTime;
+
+        // Spawn drops at rate
+        const interval = 1.0 / this.settings.dropRate;
+        if (now - this.lastSpawn > interval) {
+            if (this.drops.length < this.settings.maxDrops) {
+                this.spawnDrop();
+            }
+            this.lastSpawn = now;
+        }
+
+        // Update dripping drops — smoothly slide downward
+        for (const d of this.drops) {
+            if (d.dripSpeed > 0) {
+                const age = now - d.birth;
+                // Drip starts after splat settles (0.3s delay)
+                if (age > 0.3) {
+                    // Accelerate slightly like real gravity on a surface
+                    const accel = 1.0 + age * 0.15;
+                    // Blood drips down (+y in canvas), poison rises up (-y) at 1.5x
+                    const dir = d.dripUp ? 1.5 : -1.0;
+                    d.y += d.dripSpeed * dt * accel * dir;
+                    d.x += d.dripVx * dt;
+                    // Leave a trail — continuously push birth time forward
+                    // so the drop stays "alive" as it moves
+                    // (it refreshes its lifetime while dripping)
+                }
+            }
+        }
+
+        // Remove dead or off-screen drops
+        this.drops = this.drops.filter(d => {
+            if (d.y > 1.15 || d.y < -0.15 || d.x < -0.05 || d.x > 1.05) return false;
+            const age = now - d.birth;
+            return age < d.radius * 40;
+        });
+    }
+
+    render() {
+        if (!this.gl || !this.running) return;
+        const { gl, prog, vao, u, w, h, drops } = this;
+        const now = performance.now() / 1000 - this.startTime;
+
+        gl.viewport(0, 0, w, h);
+        gl.clearColor(0, 0, 0, 0);
+        gl.clear(gl.COLOR_BUFFER_BIT);
+
+        if (drops.length === 0) return;
+
+        gl.useProgram(prog);
+
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, this.imgTex);
+        gl.uniform1i(u.u_image, 0);
+        gl.uniform2f(u.u_resolution, w, h);
+        gl.uniform2f(u.u_texel, 1/w, 1/h);
+        gl.uniform1f(u.u_time, now);
+        gl.uniform1f(u.u_shininess, this.settings.shininess);
+        gl.uniform1f(u.u_rippleStr, this.settings.rippleStr);
+        gl.uniform1f(u.u_warpSpeed, this.settings.warpSpeed);
+        gl.uniform1f(u.u_dripDir, this.mode === 'poison' ? 1.0 : -1.0);
+        gl.uniform1i(u.u_colorMode, this.mode === 'poison' ? 1 : 0);
+        gl.uniform1i(u.u_dropCount, drops.length);
+
+        // Upload drop data
+        for (let i = 0; i < drops.length && i < 64; i++) {
+            const d = drops[i];
+            gl.uniform4f(this.uDrops[i], d.x, d.y, d.birth, d.radius);
+        }
+
+        gl.bindVertexArray(vao);
+        gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    }
+
+    reset() {
+        this.drops = [];
+        this.startTime = performance.now() / 1000;
+        this.lastSpawn = 0;
+    }
+
+    burstSplat(count = 8) {
+        for (let i = 0; i < count; i++) this.spawnDrop();
+    }
+}
+
+
+// ════════════════════════════════════════════════════════════════
+// TEST IMAGES
+// ════════════════════════════════════════════════════════════════
+
+function generateTestImage(w, h, hue) {
+    const c = document.createElement('canvas');
+    c.width = w; c.height = h;
+    const ctx = c.getContext('2d');
+
+    ctx.fillStyle = `hsl(${hue}, 20%, 12%)`;
+    ctx.fillRect(0, 0, w, h);
+
+    const grad = ctx.createRadialGradient(w/2, h*0.45, w*0.05, w/2, h*0.45, w*0.4);
+    grad.addColorStop(0, `hsl(${hue}, 55%, 50%)`);
+    grad.addColorStop(0.6, `hsl(${hue}, 40%, 30%)`);
+    grad.addColorStop(1, `hsl(${hue}, 25%, 18%)`);
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.ellipse(w/2, h*0.45, w*0.38, h*0.4, 0, 0, Math.PI*2);
+    ctx.fill();
+
+    const hg = ctx.createRadialGradient(w/2, h*0.15, 1, w/2, h*0.15, w*0.22);
+    hg.addColorStop(0, `hsl(${hue}, 55%, 55%)`);
+    hg.addColorStop(1, `hsl(${hue}, 40%, 28%)`);
+    ctx.fillStyle = hg;
+    ctx.beginPath();
+    ctx.arc(w/2, h*0.18, w*0.2, 0, Math.PI*2);
+    ctx.fill();
+
+    ctx.strokeStyle = `hsl(${hue}, 40%, 32%)`;
+    ctx.lineWidth = Math.max(w * 0.08, 3);
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(w*0.16, h*0.35); ctx.lineTo(w*0.02, h*0.6);
+    ctx.moveTo(w*0.84, h*0.35); ctx.lineTo(w*0.98, h*0.6);
+    ctx.stroke();
+
+    ctx.fillStyle = `hsl(${(hue+180)%360}, 90%, 65%)`;
+    ctx.beginPath();
+    ctx.arc(w*0.4, h*0.15, Math.max(w*0.05, 2), 0, Math.PI*2);
+    ctx.arc(w*0.6, h*0.15, Math.max(w*0.05, 2), 0, Math.PI*2);
+    ctx.fill();
+
+    return c;
+}
+
+
+// ════════════════════════════════════════════════════════════════
+// INIT
+// ════════════════════════════════════════════════════════════════
+
+const SIZES = [
+    { w: 67, h: 67, hue: 0, label: 'NPC 67×67' },
+    { w: 67, h: 119, hue: 210, label: 'Player 67×119' },
+    { w: 134, h: 134, hue: 30, label: 'NPC 2×' },
+    { w: 200, h: 200, hue: 120, label: 'Large 200×200' },
+];
+
+const effects = [];
+
+function createRow(containerId, mode) {
+    const row = document.getElementById(containerId);
+    for (const spec of SIZES) {
+        const cell = document.createElement('div');
+        cell.className = 'demo-cell';
+
+        const testCanvas = generateTestImage(spec.w, spec.h, spec.hue);
+        const img = new Image();
+        img.src = testCanvas.toDataURL();
+        img.style.width = spec.w + 'px';
+        img.style.height = spec.h + 'px';
+
+        const overlay = document.createElement('canvas');
+        overlay.style.width = spec.w + 'px';
+        overlay.style.height = spec.h + 'px';
+
+        const label = document.createElement('div');
+        label.className = 'label';
+        label.textContent = spec.label + (mode === 'poison' ? ' (poison)' : '');
+
+        cell.appendChild(img);
+        cell.appendChild(overlay);
+        cell.appendChild(label);
+        row.appendChild(cell);
+
+        img.onload = () => {
+            const fx = new BloodSplatEffect(overlay, img, mode);
+            if (fx.gl) effects.push(fx);
+        };
+    }
+}
+
+function init() {
+    createRow('bloodRow', 'blood');
+    createRow('poisonRow', 'poison');
+}
+
+// Controls
+const ctrls = {
+    sRate:    { lbl: 'lRate',    key: 'dropRate',   fmt: v => v, div: 1 },
+    sMax:     { lbl: 'lMax',     key: 'maxDrops',   fmt: v => v, div: 1 },
+    sLife:    { lbl: 'lLife',    key: 'dropLife',   fmt: v => (v/10).toFixed(1), div: 10 },
+    sShin:    { lbl: 'lShin',    key: 'shininess',  fmt: v => v, div: 1 },
+    sRipple:  { lbl: 'lRipple',  key: 'rippleStr',  fmt: v => (v/100).toFixed(2), div: 100 },
+    sWarpSpd: { lbl: 'lWarpSpd', key: 'warpSpeed',  fmt: v => (v/100).toFixed(2), div: 100 },
+    sSize:    { lbl: 'lSize',    key: 'dropSize',   fmt: v => (v/100).toFixed(2), div: 100 },
+    sDrip:    { lbl: 'lDrip',    key: 'dripPct',    fmt: v => v, div: 1 },
+};
+for (const [id, c] of Object.entries(ctrls)) {
+    const el = document.getElementById(id);
+    const lab = document.getElementById(c.lbl);
+    el.addEventListener('input', () => {
+        const raw = parseInt(el.value);
+        const val = raw / c.div;
+        lab.textContent = c.fmt(raw);
+        for (const fx of effects) fx.settings[c.key] = val;
+    });
+}
+
+document.getElementById('btnToggle').addEventListener('click', function() {
+    for (const fx of effects) fx.running = !fx.running;
+    this.textContent = effects[0]?.running ? 'Pause' : 'Resume';
+});
+document.getElementById('btnReset').addEventListener('click', () => {
+    for (const fx of effects) fx.reset();
+});
+document.getElementById('btnSplat').addEventListener('click', () => {
+    for (const fx of effects) fx.burstSplat(6);
+});
+
+// Main loop
+let lastT = performance.now(), frameCount = 0, fpsTime = 0;
+function loop(now) {
+    const dt = Math.min((now - lastT) / 1000, 0.05);
+    lastT = now;
+
+    for (const fx of effects) {
+        fx.update(dt);
+        fx.render();
+    }
+
+    frameCount++;
+    fpsTime += dt;
+    if (fpsTime >= 1) {
+        const totalDrops = effects.reduce((s,f) => s + f.drops.length, 0);
+        document.getElementById('fps').textContent = `${Math.round(frameCount/fpsTime)} fps / ${totalDrops} drops`;
+        frameCount = 0; fpsTime = 0;
+    }
+
+    requestAnimationFrame(loop);
+}
+
+init();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

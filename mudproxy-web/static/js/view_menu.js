@@ -34,6 +34,12 @@ class ViewMenu {
             { type: 'toggle', label: 'Lock NPC Panel', key: 'npcLocked', default: false },
             { type: 'toggle', label: 'Lock Loot Panel', key: 'lootLocked', default: false },
             { type: 'toggle', label: 'EXP Bar', key: 'showExpBar', default: true },
+            { type: 'toggle', label: 'EXP Meter', key: 'showExpMeter', default: false,
+              onChange: (val) => { if (typeof expMeter !== 'undefined') expMeter.toggle(val); }
+            },
+            { type: 'toggle', label: 'Round Timer', key: 'showRoundTimer', default: false,
+              onChange: (val) => { if (typeof roundTimer !== 'undefined') roundTimer.toggle(val); }
+            },
             { type: 'separator' },
             { type: 'submenu', label: 'NPC Scale', items:
                 ['50%','75%','100%','125%','150%','200%','250%','300%','400%'].map(p => ({
@@ -426,7 +432,13 @@ and INPUT mode (text box with command history).</p>
             if (slopEl) {
                 const n = slopRes.total_assets || 0;
                 const f = slopRes.files || 0;
-                slopEl.querySelector('.status-text').textContent = `SLOP: ${n.toLocaleString()} assets from ${f} file(s)`;
+                const c = slopRes.counts || {};
+                const portraits = c.player_thumb || 0;
+                const rooms = c.room_image || 0;
+                const npcs = c.npc_thumb || 0;
+                const items = c.item_thumb || 0;
+                slopEl.querySelector('.status-text').textContent =
+                    `SLOP: ${n.toLocaleString()} assets (${rooms} rooms, ${npcs} NPCs, ${items} items, ${portraits} portraits) from ${f} file(s)`;
             }
         } catch (e) {
             console.error('Failed to refresh data status:', e);

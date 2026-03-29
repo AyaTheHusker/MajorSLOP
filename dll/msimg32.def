@@ -1,0 +1,3 @@
+LIBRARY MSIMG32
+EXPORTS
+    AlphaBlend=proxy_AlphaBlend @1

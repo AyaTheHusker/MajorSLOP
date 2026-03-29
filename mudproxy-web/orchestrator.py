@@ -23,6 +23,7 @@ from mudproxy.config import Config
 from mudproxy.gamedata import GameData
 from mudproxy.hp_tracker import HPTracker
 from mudproxy.entity_db import EntityDB, EntityInfo
+from mudproxy.mem_reader import MegaMUDMemReader
 
 logger = logging.getLogger(__name__)
 
@@ -149,6 +150,7 @@ class Orchestrator:
         self._heal_spell_names: set[str] = self.gamedata.get_heal_spell_names() if self.gamedata.is_loaded else set()
         self.hp_tracker = HPTracker(self.gamedata)
         self.entity_db = EntityDB(on_look_complete=self._on_look_complete)
+        self.mem_reader = MegaMUDMemReader()
 
         # Current state
         self._room_name = ""
@@ -186,6 +188,11 @@ class Orchestrator:
         self._last_missing_check = 0.0  # cooldown for _check_missing_data
         self._portrait_confirmed = False  # True once l firstname has been sent AND portrait emitted
         self._last_item_refresh = 0.0  # cooldown for i+enter after item pickup/drop
+
+        # ── Round tracking ──
+        self._round_count = 0
+        self._last_round_ts = 0.0     # time.time() of last round tick
+        self._combat_start_ts = 0.0   # time.time() of combat start
 
         # ── Permanent ANSI log — rolling 50K lines ──
         self._ansi_log_path = Path('/tmp/mudproxy_ansi.log')
@@ -253,6 +260,8 @@ class Orchestrator:
         self.parser.on_spellbook = self._on_spellbook
         self.parser.on_exp_status = self._on_exp_status
         self.parser.on_item_transfer = self._on_item_transfer
+        self.parser.on_already_cast = self._on_already_cast
+        self.parser.on_spell_cast = self._on_spell_cast
 
     async def start(self):
         """Initialize and load data, start TCP proxy listener for MegaMud."""
@@ -267,6 +276,19 @@ class Orchestrator:
         # Start TCP proxy listener so MegaMud can connect through us
         await self.proxy.start()
         logger.info(f"Proxy listener on {self.config.proxy_host}:{self.config.proxy_port}")
+
+        # Load MegaMUD room checksums for goto support
+        megamud_dir = self.config.get_megamud_dir()
+        rooms_md = megamud_dir / "Default" / "Rooms.md"
+        if rooms_md.exists():
+            MegaMUDMemReader.load_room_checksums(rooms_md)
+
+        # Start memory reader polling (attaches to MegaMUD process when available)
+        await self.mem_reader.start_polling(
+            interval=1.0,
+            on_update=self._on_mem_update,
+            player_name=self._char_name or None,
+        )
 
         # BBS connection happens automatically when MegaMud connects to proxy
 
@@ -365,17 +387,19 @@ class Orchestrator:
             self._in_combat = True
             self._is_resting = False
             self._rest_confirmed = False
-            # Emit engage event when active target changes (switch targets)
-            cur_target = self._combat_target
-            prev_target = getattr(self, '_active_engage_target', None)
-            if cur_target and cur_target != prev_target:
-                self._active_engage_target = cur_target
-                self._emit("combat_engage", {"target": cur_target})
+            # Emit engage event on EVERY *Combat Engaged* (swords on target)
+            if self._combat_target:
+                self._emit("combat_engage", {"target": self._combat_target})
             # Instant burst — dump all queued commands in ~0.3s window
             if self._cmd_queue and self._loop and self.proxy.connected:
                 self._loop.create_task(self._combat_burst())
         elif s == '*Combat Off*':
             self._in_combat = False
+            if self._round_count > 0:
+                self._emit("combat_end", {"rounds": self._round_count})
+            self._round_count = 0
+            self._last_round_ts = 0.0
+            self._combat_start_ts = 0.0
 
         # ── Resting detection ──
         if '(Resting)' in s:
@@ -1158,6 +1182,25 @@ class Orchestrator:
             "target": self._combat_target,
         })
 
+        # ── Round detection — time-gap based ──
+        # Must be at least 3.5s since last tick (rounds are ~5s, can't be sooner)
+        import time as _time
+        now = _time.time()
+        if now - self._last_round_ts > 3.5:
+            self._round_count += 1
+            if self._round_count == 1:
+                self._combat_start_ts = now
+            self._last_round_ts = now
+            self._emit("round_tick", {"round": self._round_count})
+
+    def _on_spell_cast(self, data):
+        """Spell cast or failed — emit event, JS decides if it feeds round timer."""
+        self._emit("spell_cast", data)
+
+    def _on_already_cast(self):
+        """Player tried to cast but already cast this round."""
+        self._emit("already_cast", {})
+
     def _on_death(self):
         self._combat_target = None
         self._active_engage_target = None
@@ -1172,10 +1215,10 @@ class Orchestrator:
 
     def _on_coin_transfer(self, data: dict):
         self._emit("coin_transfer", data)
-        # Queue room refresh after pickup/drop so ground piles update
+        # Refresh inventory + ground after pickup/drop
         action = data.get("action")
-        if action in ("pickup", "drop"):
-            self.queue_info_cmd("")  # empty enter = room refresh
+        if action in ("pickup", "drop") and self.proxy.connected and self._loop:
+            asyncio.ensure_future(self._item_refresh_burst())
 
     def _on_item_transfer(self, data: dict):
         """Handle item pickup/drop — emit with thumbnail key for fly animation.
@@ -1232,6 +1275,8 @@ class Orchestrator:
     def _on_char_name(self, name: str):
         self._char_name = name
         self._emit("char_name", {"name": name})
+        # Tell mem_reader the real name so it can re-scan if it latched wrong
+        self.mem_reader.set_player_name(name.split()[0])
         # Always look at self when we learn our name — no cache checks
         if not self._self_looked and self._loop and self.proxy.connected:
             self._self_looked = True
@@ -1499,4 +1544,20 @@ class Orchestrator:
             "online_players": self._online_players,
             "inventory": self._inventory,
             "exp_status": self._exp_status,
+            "mem_attached": self.mem_reader.attached,
         }
+
+    def get_mem_state(self) -> dict | None:
+        """Get full MegaMUD process memory state, or None if not attached."""
+        return self.mem_reader.get_full_state()
+
+    async def _on_mem_update(self, state: dict):
+        """Called by mem_reader when process memory state changes."""
+        # Broadcast the full memory state to WebSocket clients
+        await self.bus.broadcast("mem_state", state)
+
+        # Cross-reference: if parser hasn't picked up the char name yet, grab it from memory
+        mem_name = state.get("player", {}).get("name", "")
+        if mem_name and not self._char_name:
+            self._char_name = mem_name
+            logger.info(f"Character name from memory: {mem_name}")

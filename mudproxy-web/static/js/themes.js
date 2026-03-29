@@ -1,11 +1,13 @@
 // ── UI Color Themes ──
 // Each theme overrides CSS custom properties on :root via data-theme attribute.
 // All panels use frosted glass (backdrop-filter) + gradient decorations.
+// Each theme also defines orbit colors for the round timer and ripple FX.
 
 const UI_THEMES = {
     greylord: {
         name: 'Grey Lord',
         desc: 'Default stone grey',
+        orbit: { ball: '#c0c8e0', trail: '#4455aa', ripple: '#6677cc', text: ['#8899cc','#c0c8e0'] },
         vars: {
             '--bg': '#0a0a12',
             '--bg-panel': 'rgba(16, 16, 28, 0.55)',
@@ -27,6 +29,7 @@ const UI_THEMES = {
     blackfort: {
         name: 'Black Fort',
         desc: 'Obsidian darkness',
+        orbit: { ball: '#ccccdd', trail: '#443366', ripple: '#554477', text: ['#554477','#aaaacc'] },
         vars: {
             '--bg': '#030306',
             '--bg-panel': 'rgba(4, 4, 10, 0.7)',
@@ -48,6 +51,7 @@ const UI_THEMES = {
     khazarad: {
         name: 'Khazarad',
         desc: 'Ancient bronze',
+        orbit: { ball: '#ffd080', trail: '#885522', ripple: '#cc9944', text: ['#886633','#ffd080'] },
         vars: {
             '--bg': '#0c0a06',
             '--bg-panel': 'rgba(24, 18, 10, 0.6)',
@@ -69,6 +73,7 @@ const UI_THEMES = {
     silvermere: {
         name: 'Silvermere',
         desc: 'Gleaming silver',
+        orbit: { ball: '#ffffff', trail: '#7788bb', ripple: '#aabbdd', text: ['#7788bb','#e0e0f0'] },
         vars: {
             '--bg': '#0e0e12',
             '--bg-panel': 'rgba(28, 28, 36, 0.55)',
@@ -90,6 +95,7 @@ const UI_THEMES = {
     annora: {
         name: 'Annora',
         desc: 'Radiant white',
+        orbit: { ball: '#ffffee', trail: '#ccaa66', ripple: '#eeddaa', text: ['#ccaa66','#ffffff'] },
         vars: {
             '--bg': '#141418',
             '--bg-panel': 'rgba(40, 40, 50, 0.5)',
@@ -111,6 +117,7 @@ const UI_THEMES = {
     jorah: {
         name: 'Jorah',
         desc: 'Royal blue',
+        orbit: { ball: '#88ccff', trail: '#2244aa', ripple: '#4488ee', text: ['#2255cc','#88ccff'] },
         vars: {
             '--bg': '#060810',
             '--bg-panel': 'rgba(10, 16, 36, 0.6)',
@@ -132,6 +139,7 @@ const UI_THEMES = {
     putakwa: {
         name: 'Putakwa',
         desc: 'Deep sea green',
+        orbit: { ball: '#66ffcc', trail: '#116655', ripple: '#33ccaa', text: ['#118866','#66ffcc'] },
         vars: {
             '--bg': '#040c0a',
             '--bg-panel': 'rgba(8, 22, 18, 0.6)',
@@ -153,6 +161,7 @@ const UI_THEMES = {
     void: {
         name: 'Void',
         desc: 'Vibrant purple',
+        orbit: { ball: '#dd88ff', trail: '#6622aa', ripple: '#aa44ee', text: ['#7733cc','#dd88ff'] },
         vars: {
             '--bg': '#0a0410',
             '--bg-panel': 'rgba(20, 8, 32, 0.6)',
@@ -174,6 +183,7 @@ const UI_THEMES = {
     ozzrinom: {
         name: 'Ozzrinom',
         desc: 'Blood crimson',
+        orbit: { ball: '#ff6666', trail: '#881122', ripple: '#cc3344', text: ['#aa2233','#ff8888'] },
         vars: {
             '--bg': '#0c0406',
             '--bg-panel': 'rgba(28, 8, 12, 0.6)',
@@ -195,6 +205,7 @@ const UI_THEMES = {
     phoenix: {
         name: 'Phoenix',
         desc: 'Fire gradients',
+        orbit: { ball: '#ffcc44', trail: '#cc4400', ripple: '#ff8822', text: ['#cc5500','#ffdd66'] },
         vars: {
             '--bg': '#0c0804',
             '--bg-panel': 'rgba(26, 14, 6, 0.6)',
@@ -216,6 +227,7 @@ const UI_THEMES = {
     madwizard: {
         name: 'Mad Wizard',
         desc: 'Trippy neon',
+        orbit: { ball: '#00ffee', trail: '#ff00cc', ripple: '#88ffff', text: ['#ff44cc','#00ffee'] },
         vars: {
             '--bg': '#06060c',
             '--bg-panel': 'rgba(12, 8, 24, 0.55)',
@@ -237,7 +249,8 @@ const UI_THEMES = {
     tasloi: {
         name: 'Tasloi',
         desc: 'Green & brown camo',
-        camo: true,
+        vines: true,
+        orbit: { ball: '#88ff44', trail: '#664422', ripple: '#55cc22', text: ['#448822','#aaff66'] },
         vars: {
             '--bg': '#060a04',
             '--bg-panel': 'rgba(14, 22, 10, 0.55)',
@@ -259,6 +272,7 @@ const UI_THEMES = {
     frostborn: {
         name: 'Frostborn',
         desc: 'Frozen tundra',
+        orbit: { ball: '#ccf0ff', trail: '#2277bb', ripple: '#66ccee', text: ['#3399cc','#ccf0ff'] },
         vars: {
             '--bg': '#060a0e',
             '--bg-panel': 'rgba(12, 20, 30, 0.55)',
@@ -280,6 +294,7 @@ const UI_THEMES = {
     sandstorm: {
         name: 'Sandstorm',
         desc: 'Desert dunes',
+        orbit: { ball: '#ffe088', trail: '#996622', ripple: '#ddaa44', text: ['#aa8833','#ffe088'] },
         vars: {
             '--bg': '#0c0a06',
             '--bg-panel': 'rgba(26, 20, 12, 0.55)',
@@ -301,6 +316,7 @@ const UI_THEMES = {
     crystal: {
         name: 'Crystal Cavern',
         desc: 'Gem-lit depths',
+        orbit: { ball: '#cc88ff', trail: '#4466cc', ripple: '#aa66ee', text: ['#7744cc','#ddaaff'] },
         vars: {
             '--bg': '#08060c',
             '--bg-panel': 'rgba(16, 12, 26, 0.55)',
@@ -322,6 +338,7 @@ const UI_THEMES = {
     afroman: {
         name: 'Afroman',
         desc: 'Red, white & blue',
+        orbit: { ball: '#ffffff', trail: '#cc2244', ripple: '#4466dd', text: ['#cc2244','#4466dd','#ffffff'] },
         vars: {
             '--bg': '#060608',
             '--bg-panel': 'rgba(12, 12, 24, 0.55)',
@@ -333,8 +350,8 @@ const UI_THEMES = {
             '--text': '#e8e0f0',
             '--text-dim': '#8877aa',
             '--accent': '#cc2244',
-            '--header-grad': 'linear-gradient(135deg, rgba(40,10,16,0.5) 0%, rgba(14,14,44,0.45) 50%, rgba(40,10,16,0.5) 100%)',
-            '--panel-grad': 'linear-gradient(135deg, rgba(28,8,14,0.5) 0%, rgba(10,10,34,0.5) 50%, rgba(28,8,14,0.5) 100%)',
+            '--header-grad': 'linear-gradient(135deg, rgba(50,10,20,0.5) 0%, rgba(240,240,255,0.06) 50%, rgba(14,14,60,0.5) 100%)',
+            '--panel-grad': 'linear-gradient(135deg, rgba(40,8,16,0.5) 0%, rgba(200,200,220,0.06) 50%, rgba(10,10,50,0.5) 100%)',
             '--panel-border': '1px solid rgba(200, 60, 80, 0.25)',
             '--menu-bg': 'rgba(8, 8, 18, 0.96)',
             '--topbar-bg': 'rgba(6, 6, 14, 0.96)',
@@ -343,6 +360,7 @@ const UI_THEMES = {
     swamp: {
         name: 'Bog Lord',
         desc: 'Murky swamplands',
+        orbit: { ball: '#bbcc44', trail: '#445522', ripple: '#88aa33', text: ['#556622','#ccdd66'] },
         vars: {
             '--bg': '#060806',
             '--bg-panel': 'rgba(14, 18, 10, 0.6)',
@@ -363,23 +381,215 @@ const UI_THEMES = {
     },
 };
 
-// Procedural camo CSS pattern — layered radial-gradient blobs
-const CAMO_PATTERN = [
-    'radial-gradient(ellipse 120px 80px at 15% 20%, rgba(30,60,20,0.18) 0%, transparent 70%)',
-    'radial-gradient(ellipse 90px 130px at 70% 65%, rgba(30,60,20,0.15) 0%, transparent 70%)',
-    'radial-gradient(ellipse 140px 90px at 45% 85%, rgba(30,60,20,0.18) 0%, transparent 65%)',
-    'radial-gradient(ellipse 100px 70px at 85% 15%, rgba(25,50,18,0.12) 0%, transparent 70%)',
-    'radial-gradient(ellipse 110px 75px at 35% 45%, rgba(80,65,28,0.16) 0%, transparent 70%)',
-    'radial-gradient(ellipse 80px 120px at 80% 35%, rgba(80,65,28,0.12) 0%, transparent 65%)',
-    'radial-gradient(ellipse 130px 85px at 10% 70%, rgba(80,65,28,0.16) 0%, transparent 70%)',
-    'radial-gradient(ellipse 95px 110px at 60% 10%, rgba(80,65,28,0.10) 0%, transparent 70%)',
-    'radial-gradient(ellipse 100px 100px at 50% 50%, rgba(50,70,25,0.14) 0%, transparent 65%)',
-    'radial-gradient(ellipse 130px 70px at 25% 90%, rgba(50,70,25,0.16) 0%, transparent 70%)',
-    'radial-gradient(ellipse 85px 115px at 90% 80%, rgba(50,70,25,0.12) 0%, transparent 65%)',
-    'radial-gradient(ellipse 70px 50px at 55% 30%, rgba(15,25,10,0.12) 0%, transparent 70%)',
-    'radial-gradient(ellipse 60px 80px at 20% 55%, rgba(15,25,10,0.10) 0%, transparent 65%)',
-    'radial-gradient(ellipse 90px 60px at 75% 90%, rgba(15,25,10,0.12) 0%, transparent 70%)',
-].join(',');
+// ── Tasloi Vine Overlay ──
+// Procedural animated vines with red glow pulses and spider webs in corners.
+
+class TasloiVines {
+    constructor() {
+        this._canvas = null;
+        this._ctx = null;
+        this._animId = null;
+        this._vines = [];
+        this._webs = [];
+        this._built = false;
+    }
+
+    show() {
+        if (!this._built) this._build();
+        this._canvas.style.display = '';
+        this._generateVines();
+        this._generateWebs();
+        this._startLoop();
+    }
+
+    hide() {
+        if (this._canvas) this._canvas.style.display = 'none';
+        this._stopLoop();
+    }
+
+    _build() {
+        const c = document.createElement('canvas');
+        c.id = 'tasloi-vines';
+        c.style.cssText = 'position:fixed;inset:0;pointer-events:none;z-index:9998;';
+        document.body.appendChild(c);
+        this._canvas = c;
+        this._ctx = c.getContext('2d');
+        this._resize();
+        window.addEventListener('resize', () => this._resize());
+        this._built = true;
+    }
+
+    _resize() {
+        if (!this._canvas) return;
+        this._canvas.width = window.innerWidth;
+        this._canvas.height = window.innerHeight;
+        this._generateVines();
+        this._generateWebs();
+    }
+
+    _generateVines() {
+        const W = this._canvas.width, H = this._canvas.height;
+        this._vines = [];
+        // Generate vine paths from edges/corners
+        const sources = [
+            { x: 0, y: H * 0.2, dx: 1, dy: 0.3 },
+            { x: 0, y: H * 0.6, dx: 1, dy: -0.2 },
+            { x: W, y: H * 0.3, dx: -1, dy: 0.4 },
+            { x: W, y: H * 0.7, dx: -1, dy: -0.3 },
+            { x: W * 0.3, y: 0, dx: 0.2, dy: 1 },
+            { x: W * 0.7, y: 0, dx: -0.3, dy: 1 },
+            { x: W * 0.2, y: H, dx: 0.4, dy: -1 },
+            { x: W * 0.8, y: H, dx: -0.2, dy: -1 },
+        ];
+        for (const src of sources) {
+            const points = [{ x: src.x, y: src.y }];
+            let x = src.x, y = src.y;
+            let dx = src.dx, dy = src.dy;
+            const len = 80 + Math.random() * 120;
+            const segs = 8 + Math.floor(Math.random() * 6);
+            const segLen = len / segs;
+            for (let i = 0; i < segs; i++) {
+                dx += (Math.random() - 0.5) * 0.6;
+                dy += (Math.random() - 0.5) * 0.6;
+                const mag = Math.sqrt(dx * dx + dy * dy) || 1;
+                dx /= mag; dy /= mag;
+                x += dx * segLen;
+                y += dy * segLen;
+                points.push({ x, y });
+            }
+            this._vines.push({
+                points,
+                thickness: 1.5 + Math.random() * 2,
+                phase: Math.random() * Math.PI * 2,
+                speed: 0.3 + Math.random() * 0.5,
+            });
+        }
+    }
+
+    _generateWebs() {
+        const W = this._canvas.width, H = this._canvas.height;
+        this._webs = [
+            { cx: 0, cy: 0, r: 60 + Math.random() * 40, startAngle: 0, endAngle: Math.PI / 2 },
+            { cx: W, cy: 0, r: 50 + Math.random() * 35, startAngle: Math.PI / 2, endAngle: Math.PI },
+            { cx: W, cy: H, r: 55 + Math.random() * 30, startAngle: Math.PI, endAngle: Math.PI * 1.5 },
+            { cx: 0, cy: H, r: 45 + Math.random() * 35, startAngle: Math.PI * 1.5, endAngle: Math.PI * 2 },
+        ];
+    }
+
+    _startLoop() {
+        if (this._animId) return;
+        const loop = () => {
+            this._render();
+            this._animId = requestAnimationFrame(loop);
+        };
+        this._animId = requestAnimationFrame(loop);
+    }
+
+    _stopLoop() {
+        if (this._animId) { cancelAnimationFrame(this._animId); this._animId = null; }
+    }
+
+    _render() {
+        const ctx = this._ctx;
+        const W = this._canvas.width, H = this._canvas.height;
+        const now = performance.now() / 1000;
+        ctx.clearRect(0, 0, W, H);
+
+        // ── Draw spider webs ──
+        for (const web of this._webs) {
+            const strands = 8;
+            const rings = 5;
+            ctx.save();
+            ctx.globalAlpha = 0.12 + 0.03 * Math.sin(now * 0.5);
+            ctx.strokeStyle = '#aabbaa';
+            ctx.lineWidth = 0.5;
+            // Radial strands
+            for (let i = 0; i < strands; i++) {
+                const angle = web.startAngle + (i / strands) * (web.endAngle - web.startAngle);
+                ctx.beginPath();
+                ctx.moveTo(web.cx, web.cy);
+                ctx.lineTo(web.cx + Math.cos(angle) * web.r, web.cy + Math.sin(angle) * web.r);
+                ctx.stroke();
+            }
+            // Concentric arcs
+            for (let r = 1; r <= rings; r++) {
+                const radius = (r / rings) * web.r;
+                ctx.beginPath();
+                for (let i = 0; i <= strands; i++) {
+                    const angle = web.startAngle + (i / strands) * (web.endAngle - web.startAngle);
+                    const wobble = Math.sin(angle * 3 + now * 0.3) * 2;
+                    const x = web.cx + Math.cos(angle) * (radius + wobble);
+                    const y = web.cy + Math.sin(angle) * (radius + wobble);
+                    if (i === 0) ctx.moveTo(x, y);
+                    else ctx.lineTo(x, y);
+                }
+                ctx.stroke();
+            }
+            ctx.restore();
+        }
+
+        // ── Draw vines with red glow pulse ──
+        for (const vine of this._vines) {
+            const pts = vine.points;
+            if (pts.length < 2) continue;
+
+            // Draw the vine stem
+            ctx.save();
+            ctx.lineWidth = vine.thickness;
+            ctx.lineCap = 'round';
+            ctx.lineJoin = 'round';
+
+            // Base vine color (dark green-brown)
+            ctx.strokeStyle = 'rgba(30, 55, 20, 0.3)';
+            ctx.beginPath();
+            ctx.moveTo(pts[0].x, pts[0].y);
+            for (let i = 1; i < pts.length; i++) {
+                const prev = pts[i - 1], cur = pts[i];
+                const cpx = (prev.x + cur.x) / 2;
+                const cpy = (prev.y + cur.y) / 2;
+                ctx.quadraticCurveTo(prev.x, prev.y, cpx, cpy);
+            }
+            ctx.stroke();
+
+            // Red glow pulse traveling along vine
+            const pulsePos = ((now * vine.speed + vine.phase) % 1.0);
+            const pulseIdx = pulsePos * (pts.length - 1);
+            const pi = Math.floor(pulseIdx);
+            const pf = pulseIdx - pi;
+            if (pi < pts.length - 1) {
+                const px = pts[pi].x + (pts[pi + 1].x - pts[pi].x) * pf;
+                const py = pts[pi].y + (pts[pi + 1].y - pts[pi].y) * pf;
+                const grad = ctx.createRadialGradient(px, py, 0, px, py, 30);
+                grad.addColorStop(0, 'rgba(200, 40, 20, 0.25)');
+                grad.addColorStop(0.5, 'rgba(180, 30, 15, 0.08)');
+                grad.addColorStop(1, 'rgba(160, 20, 10, 0.0)');
+                ctx.fillStyle = grad;
+                ctx.fillRect(px - 30, py - 30, 60, 60);
+            }
+
+            // Small leaves/thorns along vine
+            for (let i = 1; i < pts.length - 1; i += 2) {
+                const p = pts[i];
+                const next = pts[Math.min(i + 1, pts.length - 1)];
+                const angle = Math.atan2(next.y - p.y, next.x - p.x) + Math.PI / 2;
+                const leafSize = 3 + Math.random() * 3;
+                const side = (i % 4 < 2) ? 1 : -1;
+                ctx.fillStyle = `rgba(40, 80, 25, ${0.2 + 0.05 * Math.sin(now + i)})`;
+                ctx.beginPath();
+                ctx.ellipse(
+                    p.x + Math.cos(angle) * side * 4,
+                    p.y + Math.sin(angle) * side * 4,
+                    leafSize, leafSize * 0.4,
+                    angle + side * 0.5, 0, Math.PI * 2
+                );
+                ctx.fill();
+            }
+            ctx.restore();
+        }
+    }
+}
+
+const _tasloiVines = new TasloiVines();
 
 function applyTheme(themeId) {
     const theme = UI_THEMES[themeId];
@@ -391,20 +601,22 @@ function applyTheme(themeId) {
     root.dataset.theme = themeId;
     localStorage.setItem('uiTheme', themeId);
 
-    // Camo overlay for Tasloi theme
+    // Tasloi: animated vine overlay (replaces old static camo)
     let camoEl = document.getElementById('camo-overlay');
-    if (theme.camo) {
-        if (!camoEl) {
-            camoEl = document.createElement('div');
-            camoEl.id = 'camo-overlay';
-            camoEl.style.cssText = 'position:fixed;inset:0;pointer-events:none;z-index:9999;background-size:300px 300px;';
-            document.body.appendChild(camoEl);
-        }
-        camoEl.style.backgroundImage = CAMO_PATTERN;
-        camoEl.style.display = '';
-    } else if (camoEl) {
-        camoEl.style.display = 'none';
+    if (camoEl) { camoEl.style.display = 'none'; }
+
+    if (theme.vines) {
+        _tasloiVines.show();
+    } else {
+        _tasloiVines.hide();
     }
+}
+
+// Helper: get current theme's orbit colors for round timer
+function getThemeOrbit() {
+    const id = localStorage.getItem('uiTheme') || 'greylord';
+    const t = UI_THEMES[id];
+    return t && t.orbit ? t.orbit : { ball: '#c0c8e0', trail: '#4455aa', ripple: '#6677cc', text: ['#8899cc','#c0c8e0'] };
 }
 
 // Apply saved theme on load

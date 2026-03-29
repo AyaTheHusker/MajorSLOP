@@ -74,6 +74,33 @@ class MudParser:
         r'^(.+?)\s+(?:drops dead|is killed|collapses|crumples|falls to the ground)',
         re.IGNORECASE
     )
+    # Miss/dodge/fumble — also signify a combat round tick
+    RE_COMBAT_MISS = re.compile(
+        r'(?:misses?\s|dodges?\s|fumbles?\s|blocks?\s|bounces?\s+off|parries?\s)',
+        re.IGNORECASE
+    )
+    # Player swing miss: "You swing at slaver", "You swipe at slaver"
+    RE_PLAYER_SWING = re.compile(
+        r'^You \w+ at .+',
+        re.IGNORECASE
+    )
+    # Glancing blow miss: "Your sword glances off slaver"
+    RE_GLANCES_OFF = re.compile(
+        r'^Your .+ glances off .+',
+        re.IGNORECASE
+    )
+    RE_ALREADY_CAST = re.compile(
+        r'^You have already cast a spell this round',
+        re.IGNORECASE
+    )
+    RE_SPELL_CAST = re.compile(
+        r'^You (?:cast|sing) ',
+        re.IGNORECASE
+    )
+    RE_SPELL_FAIL = re.compile(
+        r'^You attempt to cast ',
+        re.IGNORECASE
+    )
     RE_XP_GAIN = re.compile(r'^You gain (\d+) experience', re.IGNORECASE)
     RE_EXP_LINE = re.compile(
         r'^Exp:\s*([\d,]+)\s+Level:\s*(\d+)\s+Exp needed for next level:\s*([\d,]+)\s+\(([\d,]+)\)\s+\[(\d+)%\]',
@@ -221,6 +248,8 @@ class MudParser:
         self.on_coin_drop: Optional[Callable[[int, str], None]] = None  # (amount, type)
         self.on_coin_transfer: Optional[Callable[[dict], None]] = None  # {action, amount, coin_type, player?}
         self.on_item_transfer: Optional[Callable[[dict], None]] = None  # {action, name}
+        self.on_already_cast: Optional[Callable[[], None]] = None  # "already cast this round"
+        self.on_spell_cast: Optional[Callable[[dict], None]] = None  # {success: bool}
 
     @staticmethod
     def _replace_last_and(text: str) -> str:
@@ -665,6 +694,24 @@ class MudParser:
                 self.on_item_transfer({"action": "unequip", "name": name})
             return
 
+        # Spell cast success (You cast / You sing)
+        if self.RE_SPELL_CAST.match(line):
+            if self.on_spell_cast:
+                self.on_spell_cast({"success": True})
+            return
+
+        # Spell cast fail (You attempt to cast)
+        if self.RE_SPELL_FAIL.match(line):
+            if self.on_spell_cast:
+                self.on_spell_cast({"success": False})
+            return
+
+        # Spell blocked (same-round cast attempt)
+        if self.RE_ALREADY_CAST.match(line):
+            if self.on_already_cast:
+                self.on_already_cast()
+            return
+
         # Combat damage
         if self.RE_DAMAGE.search(line):
             if self.on_combat:
@@ -673,6 +720,24 @@ class MudParser:
 
         # Monster killed
         if self.RE_KILLED.match(line):
+            if self.on_combat:
+                self.on_combat(line)
+            return
+
+        # Combat miss/dodge/fumble — also a round tick
+        if self.RE_COMBAT_MISS.search(line):
+            if self.on_combat:
+                self.on_combat(line)
+            return
+
+        # Player swing miss: "You swing at slaver"
+        if self.RE_PLAYER_SWING.match(line):
+            if self.on_combat:
+                self.on_combat(line)
+            return
+
+        # Glancing blow (DR): "Your sword glances off slaver"
+        if self.RE_GLANCES_OFF.match(line):
             if self.on_combat:
                 self.on_combat(line)
             return

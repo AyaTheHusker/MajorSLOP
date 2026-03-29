@@ -136,12 +136,33 @@ function handleEvent(msg) {
             handleItemTransfer(msg);
             break;
 
+        case 'round_tick':
+            if (typeof roundTimer !== 'undefined') roundTimer.onRoundTick(msg);
+            break;
+
+        case 'combat_end':
+            if (typeof roundTimer !== 'undefined') roundTimer.onCombatEnd();
+            break;
+
+        case 'already_cast':
+            if (typeof roundTimer !== 'undefined') roundTimer.onSpellBlocked();
+            break;
+
+        case 'spell_cast':
+            if (typeof roundTimer !== 'undefined') roundTimer.onSpellCast(msg);
+            break;
+
         case 'xp_gain':
             addLog(`+${msg.amount.toLocaleString()} XP`, 'xp');
             hideTooltip();
             // Flash exp bar and show floating +XP
             if (typeof expBar !== 'undefined') {
                 expBar.flashGain(msg.amount);
+            }
+            // Track in exp meter
+            if (typeof expMeter !== 'undefined') {
+                expMeter.addXP(msg.amount);
+                expMeter.addKill();
             }
             // If no coin drops captured the shatter, do it now as fallback
             if (typeof combatFx !== 'undefined' && gameState.combat_target) {
@@ -207,12 +228,63 @@ function handleEvent(msg) {
             }
             break;
 
+        case 'mem_state':
+            updateMegamudStatus(msg);
+            if (typeof toolbarIcons !== 'undefined' && msg.toggles) {
+                toolbarIcons.update(msg.toggles, msg.pathing);
+            }
+            // Update orbs from mem_state hp_mana too
+            if (typeof hpOrbs !== 'undefined' && msg.hp_mana) {
+                const hm = msg.hp_mana;
+                hpOrbs.update(hm.hp, hm.max_hp, hm.mana, hm.max_mana);
+            }
+            // Sync exp meter with MegaMUD's Player Statistics
+            if (typeof expMeter !== 'undefined' && msg.exp_meter) {
+                expMeter.updateFromMega(msg.exp_meter);
+            }
+            break;
+
         case 'raw_data':
             if (typeof mudTerminal !== 'undefined') {
                 mudTerminal.feedRaw(msg.data);
             }
             break;
     }
+}
+
+function updateMegamudStatus(state) {
+    const el = document.getElementById('megamud-status');
+    if (!el) return;
+    const p = state.pathing;
+    if (!p) { el.innerHTML = ''; return; }
+
+    let html = '';
+
+    // Show exact MegaMUD status bar parts if available from DLL
+    if (p.statusbar && p.statusbar.length > 0) {
+        const parts = p.statusbar.filter(s => s && s.trim());
+        if (parts.length > 0) {
+            html = parts.map(part => {
+                const t = part.trim();
+                let cls = 'idle';
+                const tl = t.toUpperCase();
+                if (tl.includes('ATTACK') || tl.includes('COMBAT') || tl.includes('FIGHTING')) cls = 'combat';
+                else if (tl.includes('LOOP')) cls = 'looping';
+                else if (tl.includes('WALK') || tl.includes('GOTO') || tl.includes('PATH') || tl.includes('STEP')) cls = 'walking';
+                else if (tl.includes('REST') || tl.includes('REGEN')) cls = 'resting';
+                else if (tl.includes('MEDIT')) cls = 'meditating';
+                else if (tl.includes('ROAM')) cls = 'roaming';
+                return `<span class="mm-status-badge ${cls}">${t}</span>`;
+            }).join('');
+        }
+    }
+
+    // Fallback to derived status if no statusbar data
+    if (!html) {
+        html = `<span class="mm-status-badge ${p.status}">${p.status}</span>`;
+    }
+
+    el.innerHTML = html;
 }
 
 // ── Coin Transfer Animations ──
@@ -512,20 +584,10 @@ function updateConnection(status) {
 }
 
 function updateHP(hp, maxHp, mana, maxMana) {
-    const hpFrac = maxHp > 0 ? hp / maxHp : 0;
-    const manaFrac = maxMana > 0 ? mana / maxMana : 0;
-
-    const hpFill = document.getElementById('hp-fill');
-    hpFill.style.width = `${hpFrac * 100}%`;
-    if (hpFrac > 0.5) hpFill.style.background = 'var(--hp-green)';
-    else if (hpFrac > 0.25) hpFill.style.background = 'var(--hp-yellow)';
-    else hpFill.style.background = 'var(--hp-red)';
-
-    document.getElementById('hp-text').textContent = `${hp}/${maxHp}`;
-
-    const manaFill = document.getElementById('mana-fill');
-    manaFill.style.width = `${manaFrac * 100}%`;
-    document.getElementById('mana-text').textContent = `${mana}/${maxMana}`;
+    // Route to floating orbs widget
+    if (typeof hpOrbs !== 'undefined') {
+        hpOrbs.update(hp, maxHp, mana, maxMana);
+    }
 }
 
 function updateRoom(data) {
@@ -650,8 +712,9 @@ function updateThumbnails(containerId, entities) {
             div.dataset.currency = ent.currency;
             div.dataset.quantity = ent.quantity || 1;
 
-            // Coin piles get 52x52 (overridden in CSS too)
-            const pileCanvas = coinRenderer.createPile(ent.currency, ent.quantity || 1, 52, 52);
+            // Coin piles match the current loot thumb size from grid scaling
+            const coinSize = parseInt(getComputedStyle(document.querySelector('.thumb-row.item-row'))?.getPropertyValue('--row-thumb-size')) || 64;
+            const pileCanvas = coinRenderer.createPile(ent.currency, ent.quantity || 1, coinSize, coinSize);
             div.appendChild(pileCanvas);
 
             // Double-click to loot this specific currency pile

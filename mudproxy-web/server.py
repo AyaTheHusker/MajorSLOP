@@ -5,9 +5,10 @@ import json
 import logging
 import re
 import subprocess
+import time
 from pathlib import Path
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, Form
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, Form, Request
 from fastapi.responses import Response, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -258,7 +259,207 @@ def create_app(orchestrator: Orchestrator, event_bus: EventBus, slop: SlopLoader
             "connected": orchestrator.proxy.connected,
             "ws_clients": event_bus.client_count,
             "slop": slop.get_stats(),
+            "mem_attached": orchestrator.mem_reader.attached,
         })
+
+    # ── MegaMUD Memory API ──
+
+    @app.get("/api/mem/state")
+    async def mem_full_state():
+        """Full MegaMUD process memory state dump."""
+        state = orchestrator.get_mem_state()
+        if state is None:
+            return JSONResponse({"error": "not attached", "attached": False}, status_code=503)
+        return JSONResponse({"attached": True, **state})
+
+    @app.get("/api/mem/hp")
+    async def mem_hp():
+        if not orchestrator.mem_reader.attached:
+            return JSONResponse({"error": "not attached"}, status_code=503)
+        return JSONResponse(orchestrator.mem_reader.get_hp_mana())
+
+    @app.get("/api/mem/stats")
+    async def mem_stats():
+        if not orchestrator.mem_reader.attached:
+            return JSONResponse({"error": "not attached"}, status_code=503)
+        return JSONResponse(orchestrator.mem_reader.get_stats())
+
+    @app.get("/api/mem/flags")
+    async def mem_flags():
+        if not orchestrator.mem_reader.attached:
+            return JSONResponse({"error": "not attached"}, status_code=503)
+        return JSONResponse(orchestrator.mem_reader.get_flags())
+
+    @app.get("/api/mem/room")
+    async def mem_room():
+        if not orchestrator.mem_reader.attached:
+            return JSONResponse({"error": "not attached"}, status_code=503)
+        return JSONResponse(orchestrator.mem_reader.get_room())
+
+    @app.get("/api/mem/party")
+    async def mem_party():
+        if not orchestrator.mem_reader.attached:
+            return JSONResponse({"error": "not attached"}, status_code=503)
+        return JSONResponse(orchestrator.mem_reader.get_party())
+
+    @app.get("/api/mem/player")
+    async def mem_player():
+        if not orchestrator.mem_reader.attached:
+            return JSONResponse({"error": "not attached"}, status_code=503)
+        return JSONResponse(orchestrator.mem_reader.get_player())
+
+    @app.get("/api/mem/exp")
+    async def mem_exp():
+        if not orchestrator.mem_reader.attached:
+            return JSONResponse({"error": "not attached"}, status_code=503)
+        return JSONResponse(orchestrator.mem_reader.get_experience())
+
+    @app.post("/api/mem/attach")
+    async def mem_attach():
+        """Manually trigger attach attempt with optional player name."""
+        name = orchestrator._char_name or None
+        ok = orchestrator.mem_reader.attach(name)
+        return JSONResponse({"attached": ok})
+
+    @app.post("/api/mem/goto")
+    async def mem_goto(request: Request):
+        """Navigate MegaMUD to a room. Body: {"room": "Bank of Godfrey", "run": false}"""
+        body = await request.json()
+        room = body.get("room", "")
+        if not room:
+            return JSONResponse({"ok": False, "error": "missing 'room' field"}, status_code=400)
+        run = body.get("run", False)
+        result = orchestrator.mem_reader.goto_room(room, run=run)
+        return JSONResponse(result)
+
+    @app.post("/api/mem/loop")
+    async def mem_loop(request: Request):
+        """Start a grind loop. Body: {"file": "DCCWLOOP"} — looks up .mp file for checksums."""
+        body = await request.json()
+        mp_name = body.get("file", "")
+        if not mp_name:
+            return JSONResponse({"ok": False, "error": "missing 'file' field"}, status_code=400)
+        if not orchestrator.mem_reader.attached:
+            return JSONResponse({"ok": False, "error": "not attached"}, status_code=503)
+
+        # Find and parse the .mp file
+        import os, platform
+        if platform.system() == "Windows":
+            mm_dir = Path("C:/MegaMUD")
+        else:
+            mm_dir = Path(os.path.expanduser("~/.wine/drive_c/MegaMUD"))
+
+        mp_file = mp_name if mp_name.lower().endswith(".mp") else mp_name + ".mp"
+        mp_path = None
+        for d in [mm_dir / "Chars" / "All", mm_dir / "Default"]:
+            candidate = d / mp_file
+            if candidate.exists():
+                mp_path = candidate
+                break
+        if not mp_path:
+            return JSONResponse({"ok": False, "error": f".mp file not found: {mp_file}"}, status_code=404)
+
+        try:
+            lines = mp_path.read_text().splitlines()
+            if len(lines) < 3:
+                return JSONResponse({"ok": False, "error": "invalid .mp file"}, status_code=400)
+            parts = lines[2].split(":")
+            from_checksum = int(parts[0], 16)
+            to_checksum = int(parts[1], 16)
+            total_steps = int(parts[2])
+        except (ValueError, IndexError) as e:
+            return JSONResponse({"ok": False, "error": f"failed to parse .mp: {e}"}, status_code=400)
+
+        result = orchestrator.mem_reader.start_loop(mp_file, from_checksum, to_checksum, total_steps)
+        return JSONResponse(result)
+
+    @app.post("/api/mem/stop")
+    async def mem_stop():
+        """Stop pathing/looping (mimics stop button)."""
+        result = orchestrator.mem_reader.stop_pathing()
+        return JSONResponse(result)
+
+    @app.get("/api/mem/loop-monitor")
+    async def mem_loop_monitor():
+        """Raw loop/pathing flags for debugging. Poll this to watch MegaMUD's native loop behavior."""
+        mr = orchestrator.mem_reader
+        if not mr.attached:
+            return JSONResponse({"error": "not attached"}, status_code=503)
+        data = mr.get_loop_debug()
+        if data is None:
+            return JSONResponse({"error": "read failed"}, status_code=503)
+        data["_ts"] = time.time()
+        return JSONResponse(data)
+
+    @app.get("/api/mem/read-range")
+    async def mem_read_range(offset: str = "0x5640", size: int = 256):
+        """Read raw memory range as hex + i32 dump. For reverse engineering."""
+        mr = orchestrator.mem_reader
+        if not mr.attached:
+            return JSONResponse({"error": "not attached"}, status_code=503)
+        try:
+            off = int(offset, 16) if offset.startswith("0x") else int(offset)
+        except ValueError:
+            return JSONResponse({"error": "bad offset"}, status_code=400)
+        size = min(size, 1024)
+        data = mr._read_bytes(off, size)
+        if data is None:
+            return JSONResponse({"error": "read failed"}, status_code=503)
+        # Return as i32 values with offsets
+        import struct
+        i32s = {}
+        for i in range(0, len(data) - 3, 4):
+            val = struct.unpack_from('<i', data, i)[0]
+            if val != 0:  # only show non-zero
+                i32s[f"0x{off + i:04X}"] = val
+        return JSONResponse({
+            "offset": f"0x{off:04X}",
+            "size": size,
+            "hex": data.hex(),
+            "nonzero_i32s": i32s,
+        })
+
+    @app.post("/api/mem/exp-reset")
+    async def mem_exp_reset():
+        """Reset MegaMUD's exp meter (BM_CLICK on Player Statistics button 1721)."""
+        mr = orchestrator.mem_reader
+        if not mr.attached:
+            return JSONResponse({"ok": False, "error": "not attached"})
+        ok = mr.reset_exp_meter()
+        return JSONResponse({"ok": ok})
+
+    @app.post("/api/mem/toggle")
+    async def mem_toggle(request: Request):
+        """Toggle a MegaMUD automation flag. Body: {"offset": "0x4D00", "value": 1}
+        If value omitted, reads current and flips it."""
+        body = await request.json()
+        offset_str = body.get("offset", "")
+        try:
+            offset = int(offset_str, 16) if isinstance(offset_str, str) else int(offset_str)
+        except (ValueError, TypeError):
+            return JSONResponse({"ok": False, "error": "bad offset"})
+        mr = orchestrator.mem_reader
+        if not mr.attached:
+            return JSONResponse({"ok": False, "error": "not attached"})
+        if "value" in body:
+            val = int(body["value"])
+        else:
+            cur = mr._read_i32(offset) or 0
+            val = 0 if cur else 1
+        mr._write_i32(offset, val)
+        return JSONResponse({"ok": True, "offset": f"0x{offset:X}", "value": val})
+
+    @app.get("/api/mem/rooms")
+    async def mem_rooms(q: str = ""):
+        """Search available rooms. ?q=pier returns matching rooms."""
+        from mudproxy.mem_reader import MegaMUDMemReader
+        rooms = MegaMUDMemReader._room_checksums
+        if q:
+            lower = q.lower()
+            matches = {name: cksum for name, cksum in rooms.items() if lower in name.lower()}
+        else:
+            matches = dict(list(rooms.items())[:50])
+        return JSONResponse({"count": len(matches), "rooms": {n: f"0x{c:08X}" for n, c in matches.items()}})
 
     # ── Gamedata / MDB API ──
 

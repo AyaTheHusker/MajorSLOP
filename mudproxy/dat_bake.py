@@ -29,14 +29,27 @@ from gi.repository import Gtk, Gdk, GdkPixbuf, GLib, Gio, Pango
 from .bake import (
     write_slop, read_slop, SLOP_DIR, MODELS, OLLAMA_URL, OLLAMA_MODEL, OLLAMA_MODELS,
     PORTRAIT_SYSTEM_PROMPT, ITEM_SYSTEM_PROMPT, BakeApp,
-    ASSET_NPC_THUMB, ASSET_ITEM_THUMB, ASSET_ROOM_IMAGE, ASSET_DEPTH_MAP,
-    ASSET_PROMPT, ASSET_METADATA, ASSET_INPAINT,
+    ASSET_NPC_THUMB, ASSET_ITEM_THUMB, ASSET_PLAYER_THUMB, ASSET_ROOM_IMAGE,
+    ASSET_DEPTH_MAP, ASSET_PROMPT, ASSET_METADATA, ASSET_INPAINT,
 )
 
 logger = logging.getLogger(__name__)
 
-from .paths import default_cache_dir
+from .paths import default_cache_dir, default_config_dir
 CACHE_BASE = default_cache_dir()
+_SETTINGS_FILE = default_config_dir() / "dat_bake_settings.json"
+
+
+def _load_settings() -> dict:
+    try:
+        return json.loads(_SETTINGS_FILE.read_text())
+    except Exception:
+        return {}
+
+
+def _save_settings(settings: dict):
+    _SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    _SETTINGS_FILE.write_text(json.dumps(settings, indent=2))
 PROMPT_CACHE_DIR = CACHE_BASE / "bake_prompts"
 
 # Room image prompt system prompt (same as room_renderer)
@@ -511,6 +524,12 @@ class DatBakeApp(Gtk.Application):
         self._skip_existing = True
         self._thread: Optional[threading.Thread] = None
 
+        # Style text defaults (set properly when Bake is clicked)
+        self._style_room_text = ""
+        self._style_monster_text = "portrait, square frame, fantasy art, detailed"
+        self._style_item_text = "single object laid flat on dark background, no person, no mannequin, no figure, item icon, fantasy art, detailed"
+        self._style_extra_text = ""
+
         # Counts from scan
         self._n_monsters = 0
         self._n_items = 0
@@ -656,11 +675,11 @@ class DatBakeApp(Gtk.Application):
         phase_box.append(self._chk_upscale)
 
         self._chk_depth = Gtk.CheckButton(label="Generate depth maps")
-        self._chk_depth.set_active(False)
+        self._chk_depth.set_active(True)
         phase_box.append(self._chk_depth)
 
         self._chk_inpaint = Gtk.CheckButton(label="Generate inpaint (LaMa)")
-        self._chk_inpaint.set_active(False)
+        self._chk_inpaint.set_active(True)
         self._chk_inpaint.set_tooltip_text("Depth-aware disocclusion inpainting for parallax — requires depth maps")
         phase_box.append(self._chk_inpaint)
 
@@ -673,7 +692,7 @@ class DatBakeApp(Gtk.Application):
         opt_box.append(opt_lbl)
 
         self._chk_3d = Gtk.CheckButton(label="3D-optimized prompts")
-        self._chk_3d.set_active(False)
+        self._chk_3d.set_active(True)
         opt_box.append(self._chk_3d)
 
         self._chk_skip = Gtk.CheckButton(label="Skip existing assets")
@@ -707,13 +726,13 @@ class DatBakeApp(Gtk.Application):
         lbl = Gtk.Label(label="Monsters:")
         lbl.set_halign(Gtk.Align.END)
         model_grid.attach(lbl, 0, 0, 1, 1)
-        self._model_monster = _make_model_combo("flux-klein-4b")
+        self._model_monster = _make_model_combo("flux-klein-9b")
         model_grid.attach(self._model_monster, 1, 0, 1, 1)
 
         lbl = Gtk.Label(label="Items:")
         lbl.set_halign(Gtk.Align.END)
         model_grid.attach(lbl, 0, 1, 1, 1)
-        self._model_item = _make_model_combo("flux-klein-4b")
+        self._model_item = _make_model_combo("flux-klein-9b")
         model_grid.attach(self._model_item, 1, 1, 1, 1)
 
         lbl = Gtk.Label(label="Rooms:")
@@ -1000,13 +1019,22 @@ class DatBakeApp(Gtk.Application):
 
         win.present()
 
-        # Auto-scan dat files on startup if directory has .dat files
-        if self._dat_dir.exists() and (
+        # Auto-load last slop, then scan dat files
+        saved = _load_settings()
+        last_slop = saved.get("last_slop")
+        if last_slop and Path(last_slop).exists():
+            self._load_slop_path(Path(last_slop))
+        elif self._dat_dir.exists() and (
             any(self._dat_dir.glob("*.dat")) or any(self._dat_dir.glob("*.DAT"))
         ):
             self._do_scan()
         elif not self._dat_dir.exists():
             self._log("No dat directory found — use Change... to select one")
+
+    def _persist_setting(self, key: str, value):
+        settings = _load_settings()
+        settings[key] = value
+        _save_settings(settings)
 
     def _log(self, msg: str):
         def _ui():
@@ -1334,6 +1362,36 @@ class DatBakeApp(Gtk.Application):
             if n_reused:
                 self._log(f"  Merged {n_reused} existing assets from loaded .slop")
 
+            # Create jobs for portrait entries (portraits don't come from .dat files)
+            existing_keys = {j.key for j in self._jobs}
+            n_portraits = 0
+            for key, entry in loaded.items():
+                if entry.get("type") == ASSET_PLAYER_THUMB and key not in existing_keys:
+                    # Parse key for display name: portrait_dark_elf_bard_female
+                    parts = key.replace("portrait_", "").split("_")
+                    if len(parts) >= 3:
+                        gender = parts[-1].title()
+                        cls = parts[-2].title()
+                        race = " ".join(p.title() for p in parts[:-2])
+                        name = f"{race} {cls} {gender}"
+                    else:
+                        name = key
+                    job = DatBakeJob(
+                        key=key, name=name,
+                        asset_type=ASSET_PLAYER_THUMB,
+                        description=name,
+                        width=432, height=768,
+                    )
+                    if entry.get("image"):
+                        job.image_bytes = entry["image"]
+                        job.done = True
+                    if entry.get("prompt"):
+                        job.prompt = entry["prompt"]
+                    self._jobs.append(job)
+                    n_portraits += 1
+            if n_portraits:
+                self._log(f"  Added {n_portraits} portrait jobs from loaded .slop")
+
         total = len(self._jobs)
         n_done = sum(1 for j in self._jobs if j.done)
         n_todo = total - n_done
@@ -1532,7 +1590,9 @@ class DatBakeApp(Gtk.Application):
             gfile = dialog.open_finish(result)
         except GLib.Error:
             return  # user cancelled
-        path = Path(gfile.get_path())
+        self._load_slop_path(Path(gfile.get_path()))
+
+    def _load_slop_path(self, path: Path):
         self._log(f"Loading {path.name}...")
 
         try:
@@ -1561,6 +1621,7 @@ class DatBakeApp(Gtk.Application):
         # Count actual assets
         n_npc = sum(1 for k, (t, _) in entries.items() if t == ASSET_NPC_THUMB)
         n_item = sum(1 for k, (t, _) in entries.items() if t == ASSET_ITEM_THUMB)
+        n_portrait = sum(1 for k, (t, _) in entries.items() if t == ASSET_PLAYER_THUMB)
         n_room = sum(1 for k, (t, _) in entries.items() if t == ASSET_ROOM_IMAGE)
         n_depth = sum(1 for k, (t, _) in entries.items() if t == ASSET_DEPTH_MAP)
         n_inpaint = sum(1 for k, (t, _) in entries.items() if t == ASSET_INPAINT)
@@ -1583,6 +1644,7 @@ class DatBakeApp(Gtk.Application):
         self._log(f"  Contents:")
         self._log(f"    Monsters:   {_frac(n_npc, total_npc)}")
         self._log(f"    Items:      {_frac(n_item, total_item)}")
+        self._log(f"    Portraits:  {n_portrait}")
         self._log(f"    Rooms:      {_frac(n_room, total_room)}")
         self._log(f"    Depth maps: {_frac(n_depth, total_room)}")
         self._log(f"    Inpaint:    {_frac(n_inpaint, n_room)}")
@@ -1623,7 +1685,7 @@ class DatBakeApp(Gtk.Application):
 
         # Collect image entries
         for key, (asset_type, data) in entries.items():
-            if asset_type in (ASSET_ROOM_IMAGE, ASSET_NPC_THUMB, ASSET_ITEM_THUMB):
+            if asset_type in (ASSET_ROOM_IMAGE, ASSET_NPC_THUMB, ASSET_ITEM_THUMB, ASSET_PLAYER_THUMB):
                 entry = {"image": data, "type": asset_type}
                 if key in loaded_depth_keys:
                     entry["depth"] = entries.get(f"{key}_depth", (0, None))[1]
@@ -1649,6 +1711,7 @@ class DatBakeApp(Gtk.Application):
                 }
 
         self._loaded_slop_path = path
+        self._persist_setting("last_slop", str(path))
 
         # Set output path to loaded file IMMEDIATELY
         self._slop_entry.set_text(str(path))
@@ -1707,6 +1770,7 @@ class DatBakeApp(Gtk.Application):
         self._dat_dir = path
         self._dat_label.set_text(f"Dat Directory: {path}")
         self._log(f"Dat directory changed to: {path}")
+        self._persist_setting("dat_dir", str(path))
         self._do_scan()
 
     def _do_browse_slop(self):
@@ -2590,15 +2654,20 @@ def main():
     from .paths import default_dat_dir
     DEFAULT_DAT_DIR = default_dat_dir()
 
+    # Restore last-used dat dir from settings, fall back to default
+    saved = _load_settings()
+    saved_dat = saved.get("dat_dir")
+
     if len(sys.argv) >= 2:
         dat_dir = Path(sys.argv[1])
         if not dat_dir.is_dir():
             print(f"Error: {dat_dir} is not a directory")
             sys.exit(1)
+    elif saved_dat and Path(saved_dat).is_dir():
+        dat_dir = Path(saved_dat)
     elif DEFAULT_DAT_DIR.is_dir():
         dat_dir = DEFAULT_DAT_DIR
     else:
-        # No dat dir found — launch app anyway, it will prompt to choose
         dat_dir = DEFAULT_DAT_DIR
 
     app = DatBakeApp(dat_dir)

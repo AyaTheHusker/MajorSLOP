@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+body { background: #111; margin: 0; overflow: hidden; }
+#npc-thumbs { position: fixed; bottom: 120px; left: 50px; display: flex; gap: 8px; }
+#item-thumbs { position: fixed; bottom: 20px; left: 50px; display: flex; gap: 8px; }
+.thumb { width: 67px; height: 67px; background: #333; border: 2px solid #555; display: flex;
+         align-items: center; justify-content: center; color: #fff; font-size: 11px; text-align: center; }
+.coin-pile { background: #222; }
+.coin-pile canvas { width: 52px; height: 52px; }
+</style>
+</head>
+<body>
+<div id="npc-thumbs">
+    <div class="thumb" title="fierce slaver">fierce slaver</div>
+    <div class="thumb" title="angry slaver">angry slaver</div>
+</div>
+<div id="item-thumbs">
+    <div class="thumb coin-pile" data-currency="gold" data-quantity="10">
+        <canvas id="gold-pile" width="52" height="52"></canvas>
+    </div>
+    <div class="thumb coin-pile" data-currency="silver" data-quantity="5">
+        <canvas id="silver-pile" width="52" height="52"></canvas>
+    </div>
+</div>
+
+<div style="position:fixed;top:10px;left:10px;color:#fff;font-family:monospace;z-index:99999">
+    <button onclick="testDrop('gold', 'fierce slaver')">Drop Gold</button>
+    <button onclick="testDrop('silver', 'angry slaver')">Drop Silver</button>
+    <button onclick="testDrop('platinum', 'fierce slaver')">Drop Platinum</button>
+    <button onclick="testDrop('runic', 'fierce slaver')">Drop Runic</button>
+    <button onclick="testDrop('copper', 'angry slaver')">Drop Copper</button>
+    <div id="log" style="margin-top:10px;font-size:12px;"></div>
+</div>
+
+<script>
+const COIN_TYPES = {
+    copper:   { color: '#b87333', shine: '#e8a050', edge: '#7a4a1a', size: 5 },
+    silver:   { color: '#c0c0c0', shine: '#f0f0ff', edge: '#808088', size: 6 },
+    gold:     { color: '#ffd700', shine: '#fffacd', edge: '#b8960f', size: 7 },
+    platinum: { color: '#e5e5e5', shine: '#ffffff', edge: '#a0a0b0', size: 8 },
+    runic:    { color: '#8844cc', shine: '#cc88ff', edge: '#5522aa', size: 9 },
+};
+</script>
+<script src="mudproxy-web/static/js/combat_effects.js"></script>
+<script>
+const combatFx = new CombatEffects(document.body);
+
+function log(msg) {
+    const d = document.getElementById('log');
+    d.innerHTML = msg + '<br>' + d.innerHTML;
+}
+
+function testDrop(coinType, target) {
+    const amount = Math.floor(Math.random() * 10) + 1;
+    log(`Dropping ${amount} ${coinType} from ${target}`);
+    combatFx.queueCoinDrop(amount, coinType, target);
+}
+</script>
+</body>
+</html>

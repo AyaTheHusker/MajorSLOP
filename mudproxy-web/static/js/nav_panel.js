@@ -24,7 +24,8 @@ class NavPanel {
             const tag = e.target.tagName.toLowerCase();
             const skip = e.target.closest('#header, #side-panel, .menu-dropdown, .nav-panel-overlay, ' +
                 '.context-menu, .thumb, .char-panel, .chat-panel, .mud-terminal-container, ' +
-                '.data-picker-overlay, .thumb-tooltip, .inventory-panel');
+                '.data-picker-overlay, .thumb-tooltip, .inventory-panel, .round-timer-widget, ' +
+                '.rt-context-menu, .rt-spell-popup, .exp-meter-panel');
             if (skip) return;
             if (tag === 'input' || tag === 'textarea' || tag === 'button' || tag === 'select') return;
 
@@ -428,15 +429,25 @@ class NavPanel {
     }
 
     _gotoRoom(code, name, type, file) {
-        // Send via ghost character telepath so MegaMud processes the @ command
-        const ghostName = localStorage.getItem('ghostName') || 'Yoder';
-        let atCmd;
         if (type === 'loop') {
-            atCmd = `@loop ${(file || name).toLowerCase()}.mp`;
+            // Start loop via memory API
+            fetch('/api/mem/loop', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ file: file || name })
+            }).then(r => r.json()).then(data => {
+                if (!data.ok) console.error('Loop failed:', data.error);
+            });
         } else {
-            atCmd = `@goto ${name}`;
+            // Goto/run via memory API
+            fetch('/api/mem/goto', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ room: name, run: type === 'run' })
+            }).then(r => r.json()).then(data => {
+                if (!data.ok) console.error('Goto failed:', data.error);
+            });
         }
-        this._sendCommand('ghost', { name: ghostName, at_cmd: atCmd });
         // Track in recent list
         if (name && code) {
             this._recent = this._recent.filter(r => r.code !== code);
