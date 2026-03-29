@@ -790,11 +790,17 @@ def create_app(orchestrator: Orchestrator, event_bus: EventBus, slop: SlopLoader
                 path_categories[cat] = []
             path_categories[cat].append(p)
 
+        # Build hash → code lookup for current-room matching
+        hash_to_code = {}
+        for r in all_rooms:
+            hash_to_code[r["hash"].upper()] = r["code"]
+
         data = {
             "rooms": dict(sorted(categories.items())),
             "hidden_rooms": [{"code": r["code"], "category": r["category"], "name": r["name"]} for r in hidden],
             "loops": dict(sorted(loop_categories.items())),
             "paths": dict(sorted(path_categories.items())),
+            "hash_to_code": hash_to_code,
             "stats": {
                 "total_rooms": len(all_rooms),
                 "visible_rooms": sum(len(v) for v in categories.values()),

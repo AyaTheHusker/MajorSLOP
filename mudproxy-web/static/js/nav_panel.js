@@ -106,6 +106,8 @@ class NavPanel {
         if (!this._data) {
             await this._fetchData();
         }
+        // Fetch current room to auto-expand matching category
+        await this._fetchCurrentRoom();
         if (this._visible) {
             this._switchTab(this._tab);
             return;
@@ -120,6 +122,24 @@ class NavPanel {
             this._el = null;
         }
         this._visible = false;
+    }
+
+    async _fetchCurrentRoom() {
+        try {
+            const res = await fetch('/api/mem/room');
+            if (res.ok) {
+                const room = await res.json();
+                // Convert checksum to uppercase hex string (matching Rooms.md format)
+                const hex = (room.checksum >>> 0).toString(16).toUpperCase().padStart(8, '0');
+                this._currentRoomHash = hex;
+                // Look up room code from hash_to_code map
+                const map = this._data && this._data.hash_to_code;
+                this._currentRoomCode = map ? (map[hex] || '') : '';
+            }
+        } catch (e) {
+            this._currentRoomHash = '';
+            this._currentRoomCode = '';
+        }
     }
 
     async _fetchData() {
@@ -256,6 +276,8 @@ class NavPanel {
         const rooms = this._data.rooms || {};
         const hidden = this._data.hidden_rooms || [];
         const search = this._search;
+        const curCode = this._currentRoomCode || '';
+        let scrollTarget = null;
 
         // Merge hidden rooms into categories if checkbox is on
         let mergedCategories = {};
@@ -289,13 +311,19 @@ class NavPanel {
                 if (roomList.length === 0) continue;
             }
 
-            const catEl = this._buildCategoryNode(cat, roomList.length, search !== '');
+            // Auto-expand if current room is in this category
+            const hasCurrentRoom = !search && curCode && roomList.some(r => r.code === curCode);
+            if (hasCurrentRoom) this._expanded[cat] = true;
+
+            const catEl = this._buildCategoryNode(cat, roomList.length, search !== '' || hasCurrentRoom);
             container.appendChild(catEl);
 
             const childrenEl = catEl.querySelector('.nav-tree-children');
             for (const room of roomList) {
+                const isHere = curCode && room.code === curCode;
                 const roomEl = document.createElement('div');
-                roomEl.className = 'nav-tree-room' + (room.hidden ? ' nav-hidden-room' : '');
+                roomEl.className = 'nav-tree-room' + (room.hidden ? ' nav-hidden-room' : '') +
+                    (isHere ? ' nav-current-room' : '');
                 roomEl.innerHTML = `<span class="nav-room-icon">${room.hidden ? '&#x1f441;' : '&#x1f4cd;'}</span>` +
                     `<span class="nav-room-name">${this._highlight(room.name, search)}</span>` +
                     `<span class="nav-room-code">${room.code}</span>`;
@@ -305,6 +333,7 @@ class NavPanel {
                     this.close();
                 });
                 childrenEl.appendChild(roomEl);
+                if (isHere && !scrollTarget) scrollTarget = roomEl;
             }
         }
 
@@ -314,11 +343,18 @@ class NavPanel {
             empty.textContent = search ? 'No matching rooms.' : 'No room data loaded.';
             container.appendChild(empty);
         }
+
+        if (scrollTarget) {
+            requestAnimationFrame(() => scrollTarget.scrollIntoView({ block: 'center', behavior: 'smooth' }));
+        }
     }
 
     _buildLoopTree(container, data) {
         const search = this._search;
         const sortedCats = Object.keys(data).sort();
+        const curHash = this._currentRoomHash || '';
+        const curCode = this._currentRoomCode || '';
+        let scrollTarget = null;
 
         for (const cat of sortedCats) {
             let entries = data[cat];
@@ -333,16 +369,26 @@ class NavPanel {
                 if (entries.length === 0) continue;
             }
 
-            const catEl = this._buildCategoryNode(cat, entries.length, search !== '');
+            // Auto-expand if any entry starts from current room
+            const hasCurrentRoom = !search && curHash && entries.some(e =>
+                (e.start_hash && e.start_hash.toUpperCase() === curHash) ||
+                (curCode && e.start_code === curCode)
+            );
+            if (hasCurrentRoom) this._expanded[cat] = true;
+
+            const catEl = this._buildCategoryNode(cat, entries.length, search !== '' || hasCurrentRoom);
             container.appendChild(catEl);
 
             const childrenEl = catEl.querySelector('.nav-tree-children');
             for (const entry of entries) {
                 const el = document.createElement('div');
-                el.className = 'nav-tree-room nav-tree-loop';
+                // Highlight loops that start from current room
+                const isHere = curHash && entry.start_hash &&
+                    entry.start_hash.toUpperCase() === curHash;
+                el.className = 'nav-tree-room nav-tree-loop' + (isHere ? ' nav-current-room' : '');
                 const steps = entry.steps ? `${entry.steps} steps` : '';
                 el.innerHTML = `<span class="nav-room-icon">&#x1f501;</span>` +
-                    `<span class="nav-room-name">${this._highlight(entry.name, search)}</span>` +
+                    `<span class="nav-room-name">${this._highlight(entry.name || entry.file, search)}</span>` +
                     (steps ? ` <span class="nav-loop-steps">${steps}</span>` : '');
                 // Ctrl+hover tooltip with full details
                 el.addEventListener('mouseenter', (ev) => {
@@ -360,12 +406,13 @@ class NavPanel {
                     const tip = el.querySelector('.nav-loop-tip');
                     if (tip) tip.remove();
                 });
-                el.addEventListener('click', () => this._gotoRoom(entry.start_code, entry.name, this._tab, entry.file));
+                el.addEventListener('click', () => this._gotoRoom(entry.start_code, entry.name || entry.file, this._tab, entry.file));
                 el.addEventListener('dblclick', () => {
-                    this._gotoRoom(entry.start_code, entry.name, this._tab, entry.file);
+                    this._gotoRoom(entry.start_code, entry.name || entry.file, this._tab, entry.file);
                     this.close();
                 });
                 childrenEl.appendChild(el);
+                if (isHere && !scrollTarget) scrollTarget = el;
             }
         }
 
@@ -374,6 +421,11 @@ class NavPanel {
             empty.className = 'nav-panel-empty';
             empty.textContent = search ? 'No matching entries.' : 'No data loaded.';
             container.appendChild(empty);
+        }
+
+        // Scroll to first matching loop after render
+        if (scrollTarget) {
+            requestAnimationFrame(() => scrollTarget.scrollIntoView({ block: 'center', behavior: 'smooth' }));
         }
     }
 

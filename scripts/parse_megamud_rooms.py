@@ -120,6 +120,29 @@ def scan_mp_files(mp_dir: Path) -> tuple[list[dict], list[dict]]:
                     start_code = rparts[0]
                     start_category = rparts[1]
                     start_name = rparts[2]
+            # Parse step count from data line field[2]
+            try:
+                step_count = int(parts[2]) if len(parts) > 2 else len(lines) - 3
+            except ValueError:
+                step_count = len(lines) - 3
+            # Also parse end room from lines[2] if it's a path (has 2nd room bracket)
+            end_code = ""
+            end_category = ""
+            end_name = ""
+            if len(lines) > 2:
+                end_room_line = lines[2] if not lines[2].startswith("[") else ""
+                # For paths, line[2] is [CODE:Cat:Name], for loops line[1] is start room
+                # Actually line[2] is the data line. For paths there's a 3rd header line
+                pass
+            # Check if there's a second room header (paths have 3 header lines)
+            if len(lines) > 2 and lines[2].startswith("["):
+                inner2 = lines[2][1:lines[2].rindex("]")]
+                rparts2 = inner2.split(":", 2)
+                if len(rparts2) >= 3:
+                    end_code = rparts2[0]
+                    end_category = rparts2[1]
+                    end_name = rparts2[2]
+
             entry = {
                 "file": mp.stem,
                 "name": name,
@@ -127,11 +150,13 @@ def scan_mp_files(mp_dir: Path) -> tuple[list[dict], list[dict]]:
                 "start_code": start_code,
                 "start_category": start_category,
                 "start_room": start_name,
-                "steps": len(lines) - 2,
+                "start_hash": start_hash,
+                "end_hash": end_hash,
+                "steps": step_count,
             }
-            if start_hash == end_hash and start_hash != "0000":
-                loops.append(entry)
-            else:
+            # All .mp files go in both lists — MegaMUD shows all in its loop dialog
+            loops.append(entry)
+            if start_hash != end_hash:
                 paths.append(entry)
         except Exception:
             pass

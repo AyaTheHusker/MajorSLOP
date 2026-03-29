@@ -1983,6 +1983,8 @@ button:hover { background: #5555dd; }
     position: relative;
 }
 .nav-tree-room:hover { background: rgba(68, 68, 204, 0.18); }
+.nav-current-room { background: rgba(68, 204, 68, 0.15); border-left: 3px solid #4c4; }
+.nav-current-room:hover { background: rgba(68, 204, 68, 0.25); }
 
 .nav-hidden-room { opacity: 0.55; }
 .nav-hidden-room:hover { opacity: 0.85; }
