@@ -66,6 +66,15 @@ class CharPanel {
         const controls = document.createElement('div');
         controls.className = 'char-panel-controls';
 
+        const refreshBtn = document.createElement('span');
+        refreshBtn.className = 'char-panel-btn';
+        refreshBtn.textContent = '↻';
+        refreshBtn.title = 'Refresh (stat + look self)';
+        refreshBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            this._refresh();
+        });
+
         const lockBtn = document.createElement('span');
         lockBtn.className = 'char-panel-btn';
         lockBtn.textContent = '🔓';
@@ -87,6 +96,7 @@ class CharPanel {
             this.toggle(false);
         });
 
+        controls.appendChild(refreshBtn);
         controls.appendChild(lockBtn);
         controls.appendChild(closeBtn);
         header.appendChild(title);
@@ -445,6 +455,19 @@ class CharPanel {
         if (!this._portraitUrl || this._portraitUrl.includes('/api/asset/')) {
             if (key) {
                 this.setPortrait(`/api/asset/${encodeURIComponent(key)}`);
+            }
+        }
+    }
+
+    _refresh() {
+        // Send stat, i, exp, then l <firstname> for portrait data
+        if (typeof sendCommand === 'function') {
+            sendCommand('inject', { text: 'stat' });
+            setTimeout(() => sendCommand('inject', { text: 'i' }), 500);
+            setTimeout(() => sendCommand('inject', { text: 'exp' }), 1000);
+            if (this._charName) {
+                const firstName = this._charName.split(' ')[0];
+                setTimeout(() => sendCommand('inject', { text: `l ${firstName}` }), 1500);
             }
         }
     }

@@ -31,7 +31,7 @@ class RoundTimer {
         this._timingSpell = localStorage.getItem('roundTimerSpell') || '';
         this._timingActive = false;
         this._timingInterval = null;
-        this._timingRoundsNeeded = 6;
+        this._timingRoundsNeeded = 1;
         this._timingRoundsGot = 0;
         this._timingAlreadyCount = 0;  // consecutive "You have already" before cast
 

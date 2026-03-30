@@ -143,7 +143,48 @@ class MudTerminal {
         });
         this._opSlider = opSlider;
 
-        // FX palette dropdown
+        // ANSI Gradient dropdown
+        this._ansiGradient = new AnsiGradient();
+        const gradBtn = document.createElement('span');
+        gradBtn.className = 'mud-terminal-btn grad-btn';
+        gradBtn.title = 'ANSI color gradient scheme';
+        const gradLabel = document.createElement('span');
+        gradLabel.textContent = 'GRAD';
+        gradBtn.appendChild(gradLabel);
+        const gradMenu = document.createElement('div');
+        gradMenu.className = 'grad-scheme-menu';
+        gradMenu.style.display = 'none';
+        for (const [key, scheme] of Object.entries(AnsiGradient.SCHEMES)) {
+            const opt = document.createElement('div');
+            opt.className = 'grad-scheme-opt' + (key === this._ansiGradient.scheme ? ' active' : '');
+            opt.dataset.scheme = key;
+            opt.innerHTML = key === 'none'
+                ? 'None'
+                : `<span class="grad-scheme-name">${scheme.name}</span><span class="grad-scheme-desc">${scheme.desc}</span>`;
+            opt.addEventListener('click', (e) => {
+                e.stopPropagation();
+                this._ansiGradient.scheme = key;
+                gradMenu.style.display = 'none';
+                for (const o of gradMenu.querySelectorAll('.grad-scheme-opt')) {
+                    o.classList.toggle('active', o.dataset.scheme === key);
+                }
+                gradLabel.textContent = key === 'none' ? 'GRAD' : scheme.name.split(' ')[0].toUpperCase();
+            });
+            gradMenu.appendChild(opt);
+        }
+        gradBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            gradMenu.style.display = gradMenu.style.display === 'none' ? 'block' : 'none';
+        });
+        document.addEventListener('click', () => { gradMenu.style.display = 'none'; });
+        gradBtn.appendChild(gradMenu);
+        // Set initial button label
+        if (this._ansiGradient.scheme !== 'none') {
+            const s = AnsiGradient.SCHEMES[this._ansiGradient.scheme];
+            if (s) gradLabel.textContent = s.name.split(' ')[0].toUpperCase();
+        }
+
+        // FX palette dropdown (typing glow)
         const fxBtn = document.createElement('span');
         fxBtn.className = 'mud-terminal-btn fx-btn';
         fxBtn.textContent = 'FX';
@@ -162,7 +203,6 @@ class MudTerminal {
                 e.stopPropagation();
                 this._setFxPalette(p);
                 fxMenu.style.display = 'none';
-                // Update active marker
                 for (const o of fxMenu.querySelectorAll('.fx-palette-opt')) {
                     o.classList.toggle('active', o.dataset.palette === p);
                 }
@@ -177,6 +217,7 @@ class MudTerminal {
         document.addEventListener('click', () => { fxMenu.style.display = 'none'; });
         fxBtn.appendChild(fxMenu);
 
+        controls.appendChild(gradBtn);
         controls.appendChild(fxBtn);
         controls.appendChild(opSlider);
         controls.appendChild(modeBtn);
@@ -435,11 +476,9 @@ class MudTerminal {
             if (this._directMode) term.focus();
         });
 
-        // Observe panel resize to refit
+        // Observe panel resize to refit + scale font
         this._resizeObserver = new ResizeObserver(() => {
-            if (this._fitAddon && this._visible) {
-                this._fitAddon.fit();
-            }
+            if (this._visible) this._scaleToFit();
         });
         this._resizeObserver.observe(this._el);
     }
@@ -463,9 +502,7 @@ class MudTerminal {
         this._el.style.display = show ? 'flex' : 'none';
         if (show) {
             this._initXterm();
-            if (this._fitAddon) {
-                setTimeout(() => this._fitAddon.fit(), 50);
-            }
+            setTimeout(() => this._scaleToFit(), 50);
             if (this._directMode && this._term) {
                 this._term.focus();
             } else {
@@ -481,10 +518,12 @@ class MudTerminal {
 
     /** Feed raw server data (full ANSI stream) directly to xterm. */
     feedRaw(data) {
+        // Apply ANSI gradient if enabled
+        const processed = this._ansiGradient ? this._ansiGradient.process(data) : data;
         if (this._term) {
-            this._term.write(data);
+            this._term.write(processed);
         } else {
-            this._buffer.push(data);
+            this._buffer.push(processed);
             if (this._buffer.length > 2000) this._buffer.shift();
         }
         // Build plain-text backscroll
@@ -776,29 +815,43 @@ class MudTerminal {
         });
     }
 
-    _initResize() {
-        // Refit terminal when CSS resize handle is used
+    _scaleToFit() {
         const el = this._el;
-        let lastW = 0, lastH = 0;
-        const check = () => {
-            if (!this._visible) return;
-            const w = el.offsetWidth, h = el.offsetHeight;
-            if (w !== lastW || h !== lastH) {
-                lastW = w; lastH = h;
-                if (this._fitAddon) this._fitAddon.fit();
-                }
-        };
-        // Poll during active resize (mousedown on panel)
-        let interval = null;
-        el.addEventListener('mousedown', () => {
-            if (interval) return;
-            interval = setInterval(check, 100);
-        });
+        const BASE_WIDTH = 700;
+        const BASE_FONT = 13;
+        const MIN_FONT = 9;
+        const MAX_FONT = 24;
+        const w = el.offsetWidth;
+        const scale = w / BASE_WIDTH;
+        const newFont = Math.round(Math.min(MAX_FONT, Math.max(MIN_FONT, BASE_FONT * scale)));
+        if (this._term && this._term.options.fontSize !== newFont) {
+            this._term.options.fontSize = newFont;
+        }
+        // Scale input bar to match
+        const inputEl = el.querySelector('.mud-terminal-input');
+        const promptEl = el.querySelector('.mud-terminal-prompt');
+        if (inputEl) {
+            inputEl.style.fontSize = newFont + 'px';
+            inputEl.style.padding = Math.round(4 * scale) + 'px ' + Math.round(8 * scale) + 'px';
+            inputEl.style.minHeight = Math.round(24 * scale) + 'px';
+            inputEl.style.maxHeight = Math.round(120 * scale) + 'px';
+        }
+        if (promptEl) {
+            promptEl.style.fontSize = newFont + 'px';
+            promptEl.style.padding = Math.round(5 * scale) + 'px ' + Math.round(4 * scale) + 'px ' +
+                Math.round(4 * scale) + 'px ' + Math.round(8 * scale) + 'px';
+        }
+        if (this._fitAddon) this._fitAddon.fit();
+    }
+
+    _initResize() {
+        // Save state after CSS resize handle is released
+        const el = this._el;
+        let resizing = false;
+        el.addEventListener('mousedown', () => { resizing = true; });
         document.addEventListener('mouseup', () => {
-            if (interval) {
-                clearInterval(interval);
-                interval = null;
-                check();
+            if (resizing) {
+                resizing = false;
                 this._saveState();
             }
         });

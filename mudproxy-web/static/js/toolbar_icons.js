@@ -68,6 +68,22 @@ class ToolbarIcons {
         wrap.appendChild(bar);
         this._el = bar;
         this._wrap = wrap;
+
+        // Create fist tab as a real DOM element (above header z-index)
+        const fist = document.createElement('div');
+        fist.className = 'mega-fist-tab';
+        fist.title = 'MegaMUD';
+        fist.addEventListener('click', () => {
+            // Toggle toolbar on click
+            if (wrap.classList.contains('collapsed')) {
+                wrap.classList.remove('collapsed');
+                const rf = document.getElementById('room-name-float');
+                if (rf) rf.classList.remove('toolbar-collapsed');
+            }
+        });
+        document.body.appendChild(fist);
+        this._fistTab = fist;
+
         this._setupAutoHide();
     }
 
@@ -78,17 +94,21 @@ class ToolbarIcons {
         let collapsed = false;
         let mouseNear = false;
 
+        const fist = this._fistTab;
         const collapse = () => {
             if (collapsed || mouseNear) return;
             collapsed = true;
             wrap.classList.add('collapsed');
             if (roomFloat) roomFloat.classList.add('toolbar-collapsed');
+            if (fist) fist.style.top = '36px';
         };
 
         const expand = () => {
             collapsed = false;
             wrap.classList.remove('collapsed');
             if (roomFloat) roomFloat.classList.remove('toolbar-collapsed');
+            // Position fist below the toolbar bar
+            if (fist) fist.style.top = (36 + wrap.offsetHeight) + 'px';
             resetTimer();
         };
 

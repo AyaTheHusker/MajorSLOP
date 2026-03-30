@@ -86,7 +86,7 @@ html, body {
     border-bottom: var(--panel-border);
     padding: 0 12px;
     height: 36px;
-    z-index: 100;
+    z-index: 50000;
     backdrop-filter: blur(12px);
     -webkit-backdrop-filter: blur(12px);
     -webkit-app-region: drag; /* Tauri/Electron: drag window by header */
@@ -101,7 +101,7 @@ html, body {
 
 #room-name-float {
     position: fixed;
-    top: 95px;
+    top: 130px;
     left: 0;
     right: 0;
     text-align: center;
@@ -110,7 +110,7 @@ html, body {
     transition: top 0.4s cubic-bezier(0.4, 0, 0.2, 1);
 }
 #room-name-float.toolbar-collapsed {
-    top: 58px;
+    top: 80px;
 }
 #room-name {
     font-size: 20px;
@@ -203,30 +203,37 @@ html, body {
 #mega-toolbar-wrap > * {
     pointer-events: auto;
 }
-/* MegaMUD fist tab visible when collapsed */
-#mega-toolbar-wrap::after {
-    content: '';
-    position: absolute;
-    bottom: -32px;
+/* MegaMUD fist tab — always visible, hangs below the header */
+.mega-fist-tab {
+    position: fixed;
+    top: 36px;
     left: 50%;
     transform: translateX(-50%);
-    width: 42px;
-    height: 32px;
+    width: 56px;
+    height: 46px;
     background:
-        linear-gradient(180deg, rgba(60,60,80,0.9) 0%, rgba(20,20,40,0.95) 100%)
-        url('/static/img/megamud.png') center center / 22px 22px no-repeat;
-    background-blend-mode: normal;
-    border-radius: 0 0 10px 10px;
+        url('/static/img/megamud.png') center center / 32px 32px no-repeat,
+        linear-gradient(180deg, rgba(60,60,80,0.9) 0%, rgba(20,20,40,0.95) 100%);
+    border-radius: 0 0 14px 14px;
     border: 1px solid #555;
     border-top: none;
     box-shadow: 0 3px 8px rgba(0,0,0,0.5), inset 0 1px 0 rgba(255,255,255,0.1);
-    opacity: 0;
-    transition: opacity 0.4s ease;
-    pointer-events: auto;
+    z-index: 50001;
+    animation: fist-pulse 2.5s ease-in-out infinite;
     cursor: pointer;
+    transition: top 0.4s cubic-bezier(0.4, 0, 0.2, 1);
 }
-#mega-toolbar-wrap.collapsed::after {
-    opacity: 1;
+@keyframes fist-pulse {
+    0%, 100% {
+        box-shadow: 0 3px 8px rgba(0,0,0,0.5), inset 0 1px 0 rgba(255,255,255,0.1), 0 0 6px rgba(180,140,60,0.0);
+        border-color: #555;
+        filter: brightness(0.8) drop-shadow(0 0 2px rgba(180,140,60,0.0));
+    }
+    50% {
+        box-shadow: 0 3px 12px rgba(0,0,0,0.5), inset 0 1px 0 rgba(255,255,255,0.15), 0 0 14px rgba(180,140,60,0.5), 0 0 28px rgba(180,140,60,0.2);
+        border-color: rgba(200,170,80,0.6);
+        filter: brightness(1.3) drop-shadow(0 0 8px rgba(200,170,60,0.7));
+    }
 }
 .mega-toolbar {
     display: flex;
@@ -302,22 +309,39 @@ html, body {
 /* Orb context menu */
 .orb-context-menu {
     position: fixed;
-    z-index: 10000;
+    z-index: 60000;
     background: #1a1a2e;
     border: 1px solid #444;
     border-radius: 4px;
     padding: 4px 0;
-    min-width: 100px;
+    min-width: 160px;
     font-size: 12px;
     color: #ccc;
 }
 .orb-menu-item {
-    padding: 4px 12px;
+    padding: 5px 14px;
     cursor: pointer;
     position: relative;
+    white-space: nowrap;
 }
 .orb-menu-item:hover {
     background: #333;
+}
+.orb-menu-item.orb-active::before {
+    content: '\2713  ';
+    color: #6f6;
+}
+.orb-menu-sep {
+    height: 1px;
+    background: #444;
+    margin: 4px 0;
+}
+.orb-has-sub::after {
+    content: '\25B6';
+    float: right;
+    font-size: 9px;
+    margin-left: 12px;
+    opacity: 0.5;
 }
 .orb-has-sub > .orb-submenu {
     display: none;
@@ -328,7 +352,7 @@ html, body {
     border: 1px solid #444;
     border-radius: 4px;
     padding: 4px 0;
-    min-width: 80px;
+    min-width: 140px;
 }
 .orb-has-sub:hover > .orb-submenu {
     display: block;
@@ -1678,7 +1702,55 @@ button:hover { background: #5555dd; }
 }
 
 /* FX palette menu */
-.fx-btn { position: relative; color: #88aacc !important; font-weight: 700; }
+/* GRAD and FX buttons — bigger, spaced */
+.grad-btn, .fx-btn {
+    position: relative;
+    font-weight: 700;
+    font-size: 11px !important;
+    padding: 2px 8px !important;
+    border: 1px solid rgba(80, 80, 140, 0.4);
+    border-radius: 4px;
+    margin-right: 4px;
+    letter-spacing: 0.5px;
+}
+.grad-btn { color: #cc88ee !important; }
+.grad-btn:hover { border-color: #cc88ee; }
+.fx-btn { color: #88aacc !important; }
+.fx-btn:hover { border-color: #88aacc; }
+
+/* ANSI Gradient scheme menu */
+.grad-scheme-menu {
+    position: absolute;
+    top: 100%;
+    right: 0;
+    background: var(--menu-bg);
+    border: var(--panel-border);
+    border-radius: 6px;
+    padding: 4px 0;
+    z-index: 300;
+    min-width: 180px;
+    backdrop-filter: blur(12px);
+    box-shadow: 0 4px 16px rgba(0,0,0,0.7);
+}
+.grad-scheme-opt {
+    padding: 5px 14px;
+    font-size: 12px;
+    color: #ccc;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background 0.15s;
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+}
+.grad-scheme-opt:hover { background: rgba(80, 60, 120, 0.5); color: #fff; }
+.grad-scheme-opt.active { color: #cc88ff; }
+.grad-scheme-opt.active::before { content: '● '; font-size: 8px; }
+.grad-scheme-name { font-weight: 600; }
+.grad-scheme-desc { font-size: 10px; color: #888; font-style: italic; }
+.grad-scheme-opt:hover .grad-scheme-desc { color: #aaa; }
+
+/* FX palette menu */
 .fx-palette-menu {
     position: absolute;
     top: 100%;

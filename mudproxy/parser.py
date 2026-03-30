@@ -94,7 +94,7 @@ class MudParser:
         re.IGNORECASE
     )
     RE_SPELL_CAST = re.compile(
-        r'^You (?:cast|sing) ',
+        r'^You (?:cast|sing|invoke) ',
         re.IGNORECASE
     )
     RE_SPELL_FAIL = re.compile(

@@ -168,12 +168,8 @@ class Orchestrator:
         self._broadcast_channel = ""
         self._exp_status: dict | None = None  # {exp, level, needed, total_for_level, percent}
         self._online_players: list[str] = []
-        self._self_looked = False
         self._last_bracket_player = None  # tracks "[ Name ]" bracket line for player detection
         self._player_desc_buf = None  # buffers wrapped description lines
-        self._inv_sync_task: asyncio.Task | None = None
-        self._last_inv_sync = 0
-        self._last_entity_move = 0.0  # cooldown for entity movement Enter
         self.ambient_filter_enabled = False  # strip ambient sounds from MegaMud
         # Pro mode: "silent" (ParaMUD, invisible), "loud" (ParaMUD, visible), "off" (Legacy MMUD)
         self.pro_mode = "off"
@@ -185,9 +181,7 @@ class Orchestrator:
         self._pro_every_n_rooms = 5     # fire pro every N rooms
         self._spellbook: dict | None = None  # parsed from 'spells'/'powers' command
         self._inventory: dict | None = None  # parsed from inventory command
-        self._last_missing_check = 0.0  # cooldown for _check_missing_data
-        self._portrait_confirmed = False  # True once l firstname has been sent AND portrait emitted
-        self._last_item_refresh = 0.0  # cooldown for i+enter after item pickup/drop
+        self._portrait_confirmed = False  # True once portrait data confirmed from memory
 
         # ── Round tracking ──
         self._round_count = 0
@@ -203,17 +197,10 @@ class Orchestrator:
         except Exception:
             self._ansi_log_f = None
 
-        # ── Smart command queue ──
-        # Combat Engaged: instant burst (0.3s window), then done
-        # Resting: 2s confirm wait, burst, then 5s slow roll
-        # Walking: 60s cooldown, almost never fires
-        self._cmd_queue: list[str] = []
         self._in_combat = False
         self._is_resting = False
-        self._rest_confirmed = False  # True after 2s resting confirmation
-        self._last_cmd_inject = 0.0
+        self._rest_confirmed = False
         self._last_move_cmd = 0.0
-        self._cmd_drain_task: asyncio.Task | None = None
 
         # Room position tracking — ground truth from pro, predictions from MDB exits
         self._current_map: int | None = None
@@ -390,9 +377,7 @@ class Orchestrator:
             # Emit engage event on EVERY *Combat Engaged* (swords on target)
             if self._combat_target:
                 self._emit("combat_engage", {"target": self._combat_target})
-            # Instant burst — dump all queued commands in ~0.3s window
-            if self._cmd_queue and self._loop and self.proxy.connected:
-                self._loop.create_task(self._combat_burst())
+            # Command queue removed — MegaMUD handles data collection
         elif s == '*Combat Off*':
             self._in_combat = False
             if self._round_count > 0:
@@ -406,9 +391,6 @@ class Orchestrator:
             if not self._is_resting:
                 self._is_resting = True
                 self._rest_confirmed = False
-                # Wait 2 sec to confirm actually resting, then burst
-                if self._loop and self.proxy.connected:
-                    self._loop.create_task(self._rest_confirm_and_burst())
         elif self._is_resting and ('[HP=' in s and '(Resting)' not in s):
             # Got a prompt without (Resting) — stopped resting
             self._is_resting = False
@@ -427,10 +409,7 @@ class Orchestrator:
             self._stealthed = False
             self._hidden = False
 
-        # Detect receiving items from other players
-        low = s.lower()
-        if 'just gave you' in low or 'you just received' in low:
-            self._schedule_inv_sync(delay=2)
+        # Item receive detection — MegaMUD handles inventory via memory bridge
 
         # ── Teleport confirmation (special exit messages from dats) ──
         if self.gamedata.is_loaded and s:
@@ -452,13 +431,9 @@ class Orchestrator:
                     "dst_name": dst_name,
                 })
 
-        # Entity enter/leave → send Enter to refresh MegaMud's room view
+        # Entity enter/leave — just log it, MegaMUD handles room refresh
         if _is_entity_movement(stripped):
-            now = time.monotonic()
-            if now - self._last_entity_move >= _ENTITY_MOVE_COOLDOWN:
-                self._last_entity_move = now
-                logger.debug(f"Entity movement: {stripped.strip()}")
-                asyncio.ensure_future(self.proxy.inject_command(""))
+            logger.debug(f"Entity movement: {stripped.strip()}")
 
     def _on_server_data(self, data: bytes):
         """Forward raw server bytes to the web terminal for full ANSI emulation."""
@@ -470,128 +445,11 @@ class Orchestrator:
 
     def _on_connect(self):
         self._emit("connection", {"status": "connected"})
-        self._in_game = False  # wait for first HP prompt before auto-injecting
-        # Start periodic inventory sync
-        if self._inv_sync_task:
-            self._inv_sync_task.cancel()
-        if self._loop:
-            self._inv_sync_task = self._loop.create_task(self._inv_sync_loop())
+        self._in_game = False  # wait for first HP prompt
 
-    def _schedule_inv_sync(self, delay=2):
-        """Schedule a one-shot inventory sync after a delay."""
-        import time
-        if time.monotonic() - self._last_inv_sync < 5:
-            return  # don't spam
-        if self._loop and self.proxy.connected:
-            self._loop.create_task(self._delayed_inv_sync(delay))
+    # Inventory sync removed — MegaMUD handles inventory tracking via memory bridge
 
-    async def _delayed_inv_sync(self, delay):
-        import time
-        await asyncio.sleep(delay)
-        try:
-            if self.proxy.connected:
-                await self.proxy.inject_command("i")
-                self._last_inv_sync = time.monotonic()
-        except Exception:
-            pass
-
-    async def _inv_sync_loop(self):
-        """Periodically inject 'i' to keep inventory synced.
-        Waits until in-game before sending anything."""
-        import time
-        # Wait until we're actually in the MUD (first HP prompt)
-        while not self._in_game:
-            await asyncio.sleep(1)
-        await asyncio.sleep(2)  # short settle after entering game
-        try:
-            if self.proxy.connected:
-                await self.proxy.inject_command("i")
-                self._last_inv_sync = time.monotonic()
-        except Exception:
-            pass
-        while True:
-            await asyncio.sleep(60)  # sync every 60 seconds
-            try:
-                if self.proxy.connected and self._in_game:
-                    await self.proxy.inject_command("i")
-                    self._last_inv_sync = time.monotonic()
-            except Exception:
-                pass
-
-    # ── Smart Command Queue ──
-    # Combat Engaged: instant 0.3s burst window, dump everything, done
-    # Resting: 2s confirm, burst, then 5s slow roll for new items
-    # Walking: 60s cooldown, almost never fires
-
-    def queue_info_cmd(self, cmd: str):
-        """Queue an info command for smart injection."""
-        if cmd not in self._cmd_queue:
-            self._cmd_queue.append(cmd)
-        # If resting (confirmed), start slow-roll drain
-        if self._rest_confirmed and self._is_resting:
-            self._start_drain()
-        # Walking drain — only if cooldown elapsed
-        elif not self._in_combat and not self._is_resting:
-            self._start_drain()
-
-    def _start_drain(self):
-        if not self._cmd_queue:
-            return
-        if self._cmd_drain_task and not self._cmd_drain_task.done():
-            return
-        if self._loop and self.proxy.connected:
-            self._cmd_drain_task = self._loop.create_task(self._walk_drain_loop())
-
-    async def _combat_burst(self):
-        """Instant burst: dump all queued commands in ~0.3s, then stop."""
-        cmds = list(self._cmd_queue)
-        self._cmd_queue.clear()
-        for cmd in cmds:
-            if not self.proxy.connected:
-                break
-            try:
-                await self.proxy.inject_command(cmd)
-            except Exception:
-                pass
-            await asyncio.sleep(0.05)  # tiny stagger, whole burst < 0.3s
-        self._last_cmd_inject = time.monotonic()
-
-    async def _rest_confirm_and_burst(self):
-        """Wait 2s to confirm resting, then burst + start slow roll."""
-        await asyncio.sleep(2.0)
-        if not self._is_resting:
-            return  # stopped resting during confirm window
-        self._rest_confirmed = True
-        # Burst all queued commands
-        cmds = list(self._cmd_queue)
-        self._cmd_queue.clear()
-        for cmd in cmds:
-            if not self.proxy.connected or not self._is_resting:
-                break
-            try:
-                await self.proxy.inject_command(cmd)
-            except Exception:
-                pass
-            await asyncio.sleep(0.05)
-        self._last_cmd_inject = time.monotonic()
-        # Start slow roll for any new commands that arrive during rest
-        self._start_drain()
-
-    async def _walk_drain_loop(self):
-        """Drain commands with appropriate cooldown: 5s while resting, 60s while walking."""
-        while self._cmd_queue and self.proxy.connected:
-            cooldown = 5.0 if (self._is_resting and self._rest_confirmed) else 60.0
-            elapsed = time.monotonic() - self._last_cmd_inject
-            if elapsed < cooldown:
-                await asyncio.sleep(cooldown - elapsed)
-            if not self._cmd_queue or not self.proxy.connected:
-                break
-            cmd = self._cmd_queue.pop(0)
-            try:
-                await self.proxy.inject_command(cmd)
-                self._last_cmd_inject = time.monotonic()
-            except Exception:
-                pass
+    # Smart command queue removed — MegaMUD handles data collection via memory bridge
 
     def _fire_pro(self):
         """Inject pro command based on current pro_mode setting."""
@@ -612,123 +470,11 @@ class Orchestrator:
             self.proxy._web_hiding_pro = True
             asyncio.ensure_future(self.proxy.inject_command("pro"))
 
-    async def _initial_populate(self):
-        """Triggered by first HP line. Waits 8s then sends stat, i, l firstname.
-        Retries l firstname every 10s until portrait is no longer '?' (up to 5 tries)."""
-        await asyncio.sleep(8)
-        if not self._in_game or not self.proxy.connected:
-            return
-
-        # stat first — gets char name
-        logger.info("Initial populate: sending 'stat'")
-        await self.proxy.inject_command("stat")
-        await asyncio.sleep(3)
-
-        # i — gets inventory
-        logger.info("Initial populate: sending 'i'")
-        await self.proxy.inject_command("i")
-        await asyncio.sleep(3)
-
-        # exp — gets experience bar data
-        logger.info("Initial populate: sending 'exp'")
-        await self.proxy.inject_command("exp")
-        await asyncio.sleep(3)
-
-        # l firstname — ALWAYS send it to get fresh portrait data
-        # Wait for char_name (stat might take a while during combat)
-        for _ in range(10):
-            if self._char_name:
-                break
-            logger.info("Initial populate: waiting for char_name from stat...")
-            await asyncio.sleep(2)
-        if not self._char_name:
-            logger.warning("Initial populate: no char_name after 20s, giving up (will retry via _check_missing_data)")
-            return
-        first_name = self._char_name.split()[0]
-        logger.info(f"Initial populate: sending 'l {first_name}'")
-        self.entity_db.start_look(first_name, "player")
-        await self.proxy.inject_command(f"l {first_name}")
-
-    async def _look_self_on_reconnect(self, first_name: str):
-        """Send 'l firstname' immediately when client reconnects with missing portrait."""
-        await asyncio.sleep(2)
-        if not self._in_game or not self.proxy.connected:
-            return
-        logger.info(f"Client reconnect: sending 'l {first_name}'")
-        self.entity_db.start_look(first_name, "player")
-        await self.proxy.inject_command(f"l {first_name}")
-
-    async def _check_missing_data(self):
-        """Called on every HP line. Checks what UI data is missing and re-queues
-        commands through the smart command system every 15s until filled.
-        queue_info_cmd dedupes, so this just keeps pushing until the data arrives."""
-        now = time.monotonic()
-        if now - self._last_missing_check < 15:
-            return
-        self._last_missing_check = now
-
-        if not self.proxy.connected:
-            return
-
-        # 1. Need char name → stat
-        if not self._char_name:
-            self.queue_info_cmd("stat")
-            logger.info("_check_missing_data: queued 'stat' (no char name)")
-
-        # 2. Need portrait → l firstname  (TOP PRIORITY once we have name)
-        #    Always send until _portrait_confirmed — don't trust cached portrait_key
-        if self._char_name and not self._portrait_confirmed:
-            first_name = self._char_name.split()[0]
-            cmd = f"l {first_name}"
-            self.entity_db.start_look(first_name, "player")
-            self.queue_info_cmd(cmd)
-            logger.info(f"_check_missing_data: queued '{cmd}' (portrait not confirmed)")
-
-        # 3. Need inventory → i
-        if self._inventory is None:
-            self.queue_info_cmd("i")
-            logger.info("_check_missing_data: queued 'i' (no inventory)")
-
-        # 4. Need exp → exp
-        if self._exp_status is None:
-            self.queue_info_cmd("exp")
-            logger.info("_check_missing_data: queued 'exp' (no exp data)")
-
-    async def _portrait_poll_loop(self):
-        """Dedicated loop: keeps sending 'l firstname' until portrait is confirmed.
-        10s in combat, 60s while walking. Direct inject, no queue."""
-        while self._in_game and self.proxy.connected and not self._portrait_confirmed:
-            # Wait for char_name first
-            if not self._char_name:
-                await asyncio.sleep(3)
-                continue
-            first_name = self._char_name.split()[0]
-            logger.info(f"PORTRAIT POLL: sending 'l {first_name}'")
-            self.entity_db.start_look(first_name, "player")
-            try:
-                await self.proxy.inject_command(f"l {first_name}")
-            except Exception as e:
-                logger.error(f"PORTRAIT POLL: inject failed: {e}")
-            # 10s in combat, 60s otherwise
-            delay = 10 if self._in_combat else 60
-            await asyncio.sleep(delay)
-        logger.info(f"PORTRAIT POLL: done (confirmed={self._portrait_confirmed})")
-
-    async def _exp_refresh_loop(self):
-        """Queue 'exp' every 2 minutes through the smart command system."""
-        while self._in_game:
-            await asyncio.sleep(120)
-            if not self._in_game or not self.proxy.connected:
-                break
-            self.queue_info_cmd("exp")
+    # Auto-populate, portrait polling, exp refresh removed —
+    # MegaMUD handles all data collection, we read via memory bridge
 
     def on_client_connect(self):
         """Called when a web client connects/refreshes. Re-emits cached state."""
-        # Reset portrait flag and restart portrait poll loop
-        self._portrait_confirmed = False
-        self._last_missing_check = 0.0
-        if self._in_game and self._loop and self.proxy.connected:
-            self._loop.create_task(self._portrait_poll_loop())
 
         # Instant re-emit of whatever we have
         if self._char_name:
@@ -741,51 +487,11 @@ class Orchestrator:
     _TOP_CACHE_FILE = Path.home() / ".cache" / "mudproxy" / "top_list_last.json"
     _TOP_STALE_DAYS = 3
 
-    def _maybe_schedule_top(self):
-        """Schedule 'top 1000' 20s after entering game if stale or never run."""
-        try:
-            if self._TOP_CACHE_FILE.exists():
-                data = json.loads(self._TOP_CACHE_FILE.read_text())
-                last = data.get("timestamp", 0)
-                age_days = (time.time() - last) / 86400
-                if age_days < self._TOP_STALE_DAYS:
-                    logger.info(f"Top list is {age_days:.1f} days old, skipping auto-top")
-                    return
-        except Exception:
-            pass
-        logger.info("Scheduling auto 'top 1000' in 20s")
-        asyncio.ensure_future(self._delayed_top())
-
-    async def _delayed_top(self):
-        await asyncio.sleep(20)
-        if self._in_game and self.proxy.connected:
-            logger.info("Sending auto 'top 1000'")
-            await self.proxy.inject_command("top 1000")
-
-    async def _delayed_who(self):
-        """Send 'who' to update online player list."""
-        if hasattr(self, '_who_pending') and self._who_pending:
-            return
-        self._who_pending = True
-        await asyncio.sleep(3)
-        if self._in_game and self.proxy.connected:
-            await self.proxy.inject_command("who")
-        self._who_pending = False
-
-    async def _delayed_self_look(self, name: str):
-        """Look at ourselves once to populate own portrait data."""
-        await asyncio.sleep(2)
-        if self._in_game and self.proxy.connected:
-            logger.info(f"Auto-looking at self: {name}")
-            self.entity_db.start_look(name, "player")
-            await self.proxy.inject_command(f"l {name}")
+    # Auto top/who/self-look removed — MegaMUD handles these via its own player database
 
     def _on_disconnect(self):
         self._emit("connection", {"status": "disconnected"})
         self._combat_target = None
-        if self._inv_sync_task:
-            self._inv_sync_task.cancel()
-            self._inv_sync_task = None
         # Clear any stuck pro suppression
         self.proxy._suppressing_pro = False
 
@@ -827,10 +533,7 @@ class Orchestrator:
             if self.pro_mode != "off":
                 self._schedule_move_pro()
 
-        # Inventory-changing commands → sync after a short delay
-        if lower.startswith(("g ", "get ", "dr ", "drop ", "w ", "wea ", "wear ",
-                             "rem ", "remove ", "sell ", "buy ", "give ")):
-            self._schedule_inv_sync(delay=2)
+        # Inventory sync removed — MegaMUD tracks inventory via memory bridge
 
     def _schedule_move_pro(self):
         """After a movement command, wait 1.5s — if no room_update fires, pro anyway."""
@@ -1053,11 +756,7 @@ class Orchestrator:
                 "drops": drops or [],
             })
 
-        # If we found unknown players, schedule a who to confirm
-        unknown_players = [e for e in entities if e["type"] == "player"
-                           and not self.entity_db.is_known_player(e["name"])]
-        if unknown_players:
-            asyncio.ensure_future(self._delayed_who())
+        # MegaMUD handles who list — unknown players detected from memory bridge
 
         items = []
         quantities = getattr(room, 'item_quantities', {})
@@ -1089,16 +788,9 @@ class Orchestrator:
         })
 
     def _on_hp_update(self, hp: int, max_hp: int, mana: int, max_mana: int):
-        # First HP prompt means we're in-game — fire initial pro
         if not self._in_game:
             self._in_game = True
             self._fire_pro()
-            self._maybe_schedule_top()
-            # Populate inventory + stats after entering game
-            if self._loop:
-                self._loop.create_task(self._initial_populate())
-                self._loop.create_task(self._exp_refresh_loop())
-                self._loop.create_task(self._portrait_poll_loop())
         self._hp = hp
         self._max_hp = max_hp
         self._mana = mana
@@ -1107,9 +799,6 @@ class Orchestrator:
             "hp": hp, "max_hp": max_hp,
             "mana": mana, "max_mana": max_mana,
         })
-        # Every HP line: check if we're missing critical data and fix it
-        if self._loop:
-            self._loop.create_task(self._check_missing_data())
 
     def _on_combat(self, line: str):
         # Any combat line breaks resting
@@ -1215,10 +904,6 @@ class Orchestrator:
 
     def _on_coin_transfer(self, data: dict):
         self._emit("coin_transfer", data)
-        # Refresh inventory + ground after pickup/drop
-        action = data.get("action")
-        if action in ("pickup", "drop") and self.proxy.connected and self._loop:
-            asyncio.ensure_future(self._item_refresh_burst())
 
     def _on_item_transfer(self, data: dict):
         """Handle item pickup/drop — emit with thumbnail key for fly animation.
@@ -1228,24 +913,11 @@ class Orchestrator:
         key = self.slop.get_entity_thumb_key(name) if name else None
         data["key"] = key
         self._emit("item_transfer", data)
-        if self.proxy.connected and self._loop:
-            asyncio.ensure_future(self._item_refresh_burst())
 
-    async def _item_refresh_burst(self):
-        """Send 'i' then two enters to refresh both inventory and ground items."""
-        try:
-            await self.proxy.inject_command("i")
-            await asyncio.sleep(0.1)
-            await self.proxy.inject_command("")
-            await asyncio.sleep(0.1)
-            await self.proxy.inject_command("")
-        except Exception:
-            pass
+    # Item refresh burst removed — MegaMUD tracks inventory via memory bridge
 
     def _on_xp(self, amount: int):
         self._emit("xp_gain", {"amount": amount})
-        # Queue exp refresh through the smart command system
-        self.queue_info_cmd("exp")
 
     def _on_chat(self, sender: str, message: str, channel: str):
         self._emit("chat", {
@@ -1277,11 +949,6 @@ class Orchestrator:
         self._emit("char_name", {"name": name})
         # Tell mem_reader the real name so it can re-scan if it latched wrong
         self.mem_reader.set_player_name(name.split()[0])
-        # Always look at self when we learn our name — no cache checks
-        if not self._self_looked and self._loop and self.proxy.connected:
-            self._self_looked = True
-            first_name = name.split()[0]
-            asyncio.ensure_future(self._delayed_self_look(first_name))
 
     def _try_parse_player_inline(self, full_name: str, desc_line: str):
         """Parse player race/class/gender directly from description line in the stream."""

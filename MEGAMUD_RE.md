@@ -895,3 +895,97 @@ Time     Event
 - [ ] Explore spell queue / auto-combat decision structures
 - [ ] Map step flags field in .mp files (0000 vs 0004)
 - [ ] Build scripting/scheduling system for automated event chains
+- [ ] Fully reverse engineer Players.md gender/appearance fields
+- [ ] Map all MDB2 record field offsets for Players, Items, Monsters, Rooms
+
+## MDB2 File Format (C-Index/II Database)
+
+MegaMUD uses a proprietary binary database format with the magic header `MDB2`.
+This is NOT Microsoft Access MDB, NOT Btrieve — it's MegaMUD's own C-Index/II engine.
+
+### File Locations
+
+| File | Location | Purpose |
+|---|---|---|
+| Rooms.md | `Default/` | Room checksums, names, exits |
+| Items.md | `Default/` | Item database |
+| Monsters.md | `Default/` | Monster/NPC database |
+| Spells.md | `Default/` | Spell database |
+| Classes.md | `Default/` | Class definitions |
+| Races.md | `Default/` | Race definitions |
+| Paths.md | `Default/` | Path/waypoint data |
+| Macros.md | `Default/` | Macro definitions |
+| Messages.md | `Default/` | Message templates |
+| Players.md | `BBS/<bbsname>/` | Per-BBS player database (inventories, stats) |
+
+### MDB2 Header (0x400 bytes)
+
+```
+Offset  Type    Field
+0x00    char[4] Magic: "MDB2"
+0x04    u16     Version (2)
+0x06    u16     Number of fields (e.g. 50 for Players.md)
+0x08    u32     Unknown (possibly total data size or checksum)
+0x0C    u16     Number of records
+0x0E    u16     Unknown
+0x10    u32     Unknown (1 in Players.md)
+0x14    u32     Unknown
+0x18    u16     Record size in bytes (e.g. 0x1E4 = 484 for Players.md)
+0x1A    u16     Unknown
+0x1C-   zeros   Padding to 0x400
+```
+
+Data records begin at offset `0x400`. Records are fixed-size (`record_size` from header).
+
+### Players.md Record Structure (484 bytes per record)
+
+Records contain a `0xFE 0x01` marker at a variable position within the fixed-size
+record block. The marker offset varies because some records include index/overflow
+data before the player data. Records without an `0xFE 0x01` marker are index records
+containing references to other player names.
+
+**Fields relative to `0xFE 0x01` marker:**
+
+```
+Offset  Size  Field
++0x00   2     Marker: 0xFE 0x01
++0x02   12    Name (null-padded ASCII)
++0x0E   12    Name (duplicate, possibly display name)
++0x1A   12    Surname/Title (null-padded, e.g. "GRRRRRRR", "Moonspawn", "Nicola")
++0x26   36    Padding/unknown (mostly zeros)
++0x4A   30    Gang/Guild name (null-padded, e.g. "Stoneheart Group V")
+```
+
+**Structured data after gang name (offsets shift by ±2-4 bytes depending on
+string field alignment — exact field positions TBD):**
+
+The following fields appear in the `+0x60` to `+0xC6` range but alignment varies
+per record. Known value ranges observed:
+
+| Candidate Field | Observed Values | Notes |
+|---|---|---|
+| Level | 5, 6, 7, 16, 30+ | Small integer, varies per player |
+| Race | 1-11 | MajorMUD race ID |
+| Class | 1-11 | MajorMUD class ID |
+| Stats (STR/AGI/INT/WIL/HEA/CHA) | 30-110 | Six stat values in sequence |
+| Timestamps | Large u32 values | Unix-ish timestamps (created, last seen) |
+| Equipment item IDs | u16 values | Item database references |
+
+**NOT found in Players.md:** Gender, hair color, eye color, hair length.
+MegaMUD does not store appearance data — it only learns inventories from `look`.
+Portrait appearance data must come from parsing the BBS `look` output directly.
+
+### Index Records
+
+Some records in Players.md lack the `0xFE 0x01` marker and instead contain
+lists of player name references — these appear to be B-tree index nodes for
+the C-Index/II engine's search functionality.
+
+### Notes
+
+- MMUD Explorer reads Rooms.md for path data but uses Access/JET databases
+  for everything else — it does NOT parse Players.md directly
+- The MDB2 format is undocumented publicly; no known complete specification exists
+- Field alignment issues suggest variable-length fields or padding rules that
+  depend on string content length
+- Further reverse engineering needed to map exact field offsets
