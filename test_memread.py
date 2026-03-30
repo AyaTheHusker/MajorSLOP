@@ -1,10 +1,10 @@
 """Standalone memory reader test — run under Wine Python to iterate fast.
 
 Usage:
-    wine C:\\users\\bucka\\AppData\\Local\\Programs\\Python\\Python312\\python.exe test_memread.py
-    wine C:\\users\\bucka\\AppData\\Local\\Programs\\Python\\Python312\\python.exe test_memread.py --watch
-    wine C:\\users\\bucka\\AppData\\Local\\Programs\\Python\\Python312\\python.exe test_memread.py --name Tripmunk
-    wine C:\\users\\bucka\\AppData\\Local\\Programs\\Python\\Python312\\python.exe test_memread.py --monitor
+    wine python test_memread.py
+    wine python test_memread.py --watch
+    wine python test_memread.py --name Tripmunk
+    wine python test_memread.py --monitor
 """
 import argparse
 import json

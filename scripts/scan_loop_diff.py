@@ -55,7 +55,7 @@ def find_megamud_pid():
 def find_struct_base(pid):
     """Read the DLL's struct base from its log or from the port file."""
     # Check for mudplugin port file
-    port_file = glob.glob(f"/home/bucka/.wine/drive_c/MegaMUD/mudplugin_*.port")
+    port_file = glob.glob(os.path.expanduser("~/.wine/drive_c/MegaMUD/mudplugin_*.port"))
     if not port_file:
         # Try to get base from MajorSLOP API
         try:

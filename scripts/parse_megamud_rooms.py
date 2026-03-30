@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 
 MEGAMUD_DIR = Path(os.path.expanduser("~/.wine/drive_c/MegaMUD"))
-LOOPS_DIR = Path(os.path.expanduser("~/.wine/drive_c/users/bucka/Documents/Loops"))
+LOOPS_DIR = Path(os.path.expanduser("~/.wine/drive_c/users/" + os.environ.get("USER", "user") + "/Documents/Loops"))
 OUTPUT = Path(os.path.expanduser("~/.cache/mudproxy/gamedata/megamud_rooms.json"))
 
 def parse_rooms_md(path: Path) -> list[dict]:

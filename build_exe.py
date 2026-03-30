@@ -1,6 +1,6 @@
 """Build MajorSLOP Windows .exe using PyInstaller under Wine.
 
-Run: cd /home/bucka/AI/mudproxy && wine C:\\users\\bucka\\AppData\\Local\\Programs\\Python\\Python312\\python.exe build_exe.py
+Run: wine python build_exe.py
 """
 import PyInstaller.__main__
 import os
