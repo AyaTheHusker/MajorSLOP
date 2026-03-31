@@ -354,6 +354,18 @@ class GameData:
     def get_spell(self, num: int) -> dict | None:
         return self._spells.get(num)
 
+    def get_spell_by_short(self, short: str) -> dict | None:
+        """Look up a spell by its 4-letter abbreviation (e.g. 'bles', 'mite')."""
+        short_lower = short.lower().strip()
+        for spell in self._spells.values():
+            if spell.get('Short', '').lower().strip() == short_lower:
+                return spell
+        return None
+
+    def get_all_buff_spells(self) -> list[dict]:
+        """Return all spells with duration > 0 (potential buff/bless spells)."""
+        return [s for s in self._spells.values() if s.get('Dur', 0) > 0]
+
     def get_heal_spell_names(self) -> set[str]:
         """Return lowercase names of all spells with Ability 18 (heal flag)."""
         names = set()

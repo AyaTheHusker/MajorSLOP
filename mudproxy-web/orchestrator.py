@@ -345,8 +345,22 @@ class Orchestrator:
         except Exception as e:
             logger.error(f"Parser error (non-fatal): {e}")
 
-        # ── Player detection from look output ──
+        # ── Location parsing from rm command output ──
         s = stripped.strip()
+        if s.startswith('Location:'):
+            loc_m = re.match(r'Location:\s+(\d+),(\d+)', s)
+            if loc_m:
+                rm_map = int(loc_m.group(1))
+                rm_room = int(loc_m.group(2))
+                self._emit("rm_location", {"map": rm_map, "room": rm_room})
+                # Also send to DLL if bridge is connected
+                if self.dll_bridge and self.dll_bridge.connected:
+                    try:
+                        self.dll_bridge.command(f"SETLOC {rm_map} {rm_room}")
+                    except Exception:
+                        pass
+
+        # ── Player detection from look output ──
         # "[ Eldritch Palmer ](Stoneheart Group)" = player bracket line
         if s.startswith('[ ') and ']' in s:
             bracket_m = re.match(r'^\[\s*(.+?)\s*\]', s)
@@ -382,9 +396,19 @@ class Orchestrator:
             self._in_combat = False
             if self._round_count > 0:
                 self._emit("combat_end", {"rounds": self._round_count})
+                # Forward to DLL round timer widget
+                dll = self.mem_reader._dll
+                if dll.connected:
+                    dll.combat_end()
             self._round_count = 0
-            self._last_round_ts = 0.0
             self._combat_start_ts = 0.0
+            # NOTE: Do NOT reset _last_round_ts here.
+            # MegaMUD frequently breaks off and re-engages within the same
+            # server round.  Resetting _last_round_ts to 0 causes the next
+            # combat line (the re-engage attack) to always pass the >3.5s
+            # gap check, firing a false round_tick ~1s early.  Keeping the
+            # last known round timestamp lets gap-based detection stay
+            # accurate through break/re-engage cycles.
 
         # ── Resting detection ──
         if '(Resting)' in s:
@@ -881,6 +905,10 @@ class Orchestrator:
                 self._combat_start_ts = now
             self._last_round_ts = now
             self._emit("round_tick", {"round": self._round_count})
+            # Forward to DLL round timer widget
+            dll = self.mem_reader._dll
+            if dll.connected:
+                dll.round_tick(self._round_count)
 
     def _on_spell_cast(self, data):
         """Spell cast or failed — emit event, JS decides if it feeds round timer."""

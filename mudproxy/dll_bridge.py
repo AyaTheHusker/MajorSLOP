@@ -80,6 +80,31 @@ class DLLBridge:
             self.disconnect()
             return None
 
+    def _cmd_multiline(self, command: str, end_marker: str = "END") -> Optional[str]:
+        """Send a command that returns multiple lines, terminated by end_marker."""
+        if not self._connected or not self._sock:
+            return None
+        try:
+            self._sock.sendall((command + "\n").encode("ascii"))
+            data = b""
+            while True:
+                chunk = self._sock.recv(4096)
+                if not chunk:
+                    self._connected = False
+                    return None
+                data += chunk
+                if (end_marker + "\n").encode() in data:
+                    break
+            return data.decode("ascii", errors="replace")
+        except (OSError, TimeoutError) as e:
+            logger.warning(f"DLL bridge error: {e}")
+            self.disconnect()
+            return None
+
+    def enum_windows(self) -> Optional[str]:
+        """Enumerate all child windows of MMMAIN. Returns raw text dump."""
+        return self._cmd_multiline("ENUMWIN", "END")
+
     def ping(self) -> bool:
         resp = self._cmd("PING")
         return resp == "PONG"
@@ -92,6 +117,11 @@ class DLLBridge:
             logger.info(f"DLL bridge base set to 0x{base_addr:08X}")
             return True
         return False
+
+    def set_ports(self, proxy_port: int, web_port: int) -> bool:
+        """Tell the DLL what ports the proxy and web client are on."""
+        resp = self._cmd(f"SETPORTS {proxy_port} {web_port}")
+        return resp is not None and resp.startswith("OK")
 
     def read_i32(self, offset: int) -> Optional[int]:
         """Read a signed 32-bit int at struct offset."""
@@ -169,3 +199,40 @@ class DLLBridge:
         """Send BM_CLICK to a button in a dialog."""
         resp = self._cmd(f"CLICK {parent_class} {ctrl_id}")
         return resp is not None and resp.startswith("OK")
+
+    def round_tick(self, round_num: int) -> bool:
+        """Notify DLL of a combat round tick for the round timer widget."""
+        resp = self._cmd(f"ROUNDTICK {round_num}")
+        return resp is not None and resp.startswith("OK")
+
+    def combat_end(self) -> bool:
+        """Notify DLL that combat has ended."""
+        resp = self._cmd("COMBATEND")
+        return resp is not None and resp.startswith("OK")
+
+    def set_theme(self, theme: str) -> bool:
+        """Set the DLL widget theme by index or name prefix."""
+        resp = self._cmd(f"SETTHEME {theme}")
+        return resp is not None and resp.startswith("OK")
+
+    def snap(self, offset: int, size: int = 256) -> Optional[str]:
+        """Memory snapshot/diff. First call = snapshot (OK), second call = diff."""
+        if not self._connected or not self._sock:
+            return None
+        try:
+            cmd = f"SNAP {offset:X} {size}\n"
+            self._sock.sendall(cmd.encode("ascii"))
+            data = b""
+            while True:
+                chunk = self._sock.recv(4096)
+                if not chunk:
+                    self._connected = False
+                    return None
+                data += chunk
+                text = data.decode("ascii", errors="replace")
+                if "END\n" in text or (text.startswith("OK") and "\n" in text):
+                    return text.strip()
+        except (OSError, TimeoutError) as e:
+            logger.warning(f"DLL bridge error: {e}")
+            self.disconnect()
+            return None

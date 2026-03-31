@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, Form, Request
-from fastapi.responses import Response, HTMLResponse, JSONResponse
+from fastapi.responses import Response, HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
 from event_bus import EventBus
@@ -187,6 +187,20 @@ def create_app(orchestrator: Orchestrator, event_bus: EventBus, slop: SlopLoader
             return JSONResponse({"type": "item", "data": item})
         return Response(status_code=404)
 
+    @app.get("/api/spells/lookup/{short}")
+    async def spell_lookup(short: str):
+        """Look up a spell by 4-letter abbreviation."""
+        spell = orchestrator.gamedata.get_spell_by_short(short)
+        if spell:
+            return JSONResponse(spell)
+        return Response(status_code=404)
+
+    @app.get("/api/spells/buffs")
+    async def spell_buffs():
+        """Get all buff spells (duration > 0)."""
+        buffs = orchestrator.gamedata.get_all_buff_spells()
+        return JSONResponse({"spells": buffs})
+
     @app.get("/api/slop/stats")
     async def slop_stats():
         return JSONResponse(slop.get_stats())
@@ -320,6 +334,29 @@ def create_app(orchestrator: Orchestrator, event_bus: EventBus, slop: SlopLoader
         name = orchestrator._char_name or None
         ok = orchestrator.mem_reader.attach(name)
         return JSONResponse({"attached": ok})
+
+    @app.get("/api/dll/enumwin")
+    async def dll_enumwin():
+        """Enumerate all child windows of MegaMUD's MMMAIN window."""
+        dll = orchestrator.mem_reader._dll
+        if not dll.connected:
+            return PlainTextResponse("DLL bridge not connected", status_code=503)
+        result = dll.enum_windows()
+        if result is None:
+            return PlainTextResponse("ENUMWIN failed", status_code=500)
+        return PlainTextResponse(result)
+
+    @app.get("/api/dll/snap")
+    async def dll_snap(offset: str = "5600", size: int = 512):
+        """Memory snapshot/diff. Call once to snapshot, again to see changes."""
+        dll = orchestrator.mem_reader._dll
+        if not dll.connected:
+            return PlainTextResponse("DLL bridge not connected", status_code=503)
+        off = int(offset, 16)
+        result = dll.snap(off, size)
+        if result is None:
+            return PlainTextResponse("SNAP failed", status_code=500)
+        return PlainTextResponse(result)
 
     @app.post("/api/mem/goto")
     async def mem_goto(request: Request):

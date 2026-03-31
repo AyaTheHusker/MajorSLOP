@@ -95,6 +95,11 @@ class MudTerminal {
         title.className = 'mud-terminal-title';
         title.textContent = 'Terminal';
 
+        const locSpan = document.createElement('span');
+        locSpan.className = 'mud-terminal-location';
+        locSpan.id = 'terminal-rm-location';
+        locSpan.style.cssText = 'margin-left:12px;color:#888;font-size:0.85em;';
+
         const controls = document.createElement('div');
         controls.className = 'mud-terminal-controls';
 
@@ -217,13 +222,73 @@ class MudTerminal {
         document.addEventListener('click', () => { fxMenu.style.display = 'none'; });
         fxBtn.appendChild(fxMenu);
 
+        // ANSI weight dropdown (Original / All Bold / All Thin)
+        this._ansiWeight = localStorage.getItem('ansiWeight') || 'bold';
+        const weightBtn = document.createElement('span');
+        weightBtn.className = 'mud-terminal-btn weight-btn';
+        weightBtn.title = 'ANSI text weight';
+        const weightLabel = document.createElement('span');
+        weightLabel.textContent = this._ansiWeight === 'original' ? 'ANSI' :
+            this._ansiWeight === 'bold' ? 'BOLD' : 'THIN';
+        weightBtn.appendChild(weightLabel);
+        const weightMenu = document.createElement('div');
+        weightMenu.className = 'grad-scheme-menu';
+        weightMenu.style.display = 'none';
+        for (const [key, label, desc] of [
+            ['original', 'Original', 'Use ANSI bold/normal as sent by game'],
+            ['bold', 'All Bold', 'Force all text bold (uniform thick)'],
+            ['thin', 'All Thin', 'Force all text normal weight (uniform thin)'],
+        ]) {
+            const opt = document.createElement('div');
+            opt.className = 'grad-scheme-opt' + (key === this._ansiWeight ? ' active' : '');
+            opt.dataset.weight = key;
+            opt.innerHTML = `<span class="grad-scheme-name">${label}</span><span class="grad-scheme-desc">${desc}</span>`;
+            opt.addEventListener('click', (e) => {
+                e.stopPropagation();
+                this._ansiWeight = key;
+                localStorage.setItem('ansiWeight', key);
+                weightMenu.style.display = 'none';
+                for (const o of weightMenu.querySelectorAll('.grad-scheme-opt')) {
+                    o.classList.toggle('active', o.dataset.weight === key);
+                }
+                weightLabel.textContent = key === 'original' ? 'ANSI' :
+                    key === 'bold' ? 'BOLD' : 'THIN';
+                this._applyAnsiWeight();
+            });
+            weightMenu.appendChild(opt);
+        }
+        weightBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            weightMenu.style.display = weightMenu.style.display === 'none' ? 'block' : 'none';
+        });
+        document.addEventListener('click', () => { weightMenu.style.display = 'none'; });
+        weightBtn.appendChild(weightMenu);
+
+        // Text shadow checkbox (experimental)
+        const shadowLabel = document.createElement('label');
+        shadowLabel.className = 'mud-terminal-shadow-label';
+        shadowLabel.title = 'Text shadow (experimental)';
+        const shadowCheck = document.createElement('input');
+        shadowCheck.type = 'checkbox';
+        shadowCheck.checked = this._ansiGradient.shadowEnabled;
+        shadowCheck.addEventListener('change', () => {
+            this._ansiGradient.shadowEnabled = shadowCheck.checked;
+            this._applyTextShadow(shadowCheck.checked);
+        });
+        shadowLabel.appendChild(shadowCheck);
+        shadowLabel.appendChild(document.createTextNode(' Shadow'));
+        this._shadowCheck = shadowCheck;
+
         controls.appendChild(gradBtn);
+        controls.appendChild(weightBtn);
         controls.appendChild(fxBtn);
+        controls.appendChild(shadowLabel);
         controls.appendChild(opSlider);
         controls.appendChild(modeBtn);
         controls.appendChild(lockBtn);
         controls.appendChild(closeBtn);
         header.appendChild(title);
+        header.appendChild(locSpan);
         header.appendChild(controls);
         panel.appendChild(header);
 
@@ -404,6 +469,35 @@ class MudTerminal {
         }
     }
 
+    _applyAnsiWeight() {
+        if (!this._term) return;
+        if (this._ansiWeight === 'bold') {
+            // Force bold: set normal weight to bold, bold stays bold
+            this._term.options.fontWeight = 'bold';
+            this._term.options.fontWeightBold = 'bold';
+        } else if (this._ansiWeight === 'thin') {
+            // Force thin: set both to normal
+            this._term.options.fontWeight = 'normal';
+            this._term.options.fontWeightBold = 'normal';
+        } else {
+            // Original: normal weight for normal text, bold for bold
+            this._term.options.fontWeight = 'normal';
+            this._term.options.fontWeightBold = 'bold';
+        }
+        // Refit to recalculate char metrics after weight change
+        if (this._fitAddon) {
+            setTimeout(() => this._fitAddon.fit(), 10);
+        }
+    }
+
+    _applyTextShadow(enabled) {
+        // xterm renders text to canvas, so CSS text-shadow doesn't apply directly.
+        // Instead we add a CSS class that applies a drop-shadow filter to the text canvas layer.
+        if (this._termContainer) {
+            this._termContainer.classList.toggle('text-shadow-on', enabled);
+        }
+    }
+
     _initXterm() {
         if (this._term) return;
 
@@ -411,7 +505,7 @@ class MudTerminal {
             cursorBlink: true,
             cursorStyle: 'underline',
             disableStdin: false,
-            scrollback: 10000,
+            scrollback: 0,  // no scroll — use Alt+B backscroll popup instead
             fontSize: 13,
             fontFamily: "'Cascadia Code', 'Fira Code', 'Consolas', monospace",
             theme: {
@@ -459,6 +553,14 @@ class MudTerminal {
         if (this._opacity != null) {
             setTimeout(() => this._applyOpacity(this._opacity), 50);
         }
+
+        // Apply text shadow if enabled
+        if (this._ansiGradient.shadowEnabled) {
+            setTimeout(() => this._applyTextShadow(true), 50);
+        }
+
+        // Apply ANSI weight mode
+        setTimeout(() => this._applyAnsiWeight(), 50);
 
         // Replay buffer
         for (const chunk of this._buffer) {
@@ -797,8 +899,9 @@ class MudTerminal {
             let newLeft = origLeft + dx;
             let newTop = origTop + dy;
             const rect = this._el.getBoundingClientRect();
-            const headerH = 32; // approximate header height
-            newTop = Math.max(0, Math.min(newTop, window.innerHeight - headerH));
+            const topBarH = 40; // height of top bar — panels must stay below
+            const headerH = 32; // panel's own header height
+            newTop = Math.max(topBarH, Math.min(newTop, window.innerHeight - headerH));
             newLeft = Math.max(-rect.width + 80, Math.min(newLeft, window.innerWidth - 80));
             this._el.style.left = `${newLeft}px`;
             this._el.style.top = `${newTop}px`;
@@ -892,11 +995,12 @@ class MudTerminal {
                 }
                 if (s.visible) this.toggle(true);
             }
-            // Clamp position to keep header on screen
+            // Clamp position to keep header accessible (below top bar, on screen)
             requestAnimationFrame(() => {
                 const r = this._el.getBoundingClientRect();
+                const topBarH = 40;
                 let changed = false;
-                if (r.top < 0) { this._el.style.top = '0px'; changed = true; }
+                if (r.top < topBarH) { this._el.style.top = topBarH + 'px'; changed = true; }
                 if (r.top > window.innerHeight - 32) { this._el.style.top = (window.innerHeight - 32) + 'px'; changed = true; }
                 if (r.left > window.innerWidth - 80) { this._el.style.left = (window.innerWidth - 80) + 'px'; changed = true; }
                 if (r.right < 80) { this._el.style.left = (-r.width + 80) + 'px'; changed = true; }

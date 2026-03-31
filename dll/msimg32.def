@@ -1,3 +1,7 @@
 LIBRARY MSIMG32
 EXPORTS
     AlphaBlend=proxy_AlphaBlend @1
+    DllInitialize=proxy_DllInitialize @2
+    GradientFill=proxy_GradientFill @3
+    TransparentBlt=proxy_TransparentBlt @4
+    vSetDdrawflag=proxy_vSetDdrawflag @5

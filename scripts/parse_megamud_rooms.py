@@ -143,6 +143,11 @@ def scan_mp_files(mp_dir: Path) -> tuple[list[dict], list[dict]]:
                     end_category = rparts2[1]
                     end_name = rparts2[2]
 
+            # Skip unnamed .mp files — those are routing segments MegaMUD
+            # chains together for pathfinding, not user-visible loops/paths
+            if not name:
+                continue
+
             entry = {
                 "file": mp.stem,
                 "name": name,
@@ -154,7 +159,6 @@ def scan_mp_files(mp_dir: Path) -> tuple[list[dict], list[dict]]:
                 "end_hash": end_hash,
                 "steps": step_count,
             }
-            # All .mp files go in both lists — MegaMUD shows all in its loop dialog
             loops.append(entry)
             if start_hash != end_hash:
                 paths.append(entry)

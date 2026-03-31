@@ -298,7 +298,7 @@ class ChatPanel {
             const dy = e.clientY - startY;
             const r = this._el.getBoundingClientRect();
             let nl = origLeft + dx, nt = origTop + dy;
-            nt = Math.max(0, Math.min(nt, window.innerHeight - 32));
+            nt = Math.max(40, Math.min(nt, window.innerHeight - 32));
             nl = Math.max(-r.width + 80, Math.min(nl, window.innerWidth - 80));
             this._el.style.left = `${nl}px`;
             this._el.style.top = `${nt}px`;

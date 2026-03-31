@@ -49,6 +49,7 @@ IS_MEDITATING = 0x567C        # int32 - player is meditating
 IS_SNEAKING = 0x5688          # int32 - player is sneaking
 IS_HIDING = 0x5690            # int32 - player is hiding
 IN_COMBAT = 0x5698            # int32 - player is in combat
+COMBAT_TARGET = 0x552C        # char[] - current combat target name (full, with size prefix like "small", "fierce")
 BACKTRACK_ROOMS = 0x358C      # int32 - rooms to backtrack
 RUN_AWAY_ROOMS = 0x5508       # int32 - rooms to run away
 ROOM_DARKNESS = 0x5528        # int32 - 0=normal, 2=dark, 3=pitch black

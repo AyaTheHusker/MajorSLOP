@@ -1,0 +1,186 @@
+/*
+ * slop_plugin.h — MajorSLOP Plugin SDK
+ * =====================================
+ *
+ * Include this header in your plugin DLL to interface with MajorSLOP.
+ *
+ * QUICK START:
+ *   1. #include "slop_plugin.h"
+ *   2. Define your plugin descriptor (slop_plugin_t)
+ *   3. Export slop_get_plugin() returning a pointer to it
+ *   4. Compile as 32-bit DLL, drop into MegaMUD/plugins/
+ *
+ * BUILD (MinGW):
+ *   i686-w64-mingw32-gcc -shared -o my_plugin.dll my_plugin.c -lgdi32 -luser32
+ *
+ * EXAMPLE:
+ *   See bottom of this file for a minimal plugin template.
+ *
+ * The magic value SLOP_PLUGIN_MAGIC must match or MajorSLOP will refuse
+ * to load the DLL. This prevents random DLLs from being dropped in.
+ */
+
+#ifndef SLOP_PLUGIN_H
+#define SLOP_PLUGIN_H
+
+#include <windows.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* ---- Magic & Version ---- */
+
+/*
+ * "SL0P" in little-endian: 0x50304C53
+ * Plugin must set descriptor->magic to this exact value.
+ */
+#define SLOP_PLUGIN_MAGIC    0x50304C53u
+#define SLOP_API_VERSION     1
+
+/* ---- API provided by MajorSLOP to plugins ---- */
+
+typedef struct slop_api {
+    unsigned int    api_version;        /* SLOP_API_VERSION */
+
+    /* Logging — writes to MajorSLOP's log file */
+    void          (*log)(const char *fmt, ...);
+
+    /* MMANSI terminal access */
+    HWND          (*get_mmansi_hwnd)(void);         /* MMANSI child window */
+    int           (*read_terminal_row)(int row, char *out, int out_sz);
+    int             terminal_rows;                  /* max rows (60) */
+    int             terminal_cols;                  /* max cols (132) */
+
+    /* MegaMUD window handles */
+    HWND          (*get_mmmain_hwnd)(void);         /* MMMAIN parent window */
+
+    /* Game struct memory access */
+    unsigned int  (*get_struct_base)(void);          /* base addr of player struct, 0 if not found */
+    int           (*read_struct_i32)(unsigned int offset);   /* read i32 at struct_base + offset */
+    int           (*read_struct_i16)(unsigned int offset);   /* read i16 at struct_base + offset */
+
+    /* Command injection — types text into MMANSI terminal */
+    void          (*inject_text)(const char *text);  /* sends each char via WM_CHAR */
+    void          (*inject_command)(const char *cmd); /* inject_text(cmd) + Enter */
+
+    /* Menu integration — returns menu item ID, 0 on failure */
+    int           (*add_menu_item)(const char *label, unsigned int id);
+    int           (*add_menu_separator)(void);
+
+    /* Round timer events — register callbacks (NULL to unregister) */
+    void          (*on_round_tick)(void (*callback)(int round_num));
+    void          (*on_terminal_line)(void (*callback)(const char *line));
+
+    /* Reserved for future expansion */
+    void          *_reserved[8];
+} slop_api_t;
+
+
+/* ---- Plugin descriptor ---- */
+
+typedef struct slop_plugin {
+    unsigned int    magic;          /* MUST be SLOP_PLUGIN_MAGIC */
+    unsigned int    api_version;    /* MUST be SLOP_API_VERSION */
+    const char     *name;           /* short plugin name, e.g. "Vulkan Overlay" */
+    const char     *author;         /* author name */
+    const char     *description;    /* one-line description */
+    const char     *version;        /* version string, e.g. "1.0.0" */
+
+    /* Called after loading — return 0 for success, nonzero to abort */
+    int           (*init)(const slop_api_t *api);
+
+    /* Called on DLL unload / MegaMUD exit */
+    void          (*shutdown)(void);
+
+    /* Optional: called on every new terminal line (NULL if unused) */
+    void          (*on_line)(const char *line);
+
+    /* Optional: called on each combat round tick (NULL if unused) */
+    void          (*on_round)(int round_num);
+
+    /* Optional: WndProc hook — return non-zero if handled (NULL if unused) */
+    int           (*on_wndproc)(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
+
+    /* Reserved for future expansion */
+    void          *_reserved[4];
+} slop_plugin_t;
+
+
+/* ---- Export macro ---- */
+
+/*
+ * Every plugin MUST export this function.
+ * MajorSLOP calls it to get the plugin descriptor.
+ */
+#define SLOP_EXPORT __declspec(dllexport)
+
+/* Use this in your plugin:
+ *   SLOP_EXPORT slop_plugin_t *slop_get_plugin(void) { return &my_plugin; }
+ */
+typedef slop_plugin_t *(*slop_get_plugin_fn)(void);
+
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* SLOP_PLUGIN_H */
+
+
+/*
+ * =========================================================================
+ * MINIMAL PLUGIN TEMPLATE
+ * =========================================================================
+ *
+ * Copy-paste this into a new .c file to get started:
+ *
+ *   #include "slop_plugin.h"
+ *
+ *   static const slop_api_t *g_api = NULL;
+ *
+ *   static int my_init(const slop_api_t *api) {
+ *       g_api = api;
+ *       api->log("[my_plugin] Loaded!\n");
+ *       return 0;  // success
+ *   }
+ *
+ *   static void my_shutdown(void) {
+ *       if (g_api) g_api->log("[my_plugin] Unloaded.\n");
+ *   }
+ *
+ *   static void my_on_line(const char *line) {
+ *       // Called for every terminal line — parse triggers here
+ *   }
+ *
+ *   static slop_plugin_t my_plugin = {
+ *       .magic       = SLOP_PLUGIN_MAGIC,
+ *       .api_version = SLOP_API_VERSION,
+ *       .name        = "My Plugin",
+ *       .author      = "YourName",
+ *       .description = "Does cool stuff",
+ *       .version     = "1.0.0",
+ *       .init        = my_init,
+ *       .shutdown    = my_shutdown,
+ *       .on_line     = my_on_line,
+ *       .on_round    = NULL,
+ *       .on_wndproc  = NULL,
+ *   };
+ *
+ *   SLOP_EXPORT slop_plugin_t *slop_get_plugin(void) {
+ *       return &my_plugin;
+ *   }
+ *
+ *   BOOL WINAPI DllMain(HINSTANCE h, DWORD r, LPVOID p) {
+ *       return TRUE;
+ *   }
+ *
+ * Build:
+ *   i686-w64-mingw32-gcc -shared -o my_plugin.dll my_plugin.c -lgdi32 -luser32
+ *
+ * Install:
+ *   Copy my_plugin.dll to MegaMUD/plugins/
+ *   Restart MegaMUD — check MajorSLOP > Plugins...
+ *
+ * =========================================================================
+ */

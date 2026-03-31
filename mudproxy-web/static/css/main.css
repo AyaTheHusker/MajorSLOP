@@ -1703,7 +1703,7 @@ button:hover { background: #5555dd; }
 
 /* FX palette menu */
 /* GRAD and FX buttons — bigger, spaced */
-.grad-btn, .fx-btn {
+.grad-btn, .fx-btn, .weight-btn {
     position: relative;
     font-weight: 700;
     font-size: 11px !important;
@@ -1717,6 +1717,10 @@ button:hover { background: #5555dd; }
 .grad-btn:hover { border-color: #cc88ee; }
 .fx-btn { color: #88aacc !important; }
 .fx-btn:hover { border-color: #88aacc; }
+.weight-btn { color: #aaccaa !important; }
+.weight-btn:hover { border-color: #aaccaa; }
+
+/* ANSI weight mode label styling handled via xterm API (canvas rendering) */
 
 /* ANSI Gradient scheme menu */
 .grad-scheme-menu {
@@ -1749,6 +1753,37 @@ button:hover { background: #5555dd; }
 .grad-scheme-name { font-weight: 600; }
 .grad-scheme-desc { font-size: 10px; color: #888; font-style: italic; }
 .grad-scheme-opt:hover .grad-scheme-desc { color: #aaa; }
+
+/* Shadow checkbox label */
+.mud-terminal-shadow-label {
+    font-size: 10px;
+    color: #888;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 3px;
+    margin: 0 4px;
+    user-select: none;
+    white-space: nowrap;
+}
+.mud-terminal-shadow-label:hover { color: #bbb; }
+.mud-terminal-shadow-label input[type="checkbox"] {
+    width: 12px;
+    height: 12px;
+    margin: 0;
+    accent-color: #cc88ee;
+    cursor: pointer;
+}
+
+/* Text shadow on xterm canvas — dual dark+light outline for readability
+   over dynamic 3D/2D room backgrounds behind the semi-transparent terminal.
+   Dark outline for light scenes, light glow for dark scenes. */
+.mud-terminal-body.text-shadow-on canvas {
+    filter: drop-shadow(0 0 1px rgba(0,0,0,0.9))
+            drop-shadow(0 0 2px rgba(0,0,0,0.6))
+            drop-shadow(0 0 1px rgba(255,255,255,0.15))
+            drop-shadow(0 0 4px rgba(0,0,0,0.3));
+}
 
 /* FX palette menu */
 .fx-palette-menu {
@@ -2768,4 +2803,262 @@ button:hover { background: #5555dd; }
     display: block;
     width: 100%;
     height: 90px;
+}
+
+/* ── Bless Panel ── */
+.bless-panel {
+    position: fixed;
+    top: 120px;
+    left: 60px;
+    width: 380px;
+    max-height: 80vh;
+    display: flex;
+    flex-direction: column;
+    background: var(--panel-grad);
+    border: var(--panel-border);
+    border-radius: 8px;
+    box-shadow: 0 4px 24px rgba(0,0,0,0.7);
+    backdrop-filter: blur(16px);
+    z-index: 500;
+    overflow: hidden;
+    user-select: none;
+}
+.bless-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    background: var(--header-grad);
+    padding: 6px 10px;
+    cursor: grab;
+    border-bottom: var(--panel-border);
+}
+.bless-title {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text);
+    letter-spacing: 0.5px;
+}
+.bless-controls {
+    display: flex;
+    gap: 6px;
+}
+.bless-btn {
+    cursor: pointer;
+    opacity: 0.6;
+    transition: opacity 0.15s;
+    font-size: 13px;
+}
+.bless-btn:hover { opacity: 1; }
+
+/* Settings bar */
+.bless-settings-bar {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 10px;
+    background: rgba(0,0,0,0.15);
+    border-bottom: 1px solid rgba(80,80,140,0.15);
+    font-size: 11px;
+}
+.bless-flag {
+    padding: 2px 6px;
+    border-radius: 3px;
+    background: rgba(60,60,100,0.3);
+    color: var(--text-dim);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+.bless-flag.active {
+    background: rgba(34,170,68,0.25);
+    color: var(--hp-green);
+    border: 1px solid rgba(34,170,68,0.3);
+}
+.bless-mana-pct {
+    margin-left: auto;
+    color: var(--mana-blue);
+    font-size: 11px;
+}
+
+/* Scrollable body */
+.bless-body {
+    flex: 1;
+    overflow-y: auto;
+    overflow-x: hidden;
+    padding: 4px 0;
+    scrollbar-width: thin;
+    scrollbar-color: rgba(80,80,140,0.3) transparent;
+}
+
+/* Section labels */
+.bless-section-label {
+    padding: 4px 10px 2px;
+    font-size: 10px;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 1px;
+}
+
+/* Individual slot */
+.bless-slot {
+    margin: 1px 4px;
+    border-radius: 4px;
+    background: rgba(20,20,40,0.3);
+    border: 1px solid rgba(80,80,140,0.1);
+    transition: background 0.15s;
+}
+.bless-slot:hover {
+    background: rgba(30,30,60,0.4);
+}
+.bless-slot.empty .bless-slot-header {
+    opacity: 0.4;
+}
+
+/* Slot header */
+.bless-slot-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 8px;
+    cursor: pointer;
+    font-size: 12px;
+}
+.bless-expand-arrow {
+    font-size: 9px;
+    color: var(--text-dim);
+    width: 12px;
+    text-align: center;
+}
+.bless-slot-num {
+    color: var(--text-dim);
+    font-size: 10px;
+    min-width: 20px;
+}
+.bless-slot-name {
+    flex: 1;
+    color: var(--text);
+    font-weight: 500;
+    text-transform: capitalize;
+}
+.bless-slot-name.dim {
+    color: var(--text-dim);
+    font-weight: 400;
+    font-style: italic;
+}
+.bless-slot-short {
+    color: var(--text-dim);
+    font-weight: 400;
+    font-size: 11px;
+}
+.bless-slot-info {
+    font-size: 10px;
+    color: var(--mana-blue);
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+.bless-override-badge {
+    font-size: 9px;
+    padding: 1px 4px;
+    border-radius: 3px;
+    background: rgba(170,68,204,0.25);
+    color: var(--xp-purple);
+    font-weight: 600;
+    margin-left: 4px;
+}
+
+/* Condition rack (expanded) */
+.bless-condition-rack {
+    padding: 6px 10px 8px 28px;
+    border-top: 1px solid rgba(80,80,140,0.1);
+    background: rgba(10,10,24,0.3);
+}
+.bless-cond-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 5px;
+    flex-wrap: wrap;
+}
+.bless-cond-label {
+    font-size: 10px;
+    color: var(--text-dim);
+    min-width: 80px;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+}
+.bless-cond-value {
+    font-size: 11px;
+    color: var(--text);
+    min-width: 36px;
+    text-align: right;
+}
+
+/* Mode buttons */
+.bless-mode-btn {
+    font-size: 10px;
+    padding: 2px 8px;
+    border: 1px solid rgba(80,80,140,0.2);
+    border-radius: 3px;
+    background: rgba(30,30,60,0.3);
+    color: var(--text-dim);
+    cursor: pointer;
+    transition: all 0.15s;
+}
+.bless-mode-btn:hover {
+    background: rgba(40,40,80,0.4);
+    color: var(--text);
+}
+.bless-mode-btn.active {
+    background: var(--accent);
+    color: #fff;
+    border-color: var(--accent);
+}
+
+/* Condition pills */
+.bless-cond-pill {
+    font-size: 10px;
+    padding: 2px 6px;
+    border-radius: 10px;
+    border: 1px solid rgba(80,80,140,0.2);
+    background: rgba(30,30,60,0.3);
+    color: var(--text-dim);
+    cursor: pointer;
+    transition: all 0.15s;
+}
+.bless-cond-pill:hover {
+    background: rgba(40,40,80,0.4);
+    color: var(--text);
+}
+.bless-cond-pill.active {
+    background: rgba(68,204,102,0.2);
+    color: var(--hp-green);
+    border-color: rgba(68,204,102,0.3);
+}
+
+/* Slider */
+.bless-slider {
+    flex: 1;
+    height: 4px;
+    -webkit-appearance: none;
+    appearance: none;
+    background: rgba(60,60,100,0.3);
+    border-radius: 2px;
+    outline: none;
+}
+.bless-slider::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: var(--accent);
+    cursor: pointer;
+}
+.bless-slider::-moz-range-thumb {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: var(--accent);
+    cursor: pointer;
+    border: none;
 }

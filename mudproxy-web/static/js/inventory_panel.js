@@ -607,7 +607,7 @@ class InventoryPanel {
             const r = this._el.getBoundingClientRect();
             let nl = origLeft + (e.clientX - startX);
             let nt = origTop + (e.clientY - startY);
-            nt = Math.max(0, Math.min(nt, window.innerHeight - 32));
+            nt = Math.max(40, Math.min(nt, window.innerHeight - 32));
             nl = Math.max(-r.width + 80, Math.min(nl, window.innerWidth - 80));
             this._el.style.left = `${nl}px`;
             this._el.style.top = `${nt}px`;

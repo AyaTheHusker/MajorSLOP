@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>MajorSLOP!</title>
-    <link rel="stylesheet" href="/static/css/main.css?v=18">
+    <link rel="stylesheet" href="/static/css/main.css?v=19">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5/css/xterm.css">
 </head>
 <body>
@@ -27,6 +27,7 @@
         <div class="header-right">
             <button id="btn-char" onclick="charPanel.toggle()" title="Character & Inventory">Char</button>
             <button id="btn-inv" onclick="inventoryPanel.toggle()" title="Inventory & Currency">Inv</button>
+            <button id="btn-bless" onclick="blessPanel.toggle()" title="Bless Slots & Smart Recast">Bless</button>
             <button id="btn-chat" onclick="chatPanel.toggle()" title="Chat Window">Chat</button>
             <button id="btn-terminal" onclick="mudTerminal.toggle()" title="MUD Terminal (ANSI)">Terminal</button>
         </div>
@@ -38,6 +39,7 @@
     <!-- Room name — centered under toolbar -->
     <div id="room-name-float">
         <span id="room-name">Not Connected</span>
+        <span id="rm-location" style="margin-left:12px;color:#888;font-size:0.85em;"></span>
     </div>
 
     <!-- Entity thumbnails (overlaid on room view) -->
@@ -86,10 +88,11 @@
     <script src="/static/js/view_menu.js?v=7"></script>
     <script src="/static/js/char_panel.js?v=7"></script>
     <script src="/static/js/chat_panel.js?v=7"></script>
-    <script src="/static/js/ansi_gradient.js?v=1"></script>
-    <script src="/static/js/mud_terminal.js?v=8"></script>
+    <script src="/static/js/ansi_gradient.js?v=3"></script>
+    <script src="/static/js/mud_terminal.js?v=9"></script>
     <script src="/static/js/nav_panel.js?v=8"></script>
     <script src="/static/js/inventory_panel.js?v=3"></script>
+    <script src="/static/js/bless_panel.js?v=1"></script>
     <script src="/static/js/exp_bar.js?v=1"></script>
     <script src="/static/js/round_timer.js?v=2"></script>
     <script src="/static/js/exp_meter.js?v=2"></script>
@@ -106,6 +109,7 @@
         const mudTerminal = new MudTerminal(sendCommand);
         const navPanel = new NavPanel((cmd, data) => sendCommand(cmd, data));
         const inventoryPanel = new InventoryPanel(sendCommand);
+        const blessPanel = new BlessPanel((cmd, data) => sendCommand(cmd, data));
         const expBar = new ExpBar();
         const roundTimer = new RoundTimer((cmd, data) => sendCommand(cmd, data));
         const expMeter = new ExpMeter();

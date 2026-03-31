@@ -905,87 +905,638 @@ This is NOT Microsoft Access MDB, NOT Btrieve — it's MegaMUD's own C-Index/II 
 
 ### File Locations
 
-| File | Location | Purpose |
-|---|---|---|
-| Rooms.md | `Default/` | Room checksums, names, exits |
-| Items.md | `Default/` | Item database |
-| Monsters.md | `Default/` | Monster/NPC database |
-| Spells.md | `Default/` | Spell database |
-| Classes.md | `Default/` | Class definitions |
-| Races.md | `Default/` | Race definitions |
-| Paths.md | `Default/` | Path/waypoint data |
-| Macros.md | `Default/` | Macro definitions |
-| Messages.md | `Default/` | Message templates |
-| Players.md | `BBS/<bbsname>/` | Per-BBS player database (inventories, stats) |
+| File | Location | Format | Purpose |
+|---|---|---|---|
+| Rooms.md | `Default/` | Text (NOT MDB2) | Room checksums, names, exits |
+| Items.md | `Default/` | MDB2 | Item database |
+| Monsters.md | `Default/` | MDB2 | Monster/NPC database |
+| Spells.md | `Default/` | MDB2 | Spell database |
+| Classes.md | `Default/` | MDB2 | Class definitions |
+| Races.md | `Default/` | MDB2 | Race definitions |
+| Paths.md | `Default/` | MDB2 | Path/waypoint data |
+| Macros.md | `Default/` | Text (NOT MDB2) | Macro definitions |
+| Messages.md | `Default/` | Text (NOT MDB2) | Message templates |
+| Players.md | `BBS/<bbsname>/` | MDB2 | Per-BBS player database (inventories, stats) |
 
-### MDB2 Header (0x400 bytes)
+### Page Structure
+
+All MDB2 files use a fixed **page size of 0x400 (1024) bytes**.
+Page 0 is the file header. Pages 1+ are either **data leaf pages** or **B-tree index pages**.
+
+### MDB2 Header (Page 0, 0x400 bytes)
 
 ```
 Offset  Type    Field
 0x00    char[4] Magic: "MDB2"
-0x04    u16     Version (2)
-0x06    u16     Number of fields (e.g. 50 for Players.md)
-0x08    u32     Unknown (possibly total data size or checksum)
-0x0C    u16     Number of records
-0x0E    u16     Unknown
-0x10    u32     Unknown (1 in Players.md)
-0x14    u32     Unknown
-0x18    u16     Record size in bytes (e.g. 0x1E4 = 484 for Players.md)
+0x04    u16     Version/type (varies per file: 2 for simple, 52-85 for complex)
+0x06    u16     Key size or field count (0x32=50 common for Items/Monsters/Players)
+0x08    u32     Unknown (checksum or data size descriptor)
+0x0C    u16     Number of active data records
+0x0E    u16     Unknown flags
+0x10    u32     Always 1
+0x14    u16     Total data pages = (file_size / 0x400) - 1  ← VERIFIED
+0x16    u16     Unknown (often mirrors 0x06)
+0x18    u16     Unknown (NOT record size — misleading in complex files)
 0x1A    u16     Unknown
 0x1C-   zeros   Padding to 0x400
 ```
 
-Data records begin at offset `0x400`. Records are fixed-size (`record_size` from header).
+**Verified across all files:** `u16 at 0x14` = total data pages = `(file_size / 1024) - 1`.
 
-### Players.md Record Structure (484 bytes per record)
+### Data Page Header (12 bytes)
 
-Records contain a `0xFE 0x01` marker at a variable position within the fixed-size
-record block. The marker offset varies because some records include index/overflow
-data before the player data. Records without an `0xFE 0x01` marker are index records
-containing references to other player names.
+Each data page begins with a 12-byte header:
 
-**Fields relative to `0xFE 0x01` marker:**
+```
+Offset  Type  Field
++0x00   u16   Page type: 0x0000 = data leaf, 0x0001 = B-tree index
++0x02   u16   Entry count in this page (e.g. 6 = 3 records for Players.md)
++0x04   u16   Free space offset or size indicator
++0x06   u16   Always 0
++0x08   u16   Page sequence number
++0x0A   u16   Previous/next page pointer (linked list, 0xFFFF = none)
+```
+
+Data records begin at offset +0x0C within the page (immediately after the header).
+
+### B-tree Index Pages
+
+Pages with type `0x0001` are B-tree internal nodes. They contain sorted lists of
+player name strings used for key lookup. Index pages do NOT contain `0xFE 0x01`
+data markers — they only hold name references for tree traversal.
+
+### Players.md Record Structure
+
+Player records are identified by a `0xFE 0x01` marker. Each data page typically
+holds 1-3 player records. Records are **variable-length** due to the first name
+field, but all subsequent fields are at **fixed offsets from `end_of_name1`**.
+
+#### Variable-Length Key: Name Field 1
+
+```
++0x00   2      Marker: 0xFE 0x01
++0x02   var    Name1: null-terminated ASCII + 5 padding bytes
+               Field size = strlen(name) + 6
+               Example: "Tripmunk" = 8 + 6 = 14 bytes
+```
+
+**CRITICAL:** `end_of_name1 = 0x02 + strlen(name) + 6`. ALL subsequent field
+offsets are relative to this value. A 5-char name shifts everything 3 bytes
+earlier than an 8-char name.
+
+#### Fixed Fields (relative to `end_of_name1`)
+
+```
+Offset  Size  Type   Field
++0x00   11    str    Name2 (display name copy, fixed 11 bytes = 10 chars max + null)
++0x0B   50    str    Surname/Title (fixed 50-byte buffer, null-terminated within)
++0x3D   var   str    Gang/Guild name (null-terminated within remaining buffer space)
+
++0x52   2     u16    Record type (4=has inventory+stats, 5=minimal, 6=partial, 7=WHO-only)
++0x54   2     u16    Flags (0x1000 = standard, 0x1002 = has inventory data)
++0x56   2     u16    Race ID (0=unknown, 1-13 = MajorMUD race)
++0x58   2     u16    Class ID (0=unknown, 1-13 = MajorMUD class)
++0x5A   2     u16    Unknown field (values 3-9)
++0x5C   2     u16    Unknown field (0 or 2)
++0x5E   2     u16    Level
++0x60   12    u16x6  Stats: STR, INT, WIL, AGI, HEA, CHA (values 0-110)
++0x6C   16    -      Padding (zeros)
+
++0x7C   4     u32    Timestamp 1 — Unix epoch (first seen or last WHO update)
++0x80   4     -      Padding (zeros)
++0x84   4     u32    Timestamp 2 — Unix epoch (last inventory/look update, 0 if never)
++0x88   12    -      Padding (zeros)
+
++0x94   8     -      Padding (zeros)
++0x9C   var   u16[]  Equipment item IDs (zero-terminated list, references Items.md)
+```
+
+#### Race ID Mapping
+
+| ID | Race | ID | Race |
+|---|---|---|---|
+| 0 | Unknown | 7 | Dark-Elf |
+| 1 | Human | 8 | Half-Orc |
+| 2 | Dwarf | 9 | Goblin |
+| 3 | Gnome | 10 | Half-Ogre |
+| 4 | Halfling | 11 | Kang |
+| 5 | Elf | 12 | Nekojin |
+| 6 | Half-Elf | 13 | Gaunt One |
+
+#### Class ID Mapping
+
+| ID | Class | ID | Class |
+|---|---|---|---|
+| 0 | Unknown | 7 | Bard |
+| 1 | Warrior | 8 | Missionary |
+| 2 | Witchunter | 9 | Ranger |
+| 3 | Cleric | 10 | Paladin |
+| 4 | Thief | 11 | Warlock |
+| 5 | Mage | 12 | Ninja |
+| 6 | Ganbusher | 13 | Druid |
+
+#### Verified Player Data Examples
+
+| Player | Race | Class | Level | Stats (S/I/W/A/H/C) | Items |
+|---|---|---|---|---|---|
+| Tripmunk | 4 Halfling | 9 Ranger | 16 | 60/90/50/40/50/70 | 18 items |
+| Amadeus | 10 Half-Ogre | 11 Warlock | 40 | 110/100/80/1/100/1 | 14 items |
+| Aries | 8 Half-Orc | 7 Bard | 30 | 90/90/60/40/90/80 | 12 items |
+| Cidir | 12 Nekojin | 9 Ranger | 50 | 110/100/40/30/70/100 | 6 items |
+| Francisco | 8 Half-Orc | 9 Ranger | 54 | 110/100/60/50/100/100 | 5 items |
+
+#### Data Completeness Signals
+
+- **race=0, class=0, level=1, all stats=0:** Never seen in WHO — truly unknown player
+- **race>0, class>0, level>0, stats=0:** Seen in WHO list but never LOOKed at
+- **flags=0x1002 + non-zero equipment:** Has inventory data from a LOOK command
+- **Default display:** MegaMUD shows race=7 (Dark-Elf), class=10 (Paladin) when
+  displaying unknown players — but stores 0/0 in the database. Dark-Elf Paladin
+  is an intentionally terrible build choice, so seeing it is a strong signal
+  that real data hasn't been collected.
+
+**NOT stored in Players.md:** Gender, hair color, eye color, hair length.
+Appearance data must come from parsing the BBS `look` output.
+
+### Items.md Record Structure
+
+**File:** `Default/Items.md` — 912 pages, 1,938 items
+**No FE01 markers** — records start directly with `[length_byte] 01 [key_string...]`
+
+#### Record Header (variable length)
 
 ```
 Offset  Size  Field
-+0x00   2     Marker: 0xFE 0x01
-+0x02   12    Name (null-padded ASCII)
-+0x0E   12    Name (duplicate, possibly display name)
-+0x1A   12    Surname/Title (null-padded, e.g. "GRRRRRRR", "Moonspawn", "Nicola")
-+0x26   36    Padding/unknown (mostly zeros)
-+0x4A   30    Gang/Guild name (null-padded, e.g. "Stoneheart Group V")
++0x00   1     Record length (total = length_byte + 1)
++0x01   1     0x01 marker
++0x02   var   Key string (item number as ASCII, null-terminated)
+        5     Null padding (terminator + 4 extra nulls)
+        1     0x80 marker (end of key region)
+        2     u16 LE item number (binary)
 ```
 
-**Structured data after gang name (offsets shift by ±2-4 bytes depending on
-string field alignment — exact field positions TBD):**
+Total header = `strlen(key) + 10` bytes. After header: **198-byte fixed payload**.
 
-The following fields appear in the `+0x60` to `+0xC6` range but alignment varies
-per record. Known value ranges observed:
+#### Payload: String Region (0x00–0x58, 89 bytes)
 
-| Candidate Field | Observed Values | Notes |
-|---|---|---|
-| Level | 5, 6, 7, 16, 30+ | Small integer, varies per player |
-| Race | 1-11 | MajorMUD race ID |
-| Class | 1-11 | MajorMUD class ID |
-| Stats (STR/AGI/INT/WIL/HEA/CHA) | 30-110 | Six stat values in sequence |
-| Timestamps | Large u32 values | Unix-ish timestamps (created, last seen) |
-| Equipment item IDs | u16 values | Item database references |
+| Offset | Size | Field |
+|--------|------|-------|
+| 0x00 | 30 | Item name (null-terminated, junk after null) |
+| 0x1E | 59 | Shop/location name where sold (null-terminated) |
 
-**NOT found in Players.md:** Gender, hair color, eye color, hair length.
-MegaMUD does not store appearance data — it only learns inventories from `look`.
-Portrait appearance data must come from parsing the BBS `look` output directly.
+#### Payload: Numeric Region (0x59–0xC5, 109 bytes)
 
-### Index Records
+All offsets relative to numeric region start (payload + 0x59).
 
-Some records in Players.md lack the `0xFE 0x01` marker and instead contain
-lists of player name references — these appear to be B-tree index nodes for
-the C-Index/II engine's search functionality.
+| Offset | Size | Field | Confidence |
+|--------|------|-------|------------|
+| +0x00 | u8 | **Item Type** (see type table below) | HIGH |
+| +0x02 | u16 | **Weight** (in tenths of a stone) | HIGH |
+| +0x04 | u32 | **Base Value** (sell price in copper) | HIGH |
+| +0x08 | u16 | **Flags 1** (0x0200 = magical) | MEDIUM |
+| +0x0A | u16 | **Flags 2** (0x4002 = quest item?) | LOW |
+| +0x0C | u16 | Unknown (usually 0 or 1) | LOW |
+| +0x0E | i16 | **Charges** (-1 = unlimited/permanent, 1 = single-use) | HIGH |
+| +0x10 | u16 | **Strength Requirement** | HIGH |
+| +0x12 | u16 | **Number of Damage Dice** | HIGH |
+| +0x14 | u16 | **Damage Die Size** (e.g. 3d12 = dice=3, size=12) | HIGH |
+| +0x16 | i16 | **Accuracy Modifier** (signed, neg = clumsy) | HIGH |
+| +0x18 | u16 | **Speed** (weapons: 3–11, armor: 32 standard) | HIGH |
+| +0x1A | u16 | **AC (Armor Class)** for armor | HIGH |
+| +0x1C | u16 | **DR (Damage Resistance)** for armor (0–100) | HIGH |
+| +0x1E | u16 | **Class Restriction ID 1** | MEDIUM |
+| +0x20 | u16 | **Class Restriction ID 2** | MEDIUM |
+| +0x22–+0x2A | u16[5] | Additional restriction/ability IDs | LOW |
+| +0x32 | i16 | Signed modifier (magical bonus?) | MEDIUM |
+| +0x34–+0x46 | 18 | Stat/ability modifier pairs | MEDIUM |
+| +0x60 | u32 | **Shop Buy Price** (42–128× base value) | HIGH |
+
+#### Item Type Values
+
+| Value | Type | Count |
+|-------|------|-------|
+| 0 | Armor/Clothing | 515 |
+| 1 | Weapon | 384 |
+| 3 | Edible/Usable | 488 |
+| 4 | Food? | 15 |
+| 5 | Light/Torch | 33 |
+| 7 | Key/Container | 88 |
+| 8 | Thrown/Ammo | 27 |
+| 9 | Scroll | 223 |
+| 10 | Potion/Drink | 150 |
+
+#### Verification
+
+| Item | # | Type | Weight | Value | Dice | Str | Speed | AC | DR |
+|------|---|------|--------|-------|------|-----|-------|----|----|
+| Longsword | 64 | 1 | 90 | 2400 | 3d12 | 45 | 5 | — | — |
+| Full Plate Corselet | 19 | 0 | 1500 | 50000 | — | — | — | 230 | 100 |
+| Scroll of Agony | 140 | 9 | 10 | 18750 | — | — | — | — | — |
+| Phoenix Feather | 1000 | 0 | 0 | 0 | — | — | — | — | — |
+
+### Races.md Record Structure
+
+**File:** `Default/Races.md` — 7 pages, 13 races
+**Record header:** Same format as Items — `[length] 01 [key] [nullpad] 80 [u16_id] [payload]`
+**Payload:** 85 bytes fixed per race
+
+#### Payload Fields
+
+| Offset | Size | Field | Verified |
+|--------|------|-------|----------|
+| +0x00 | 30 | Race name (null-terminated) | ✓ Human, Dwarf, Elf, Kang, etc. |
+| +0x1E | 6×u8 | **Min Stats**: STR, INT, WIL, AGI, HLT, CHM | ✓ Human=all 40, Half-Ogre=70/20/20/25/60/25 |
+| +0x24 | 6×u8 | **Max Stats**: STR, INT, WIL, AGI, HLT, CHM | ✓ Human=all 100, Half-Ogre=150/60/60/70/150/60 |
+| +0x2A | u8 | Flag (0xFF for Halfling, else 0x00) | ✓ |
+| +0x2B | u16 | **Magic Resistance** | ✓ Elf=45, Dwarf=30, Human=0 |
+| +0x2D | u16 | Racial ability ID 1 | — |
+| +0x2F | u16 | Racial ability ID 2 | — |
+| +0x31 | u16 | Racial ability ID 3 | — |
+| +0x33–0x40 | var | Additional ability data (sparse) | — |
+| +0x41–0x54 | var | Racial bonuses/modifiers (sparse) | — |
+
+#### Verified Race Data
+
+| # | Race | MinSTR | MaxSTR | MinINT | MaxINT | MR |
+|---|------|--------|--------|--------|--------|----|
+| 1 | Human | 40 | 100 | 40 | 100 | 0 |
+| 2 | Dwarf | 50 | 110 | 30 | 90 | 30 |
+| 5 | Elf | 35 | 90 | 50 | 120 | 45 |
+| 10 | Half-Ogre | 70 | 150 | 20 | 60 | 30 |
+| 11 | Kang | 55 | 120 | 30 | 90 | 35 |
+| 12 | Nekojin | 40 | 100 | 60 | 130 | 50 |
+| 13 | Gaunt One | 40 | 100 | 50 | 110 | 50 |
+
+### Classes.md Record Structure
+
+**File:** `Default/Classes.md` — 7 pages, 15 classes
+**Record header:** Same format as Items
+**Payload:** 79 bytes fixed per class
+
+#### Payload Fields
+
+| Offset | Size | Field | Verified |
+|--------|------|-------|----------|
+| +0x00 | 30 | Class name (null-terminated) | ✓ Warrior, Mage, Thief, etc. |
+| +0x1E | u16 | **Experience %** (100=normal, higher=harder) | ✓ Warrior=100, Thief=80, Ranger=250 |
+| +0x20 | u8 | **HP Per Level** | ✓ Warrior=6, Mage=3, Ranger=6 |
+| +0x21 | u8 | Unknown (secondary stat per level?) | — |
+| +0x22 | u8 | **Combat Level** (affects to-hit) | ✓ Warrior=10, Mage=6, Ninja=8 |
+| +0x23 | u8 | **Mana Per Level** | ✓ Mage=9, Priest=7, Warrior=8? |
+| +0x24 | u8 | Unknown | — |
+| +0x25 | u8 | Starting weapon/armor type 1 | — |
+| +0x26 | u8 | Starting weapon/armor type 2 | — |
+| +0x27 | u16[] | **Ability IDs** (variable-length list) | — |
+| ... | u16 | 0xFF9D (-99) sentinel = empty slot | ✓ |
+| +0x4E | u8 | End padding / trailing byte (0x20 = space) | ✓ |
+
+#### Verified Class Data
+
+| # | Class | Exp% | HP/Lvl | Combat | Abilities |
+|---|-------|------|--------|--------|-----------|
+| 1 | Warrior | 100 | 6 | 10 | basic combat |
+| 2 | Witchunter | 130 | 7 | 10 | MR+51, detect |
+| 5 | Priest | 140 | 3 | 6 | healing spells |
+| 7 | Ninja | 185 | 5 | 8 | stealth, combat |
+| 8 | Thief | 80 | 4 | 7 | lockpick, stealth |
+| 12 | Mage | 140 | 3 | 6 | offensive magic |
+| 14 | Ranger | 250 | 6 | 9 | nature + combat |
+| 15 | Mystic | 250 | 5 | 8 | martial arts + magic |
+
+### Monsters.md Record Structure
+
+**File:** `Default/Monsters.md` — 529 pages, 1,128 monsters
+**Record header:** Same format as Items
+**Payload:** 209 bytes fixed per monster
+
+#### Payload Fields
+
+Cross-referenced against MME (GMUD Explorer v2.1.1) for hydra(#589) and dwarven cleric(#417).
+
+| Offset | Size | Field | Confidence |
+|--------|------|-------|------------|
+| +0x00 | 30 | Monster name (null-terminated) | HIGH |
+| +0x1E | u8 | Unknown flag | LOW |
+| +0x1F | u8 | NPC flag (0x40 = NPC/humanoid) | MEDIUM |
+| +0x20 | u8 | Unknown | LOW |
+| +0x21 | u8 | Unknown | LOW |
+| +0x22 | u16 | **Type flags** (0x0440=combat mob, 0x0240=NPC, 0x0340=special) | MEDIUM |
+| +0x24–0x31 | 14 | Unknown/padding | LOW |
+| +0x32 | u8 | **Alignment** (0=neutral, 1=evil, 2=good) | MEDIUM |
+| +0x33 | u16 | **HP Regen** (HP restored per tick, ~30 sec) | HIGH ✓ hydra=360 (20% of 1800), cleric=20 (10% of 200) |
+| +0x35–0x36 | 2 | Padding/zeros | — |
+| +0x37 | u16 | **Hit Points** | HIGH ✓ hydra=1800, cleric=200 |
+| +0x39 | u16 | **Energy/Round** (usually 1000, 0 for invulnerable NPCs) | HIGH ✓ |
+| +0x3B | u16 | **Magic Resistance** | HIGH ✓ hydra=100, cleric=60 |
+| +0x3D | u16 | **Follow %** | HIGH ✓ hydra=100, cleric=70 |
+| +0x3F | u16 | **Armor Class** | HIGH ✓ hydra=65, cleric=50 |
+| +0x41 | u16 | **Damage Resistance** | HIGH ✓ hydra=20, cleric=3 |
+| +0x43 | u16 | **Charm Level** (999 = uncharmable) | HIGH ✓ hydra=999, cleric=40 |
+| +0x45 | u16 | **BS Defence** (backstab defense) | MEDIUM — hydra=20, cleric=24 |
+| +0x47 | u8 | Unknown (0-3) | LOW |
+| +0x48 | u8 | **Number of Attacks** (0=default 1 attack) | HIGH ✓ hydra=2, cleric=0(=1) |
+| +0x49 | u16 | **Game Limit** (max active in realm, 0=unlimited) | HIGH ✓ hydra=1, cleric=5 |
+| +0x4B–0x50 | 6 | **Spell/ability data** (see below) | MEDIUM |
+| +0x51–0x5A | 10 | **Item Drop IDs** (5 × u16 LE, references Items.md) | HIGH ✓ |
+| +0x5B–0x5F | 5 | **Drop Percentages** (5 × u8, 1-100% per item slot) | HIGH ✓ |
+| +0x60 | u16 | **Cash: Runic** (coin drops) | HIGH ✓ |
+| +0x62 | u16 | **Cash: Platinum** | HIGH ✓ |
+| +0x64 | u16 | **Cash: Gold** | HIGH ✓ cleric=10 (MME: "Cash up to 10 Gold") |
+| +0x66 | u16 | **Cash: Silver** | HIGH ✓ |
+| +0x68 | u16 | **Cash: Copper** | HIGH ✓ |
+| +0x6A–0x72 | 10 | **Ability Types [0–4]** (5 × u16, see ability table) | HIGH ✓ |
+| +0x74–0x7C | 10 | **Ability Params [0–4]** (5 × u16, paired with types) | HIGH ✓ |
+| +0x7E | u16 | **Weapon Number** (references Items.md, 0=natural) | HIGH ✓ cleric=869 (dwarven hammer) |
+| +0x80–0x88 | 10 | **Between-Rounds Spell IDs [0–4]** (5 × u16, refs Spells.md) | HIGH ✓ |
+| +0x8A–0x91 | 8 | **Extended spell/hit data** (partially decoded) | LOW |
+| +0x92 | u32 | **Experience** | HIGH ✓ cleric=150, hydra=1,350,000 |
+| +0x96–0x9A | 5 | **Between-Rounds Cast % [0–4]** (u8 cumulative, see section) | HIGH ✓ |
+| +0x9B–0x9D | 3 | **Between-Rounds Cast Level [0–2]** (u8, spell level) | MEDIUM |
+| +0x9E | u16 | **Attack Min Damage [0]** (editable copy, 95% matches WCC) | HIGH ✓ hydra=100, cleric=4 |
+| +0xA0 | u16 | **Attack Min Damage [0]** (baseline copy, 99% matches WCC) | HIGH ✓ |
+| +0xA2 | u16 | **Attack Min Damage [1]** | HIGH ✓ hydra=50 |
+| +0xA4 | u16 | **Attack Min Damage [2]** | HIGH ✓ |
+| +0xA6 | u16 | **Attack Min Damage [3]** | HIGH ✓ |
+| +0xA8 | u16 | **Attack Min Damage [4]** | HIGH ✓ |
+| +0xAA | u16 | **Attack Max Damage [0]** | HIGH ✓ hydra=250, cleric=16 |
+| +0xAC | u16 | **Attack Max Damage [1]** | HIGH ✓ hydra=100 |
+| +0xAE | u16 | **Attack Max Damage [2]** | HIGH ✓ |
+| +0xB0 | u16 | **Attack Max Damage [3]** | HIGH ✓ |
+| +0xB2 | u16 | **Attack Max Damage [4]** | HIGH ✓ |
+| +0xB4 | u16 | **Attack Energy [0]** (cost per swing, out of 1000/round) | HIGH ✓ hydra=500, cleric=333 |
+| +0xB6 | u16 | **Attack Energy [1]** | HIGH ✓ hydra=500 |
+| +0xB8 | u16 | **Attack Energy [2]** | HIGH ✓ |
+| +0xBA | u16 | **Attack Energy [3]** | HIGH ✓ |
+| +0xBC | u16 | **Attack Energy [4]** | HIGH ✓ |
+| +0xBE–0xBF | 2 | Unknown | LOW |
+| +0xC0 | u16 | **Create Spell** (spell cast on spawn/creation) | MEDIUM ✓ hydra=90 (hydra head create) |
+| +0xC2–0xC6 | 5 | Unknown | LOW |
+| +0xC7 | u8 | **Undead Flag** (1=undead, 0=living) | HIGH ✓ |
+| +0xC8 | u16 | **Attack Hit Spell** (spell cast on successful melee hit) | MEDIUM |
+| +0xCA–0xCD | 4 | Padding | — |
+| +0xCE | u16 | Unknown (0–9999, possibly GroupExp or CombatValue) | LOW |
+
+**Note:** MDB2 stores 5 attack slots (matching WCC) and 5 item drop slots (WCC supports 10 drops).
+
+#### Ability Array (+0x6A–0x7C) — DECODED
+
+5 paired slots: type at +0x6A+n*2, param at +0x74+n*2. Types from WCC AbilityA/AbilityB
+system, names confirmed from MME source (`GetAbilityName()` in modMMudFunc.bas):
+
+| Type | Name | Param meaning | Freq |
+|------|------|---------------|------|
+| 3 | Resist-Cold | +N resistance | 155 |
+| 5 | Resist-Fire | +N resistance | 174 |
+| 9 | Shadow | Flag (+10 AC flat, single source, doesn't stack) | — |
+| 12 | Summon | Monster ID to summon | — |
+| 21 | ImmuPoison | Flag | 243 |
+| 28 | Magical | +N (weapon enchantment level to hit) | 376 |
+| 34 | Dodge | +N dodge bonus | 169 |
+| 57 | SeeHidden | Flag (sees sneaking/hidden players) | 195 |
+| 65 | Resist-Stone | +N resistance | — |
+| 66 | Resist-Lightning | +N resistance | — |
+| 78 | Animal | Flag (affected by animal-targeting spells) | 175 |
+| 109 | NonLiving | Flag (immune to living-only effects) | 189 |
+| 139 | SpellImmu | +N spell immunity rating | 398 |
+| **146** | **MonsGuards** | **Monster ID that guards this monster** | **161** |
+| 147 | Resist-Water | +N resistance | — |
+| 185 | NoAttackIfItemNum | Item ID (won't attack if player holds item) | — |
+
+**Verified ability examples:**
+- hydra(#589): Magical +4, SpellImmu +20, MonsGuards hydra head(590)
+- dwarven cleric(#417): MonsGuards dwarven guard(396)
+- minotaur champion(#60): MonsGuards minotaur(111)
+- werewolf(#127): MonsGuards dire wolf(56)
+- ice sorceress(#108): MonsGuards ice golem(211)
+- King Kulgar(#430): 5 guards — dwarven royal guard(426)×2, warrior(418), guard(396), cleric(417)
+
+#### Between-Rounds Spells (+0x80–0x88) and Cast Data (+0x96–0x9D)
+
+5 spell ID slots (u16 each) for abilities cast between combat rounds.
+
+**Cast percentages** at +0x96–0x9A (5 × u8) are **cumulative**:
+each byte = sum of all prior slots + this slot's individual chance.
+To get individual: `slot[n] - slot[n-1]` (slot[-1] = 0).
+
+**Cast levels** at +0x9B–0x9D (3 × u8) — spell level for the first 3 slots.
+
+**Verified from MME:**
+- dwarven cleric(#417): blind(77) 20%, hold person(66) 20%, summon guard(510) 40%
+  - +0x96 bytes: 20, 40, 80 → individual 20%, 20%, 40% ✓
+- hydra(#589): hydra head(726) 20%
+  - +0x96 bytes: 20 → individual 20% ✓
+
+#### Spell/Ability Data (+0x4B–0x50)
+
+| Offset | Size | Field | Notes |
+|--------|------|-------|-------|
+| +0x4B | u16 | Spell-related field | TBD — may be cast chance or ability count |
+| +0x4D | u16 | Spell-related field | TBD — may be ability category (0-17) |
+| +0x4F | u16 | **Spell ID** | References Spells.md (verified for many monsters) |
+
+**Verified spell references:**
+- Sheriff Lionheart (+0x4F=102) → "song of blasting"
+- high druid (+0x4F=142) → "poison cloud"
+- quickling lord (+0x4F=254) → "colour spray"
+- guardian beast (+0x4F=706) → "forked lightning"
+- gaunt one temple master (+0x4F=1362) → "partial petrification"
+- Timelord (+0x4F=1041) → "bladed sphere"
+
+#### Item Drop Slots (+0x51–0x5F)
+
+5 equipment/loot slots, each a u16 item ID referencing Items.md, followed by 5 u8 drop percentages:
+
+**Verified item drops:**
+- Sheriff Lionheart: gavel of justice (1348, 1%), jail key (1416, 1%), golden braided belt (167, 2%)
+- Giant spider: item 216 (10%), spider leg (1273, 5%)
+- Guardian golem: platinum bracers (215, 5%), black leather tunic (213, 5%), + 3 more items (5% each)
+- Mummy: iron ring (161, 1%), item 162 (1%), silver ring (163, 1%), item 164 (1%), item 177 (100%)
+
+#### Verified Monster Data (MME cross-reference)
+
+| Monster | # | HP | AC | DR | MR | Follow% | Charm | Limit | Weapon | EXP |
+|---------|---|----|----|----|----|---------| ------|-------|--------|-----|
+| dwarven cleric | 417 | 200 | 50 | 3 | 60 | 70 | 40 | 5 | 869 (dwarven hammer) | 150 |
+| hydra | 589 | 1800 | 65 | 20 | 100 | 100 | 999 | 1 | 0 (natural) | 2,000,000 |
+
+#### NPC Detection
+
+Invulnerable NPCs have Energy=0, AC=65526 (0xFFFA), Charm=999:
+- Guildmaster (#38), old man (#39), bishop (#45), priest (#46), healer (#47)
+- Named NPCs (Aiken, Thuluk, Colin, etc.) have Energy=1000 but EXP=5
+
+### Spells.md Record Structure
+
+**File:** `Default/Spells.md` — 487 pages, 471 spells
+**Record header:** Same format as Items
+**Payload:** 156 bytes fixed per spell
+
+#### Payload Fields
+
+| Offset | Size | Field | Confidence |
+|--------|------|-------|------------|
+| +0x00 | 30 | Spell name (null-terminated) | HIGH |
+| +0x1E | 7 | **Command abbreviation** (null-terminated, 7-byte buffer) | HIGH ✓ "mmis", "lbol", "heal" |
+| +0x25 | u16 | **Mana Cost** (raw value, likely centimana) | HIGH ✓ magic missile=100, heal=56 |
+| +0x27 | u16 | **Flags** (0x4000=player-usable, 0x0000=system/monster) | HIGH |
+| +0x29–0x51 | 41 | Reserved/extended data (mostly zeros) | LOW |
+| +0x52 | u8 | **Level Required** | HIGH ✓ magic missile=1, lightning bolt=8, swarm=12 |
+| +0x53 | u8 | **Tier/Power** (0-10, higher for multi-class spells) | MEDIUM |
+| +0x54 | u8 | **Duration Base** (0-28, buff duration scaling) | MEDIUM |
+| +0x55 | u8 | Padding | — |
+| +0x56 | u16 | **Charges** (1000=combat spell, 999=special, 0=non-combat) | MEDIUM |
+| +0x58 | u16 | **Min Effect** (damage, heal, or stat boost amount) | HIGH |
+| +0x5A | u16 | **Max Effect** | HIGH |
+| +0x5C | u16 | **Duration** (0=instant, 40-80 for buffs) | MEDIUM |
+| +0x5E | i16 | **Accuracy/Power Modifier** (signed, negative = debuff) | MEDIUM |
+| +0x60 | u8 | **Target Type** | HIGH |
+| +0x61 | u8 | **Spell School** | HIGH |
+| +0x62 | u8 | Unknown (often 4) | LOW |
+| +0x63 | u8 | **Effect/Ability ID** (what the spell actually does) | MEDIUM |
+| +0x64–0x9B | 56 | Extended effect data, ability arrays | LOW |
+
+#### Target Type Values (+0x60)
+
+| Value | Type | Examples |
+|-------|------|---------|
+| 1 | Self buff | illuminate, ethereal shield, barkskin |
+| 2 | Single target (heal/cure) | minor healing, cure poison |
+| 4 | Undead-specific | turn undead |
+| 7 | Utility | detect magic |
+| 8 | Combat attack (single) | magic missile, lightning bolt |
+| 12 | Area of Effect | swarm, mana storm |
+| 13 | Party/group buff | holy aura, unholy aura |
+
+#### Spell School Values (+0x61)
+
+| Value | School | Examples |
+|-------|--------|---------|
+| 1 | Cleric | harm, minor healing, bless, turn undead |
+| 3 | Mage (secondary) | — |
+| 4 | Mage (primary) | magic missile, frost jet, lightning bolt |
+| 5 | Warlock | — |
+| 7 | Druid | vine strike, starlight, mend, barkskin |
+| 10 | Bard | song of lore, song of valour |
+| 11 | Ninja/Martial | way of the swan/tiger/cat/rat |
+
+#### Verified Spell Data
+
+| Spell | # | Cmd | Mana | Lvl | Min | Max | Dur | Target | School |
+|-------|---|-----|------|-----|-----|-----|-----|--------|--------|
+| magic missile | 1 | mmis | 100 | 1 | 4 | 12 | 0 | attack | mage |
+| minor healing | 13 | mihe | 56 | 1 | 2 | 8 | 0 | heal | cleric |
+| lightning bolt | 8 | lbol | 100 | 8 | 16 | 12 | 0 | attack | mage |
+| bless | 14 | bles | 58 | 2 | 3 | 3 | 40 | buff | cleric |
+| holy aura | 20 | aura | 154 | 9 | 10 | 10 | 60 | party | cleric |
+| barkskin | 34 | skin | 26 | 7 | 10 | 10 | 40 | self | druid |
+| song of valour | 42 | valr | 154 | 2 | 5 | 5 | 35 | party | bard |
+| way of the swan | 36 | swan | 24 | 2 | 3 | 3 | 0 | self | martial |
+
+### Paths.md Record Structure
+
+**File:** `Default/Paths.md` — 1,237 pages, 1,146 records (748 full + 398 stubs)
+**Record format:** Non-standard — does NOT use the universal 0x80 marker format for full records.
+
+Two record types coexist in the same B-tree:
+
+#### Full Record (length=254, 255 bytes total)
+
+Stores path/loop metadata with routing hashes. The actual step-by-step path
+data lives in the corresponding `.mp` file on disk.
+
+| Offset | Size | Field | Confidence |
+|--------|------|-------|------------|
+| +0x00 | 1 | Length byte (0xFE = 254) | — |
+| +0x01 | 1 | 0x01 marker | — |
+| +0x02–0x12 | 17 | **Filename** (key, null-padded, e.g. "AADEASYL.mp") | HIGH |
+| +0x13–0x4F | 61 | **Loop/Path Display Name** (null-padded, empty for unnamed) | HIGH ✓ |
+| +0x50–0x78 | 41 | **Creator Name** (null-padded) | HIGH ✓ |
+| +0x79–0xBF | 71 | **Filename** (repeated, null-padded) | HIGH |
+| +0xC0–0xC5 | 6 | Reserved/zeros | — |
+| +0xC6–0xC9 | u32 | **Start Room Hash** (LE) | HIGH ✓ matches .mp file |
+| +0xCA–0xCD | u32 | **End Room Hash** (LE) | HIGH ✓ matches .mp file |
+| +0xCE–0xCF | u16 | Flags/options (usually 0, rare values: 5, 7, 9999) | LOW |
+| +0xD0–0xD5 | 6 | Sentinel (constant 0x0000FFFFFFFF) | HIGH |
+| +0xD6–0xD7 | u16 | **Step Count** (LE) | HIGH ✓ matches .mp file |
+| +0xD8–0xFE | 39 | Reserved/zeros | — |
+
+**Loops vs Paths:** When start_hash == end_hash, it's a loop. Otherwise it's a point-to-point path.
+
+#### Stub Record (length=45, 46 bytes total)
+
+Placeholder for `.mp` files that exist on disk but have no routing metadata in the database.
+Uses the standard universal record format: `[0x2D] [0x01] [filename] [pad] [0x80] [0x0000] [zeros]`
+
+#### Verified Path Data
+
+| Filename | Name | Creator | Steps | Type |
+|----------|------|---------|-------|------|
+| slm2loop.mp | Slum loop with HO's in it | — | 82 | Loop |
+| BLMOLOOP.mp | Black Mountains Loop | Spork ZSpoon | 277 | Loop |
+| HKEPLOOP.mp | Bandit Keep | Winterhawk | 78 | Loop |
+| LAVTLOO2.mp | Dragons Loop (larger) | Winterhawk | 129 | Loop |
+| STONLOO2.mp | Stone Elementals Regen Fixer loop | Kyrra | 494 | Loop |
+| AADEASYL.mp | — | Winterhawk | 3 | Path |
+
+### MDB2 Record Format (Universal)
+
+All MDB2 databases (Items, Monsters, Spells, Races, Classes, Players) share the
+same record encoding within data leaf pages:
+
+```
+[length_byte] [0x01] [key_ascii] [null] [padding×4] [0x80] [u16_id] [payload]
+
+- length_byte: total record size = length_byte + 1
+- 0x01: record marker (always 1)
+- key_ascii: record ID as ASCII decimal string (e.g., "1", "10", "1000")
+- null + padding: 1 null terminator + 4 zero bytes = 5 total
+- 0x80: end-of-key marker
+- u16_id: record ID as little-endian 16-bit integer
+- payload: fixed-size data block (size varies by database)
+```
+
+Total record header = `strlen(key_ascii) + 10` bytes (after length byte).
+Records are packed contiguously on data leaf pages starting at page offset +0x0C.
+
+### Database Summary
+
+| Database | Records | Payload | Key Fields Decoded |
+|----------|---------|---------|-------------------|
+| Items.md | 1,938 | 198 bytes | ✓ Name, type, weight, value, damage, AC, DR, speed, class restrictions |
+| Monsters.md | 1,128 | 209 bytes | ✓ Name, HP, AC/DR, MR, Follow%, Charm, GameLimit, attacks, cash, EXP, abilities, guards, weapon, spells, item drops |
+| Spells.md | 471 | 156 bytes | ✓ Name, command, mana, level, damage, duration, target, school |
+| Races.md | 13 | 85 bytes | ✓ Name, min/max stats, MR |
+| Classes.md | 15 | 79 bytes | ✓ Name, exp%, HP/level, combat level, abilities |
+| Players.md | var | var | ✓ Name, race, class, level, stats, equipment IDs |
+| Paths.md | 1,146 | 254 bytes (full) / 45 bytes (stub) | ✓ Filename, name, creator, hashes, step count |
 
 ### Notes
 
+- Rooms.md, Macros.md, and Messages.md are plain text, NOT MDB2 format
 - MMUD Explorer reads Rooms.md for path data but uses Access/JET databases
   for everything else — it does NOT parse Players.md directly
 - The MDB2 format is undocumented publicly; no known complete specification exists
-- Field alignment issues suggest variable-length fields or padding rules that
-  depend on string content length
-- Further reverse engineering needed to map exact field offsets
+- Page size 0x400 and B-tree structure are consistent across all MDB2 files
+- All record headers follow the universal format: `[len] 01 [key] [pad] 80 [id] [payload]`
+- Equipment item IDs in Players.md reference the Items.md database
+- Monster record fully mapped from +0x37 to +0xC8 via MME cross-reference:
+  - +0x37–0x49: Core stats (HP, Energy, MR, Follow%, AC, DR, Charm, BSDefense, NumAttacks, GameLimit)
+  - +0x4B–0x50: Spell/ability data (spell ID at +0x4F confirmed)
+  - +0x51–0x5F: Item drops (5 IDs + 5 percentages) — CONFIRMED
+  - +0x60–0x68: Cash drops (Runic/Plat/Gold/Silver/Copper) — CONFIRMED
+  - +0x6A–0x7C: **Ability Array** — 5 type/param pairs, types from WCC AbilityA system — CONFIRMED
+    - Type 146 = MonsGuards (guard mechanic), 28 = Magical, 139 = SpellImmu, etc.
+  - +0x7E: Weapon Number (Items.md reference) — CONFIRMED
+  - +0x80–0x88: Between-rounds spell IDs (5 slots, Spells.md refs) — CONFIRMED
+  - +0x92: Experience (u32) — CONFIRMED
+  - +0x96–0x9D: Between-rounds cast percentages (cumulative u8) + levels — CONFIRMED
+  - +0x9E: Group / spawn lair ID (WCC offset 84) — NOT min damage
+  - +0xA0–0xBC: Attack arrays (min/max damage + energy, 5 slots) — CONFIRMED
+  - +0xC0: Create Spell — CONFIRMED (hydra=90)
+  - +0xC7: Undead flag — CONFIRMED
+  - +0xC8: Attack Hit Spell — CONFIRMED
+- Paths.md uses a non-standard record format (no 0x80 marker for full records)
+  and stores routing metadata as an index to .mp files on disk
+- Spell extended data (+0x64–0x9B) contains bitmask arrays (possibly class/level
+  restrictions) with repeating 0x2020/0x2000 patterns — needs further analysis
+- Spell extended data (+0x64–0x9B) contains ability effect arrays not yet mapped

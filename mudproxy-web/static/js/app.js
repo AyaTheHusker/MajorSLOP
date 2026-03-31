@@ -84,11 +84,18 @@ function handleEvent(msg) {
             }
             if (typeof expBar !== 'undefined' && msg.exp_status) {
                 expBar.update(msg.exp_status);
+                if (typeof expMeter !== 'undefined' && msg.exp_status.needed) {
+                    expMeter.updateExpNeeded(msg.exp_status.needed);
+                }
             }
             break;
 
         case 'exp_status':
             if (typeof expBar !== 'undefined') expBar.update(msg);
+            // Feed numeric exp needed to exp meter for "level in" calculation
+            if (typeof expMeter !== 'undefined' && msg.needed) {
+                expMeter.updateExpNeeded(msg.needed);
+            }
             break;
 
         case 'room_update':
@@ -150,6 +157,16 @@ function handleEvent(msg) {
 
         case 'spell_cast':
             if (typeof roundTimer !== 'undefined') roundTimer.onSpellCast(msg);
+            break;
+
+        case 'rm_location':
+            {
+                const txt = `Map: ${msg.map}  Room: ${msg.room}`;
+                const el = document.getElementById('rm-location');
+                if (el) el.textContent = txt;
+                const el2 = document.getElementById('terminal-rm-location');
+                if (el2) el2.textContent = txt;
+            }
             break;
 
         case 'xp_gain':
@@ -241,6 +258,14 @@ function handleEvent(msg) {
             // Sync exp meter with MegaMUD's Player Statistics
             if (typeof expMeter !== 'undefined' && msg.exp_meter) {
                 expMeter.updateFromMega(msg.exp_meter);
+            }
+            // Feed numeric exp needed from memory reader
+            if (typeof expMeter !== 'undefined' && msg.experience && msg.experience.needed > 0) {
+                expMeter.updateExpNeeded(msg.experience.needed);
+            }
+            // Update bless panel from memory state
+            if (typeof blessPanel !== 'undefined' && msg.bless_slots) {
+                blessPanel.update(msg.bless_slots);
             }
             break;
 
@@ -1293,7 +1318,7 @@ function _makeDraggable(el, storageKey) {
         if (Math.abs(dx) > 3 || Math.abs(dy) > 3) moved = true;
         const r = el.getBoundingClientRect();
         let nl = origLeft + dx, nt = origTop + dy;
-        nt = Math.max(0, Math.min(nt, window.innerHeight - 32));
+        nt = Math.max(40, Math.min(nt, window.innerHeight - 32));
         nl = Math.max(-r.width + 80, Math.min(nl, window.innerWidth - 80));
         el.style.left = `${nl}px`;
         el.style.top = `${nt}px`;

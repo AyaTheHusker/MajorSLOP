@@ -19,6 +19,7 @@ class ExpMeter {
         this._megaExpMade = '';
         this._megaExpNeeded = '';
         this._megaLevelIn = '';
+        this._expNeeded = 0;      // numeric exp remaining to level (from exp_status or mem_state)
         this._build();
         this._restoreState();
     }
@@ -145,6 +146,13 @@ class ExpMeter {
         if (this._visible) this._renderStats();
     }
 
+    // Called from app.js when exp_status arrives with numeric exp data
+    updateExpNeeded(needed) {
+        if (typeof needed === 'number' && needed > 0) {
+            this._expNeeded = needed;
+        }
+    }
+
     // ── Rate Calculation (local fallback) ──
 
     _calcRate() {
@@ -180,11 +188,37 @@ class ExpMeter {
         rate.textContent = this._megaExpRate || `${this._calcRate().toLocaleString()}/hr`;
         total.textContent = this._megaExpMade || this._totalXP.toLocaleString();
         time.textContent = this._megaDuration || this._fmtElapsed();
-        levelIn.textContent = this._megaLevelIn || '—';
+
+        // Level In: use MegaMUD's value if not empty/dashes, else calculate locally
+        const megaLvl = this._megaLevelIn;
+        if (megaLvl && megaLvl !== '--' && megaLvl !== '—' && megaLvl.trim() !== '') {
+            levelIn.textContent = megaLvl;
+        } else {
+            levelIn.textContent = this._calcLevelIn();
+        }
+
         kills.textContent = this._kills.toLocaleString();
         avg.textContent = this._kills > 0
             ? Math.round(this._totalXP / this._kills).toLocaleString()
             : '—';
+    }
+
+    _calcLevelIn() {
+        // Calculate time to level from rate and exp needed
+        const hourlyRate = this._calcRate();
+        const needed = this._expNeeded;
+        if (hourlyRate <= 0 || needed <= 0) return '—';
+
+        const hoursRemaining = needed / hourlyRate;
+        const totalSecs = Math.round(hoursRemaining * 3600);
+        if (totalSecs < 60) return `${totalSecs}s`;
+        const hrs = Math.floor(totalSecs / 3600);
+        const mins = Math.floor((totalSecs % 3600) / 60);
+        const secs = totalSecs % 60;
+        if (hrs > 0) {
+            return `${hrs}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+        }
+        return `${mins}:${secs.toString().padStart(2, '0')}`;
     }
 
     _fmtElapsed() {
@@ -367,7 +401,7 @@ class ExpMeter {
             let newLeft = e.clientX - offsetX;
             let newTop = e.clientY - offsetY;
             const rect = this._el.getBoundingClientRect();
-            newTop = Math.max(0, Math.min(newTop, window.innerHeight - 32));
+            newTop = Math.max(40, Math.min(newTop, window.innerHeight - 32));
             newLeft = Math.max(-rect.width + 80, Math.min(newLeft, window.innerWidth - 80));
             this._el.style.left = newLeft + 'px';
             this._el.style.top = newTop + 'px';

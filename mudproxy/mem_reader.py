@@ -73,25 +73,31 @@ if IS_WINDOWS:
             ("Type", wt.DWORD),
         ]
 
-    def _find_megamud_pid() -> int | None:
-        """Find megamud.exe PID via CreateToolhelp32Snapshot."""
+    def _find_all_megamud_pids() -> list[int]:
+        """Find ALL megamud.exe PIDs via CreateToolhelp32Snapshot."""
+        pids = []
         snap = _k32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
         if snap == -1:
-            return None
+            return pids
         try:
             pe = PROCESSENTRY32()
             pe.dwSize = ctypes.sizeof(pe)
             if not _k32.Process32First(snap, ctypes.byref(pe)):
-                return None
+                return pids
             while True:
                 name = pe.szExeFile.decode("ascii", errors="ignore").lower()
                 if "megamud" in name:
-                    return pe.th32ProcessID
+                    pids.append(pe.th32ProcessID)
                 if not _k32.Process32Next(snap, ctypes.byref(pe)):
                     break
         finally:
             _k32.CloseHandle(snap)
-        return None
+        return pids
+
+    def _find_megamud_pid() -> int | None:
+        """Find a single MegaMUD PID (first found)."""
+        pids = _find_all_megamud_pids()
+        return pids[0] if pids else None
 
     def _open_process(pid: int):
         """Open process handle with VM_READ + VM_WRITE access."""
@@ -200,20 +206,26 @@ if IS_WINDOWS:
 else:
     # ── Linux backend ──
 
-    def _find_megamud_pid() -> int | None:
-        """Find the MegaMUD Wine process PID by scanning /proc.
+    def _find_all_megamud_pids() -> list[int]:
+        """Find ALL MegaMUD Wine process PIDs by scanning /proc.
         Matches 'megamud.exe' specifically to avoid matching konsole/shell
         processes that have MegaMUD in their working directory path."""
+        pids = []
         for entry in Path("/proc").iterdir():
             if not entry.name.isdigit():
                 continue
             try:
                 cmdline = (entry / "cmdline").read_bytes().lower()
                 if b"megamud.exe" in cmdline:
-                    return int(entry.name)
+                    pids.append(int(entry.name))
             except (PermissionError, FileNotFoundError, ProcessLookupError):
                 continue
-        return None
+        return pids
+
+    def _find_megamud_pid() -> int | None:
+        """Find a single MegaMUD PID (first found). Use _find_all_megamud_pids for multi-instance."""
+        pids = _find_all_megamud_pids()
+        return pids[0] if pids else None
 
     def _parse_maps(pid: int) -> list[dict]:
         """Parse /proc/<pid>/maps to find memory regions."""
@@ -400,7 +412,13 @@ class MegaMUDMemReader:
         self._player_name = name
 
     def attach(self, player_name: str | None = None) -> bool:
-        """Try to find and attach to the MegaMUD process. Returns True on success."""
+        """Try to find and attach to the MegaMUD process.
+
+        Handles:
+        - Multiple MegaMUD instances with same character → warns, waits
+        - Process restart (close + reopen) → reconnects to new PID & DLL
+        - DLL bridge reconnection when process changes
+        """
         import time
         now = time.time()
         # Don't spam attach attempts
@@ -408,45 +426,120 @@ class MegaMUDMemReader:
             return self._attached
         self._last_attach_attempt = now
 
-        pid = _find_megamud_pid()
-        if not pid:
+        hint = player_name or self._player_name
+
+        # ── Find all MegaMUD PIDs ──
+        all_pids = _find_all_megamud_pids()
+        if not all_pids:
             if self._attached:
                 logger.info("MegaMUD process gone — detached")
                 self._attached = False
                 self._pid = None
                 self._base = None
+                self._dll.disconnect()
             return False
 
-        # If PID changed, re-scan
-        if pid != self._pid:
-            self._pid = pid
-            self._base = None
+        # ── Check if our current PID is still alive ──
+        if self._pid and self._pid not in all_pids:
+            logger.info(f"MegaMUD PID {self._pid} gone — scanning for replacement")
             self._attached = False
-            logger.info(f"Found MegaMUD PID: {pid}")
+            self._pid = None
+            self._base = None
+            self._dll.disconnect()
 
-        if not self._base:
-            regions = _parse_maps(pid)
-            self._base = _find_struct_base(pid, regions, player_name)
-            if self._base:
-                name = self._read_string(PLAYER_NAME)
-                hp = self._read_i32(PLAYER_CUR_HP)
-                logger.info(f"Attached to MegaMUD — base=0x{self._base:08X} player={name} hp={hp}")
-                self._attached = True
-                # Connect DLL bridge and hand it the struct base
-                if self._dll.connect():
-                    self._dll.set_base(self._base)
-                    logger.info("DLL bridge connected and base set")
-            else:
-                logger.debug("MegaMUD found but struct not located (not in-game?)")
+        # ── If already attached and PID still alive, we're good ──
+        if self._attached and self._pid and self._base:
+            return True
+
+        # ── If we have a player name hint, check which PIDs have that character ──
+        matching_pids = []
+        if hint:
+            for pid in all_pids:
+                try:
+                    regions = _parse_maps(pid)
+                    base = _find_struct_base(pid, regions, hint)
+                    if base:
+                        matching_pids.append((pid, base))
+                except Exception:
+                    continue
+
+            if len(matching_pids) > 1:
+                logger.warning(
+                    f"Multiple MegaMUD instances found with character '{hint}' "
+                    f"(PIDs: {[p for p, _ in matching_pids]}). "
+                    f"Please close duplicates — will retry in 10 seconds."
+                )
+                # Print to console too since this is important
+                print(f"\n*** Multiple MegaMUD instances with '{hint}' detected! ***")
+                print(f"    PIDs: {[p for p, _ in matching_pids]}")
+                print(f"    Please close the extra instance(s). Retrying...\n")
+                self._last_attach_attempt = now + 5.0  # extra delay
                 return False
 
-        return self._attached
+            if len(matching_pids) == 1:
+                pid, base = matching_pids[0]
+                if pid != self._pid:
+                    logger.info(f"Found MegaMUD PID {pid} with character '{hint}'")
+                self._pid = pid
+                self._base = base
+                name = self._read_string(PLAYER_NAME)
+                hp = self._read_i32(PLAYER_CUR_HP)
+                logger.info(f"Attached to MegaMUD — base=0x{base:08X} player={name} hp={hp}")
+                self._attached = True
+                self._connect_dll_bridge()
+                return True
+
+            # Name hint didn't match any — fall through to blind scan
+            logger.debug(f"No MegaMUD instance has character '{hint}' in memory yet")
+
+        # ── No name hint or hint didn't match: try first available PID ──
+        if len(all_pids) > 1 and not hint:
+            logger.warning(
+                f"Multiple MegaMUD instances found (PIDs: {all_pids}) "
+                f"but no character name known yet — attaching to first one"
+            )
+
+        for pid in all_pids:
+            if pid == self._pid and self._base:
+                continue  # already failed on this one
+            try:
+                regions = _parse_maps(pid)
+                base = _find_struct_base(pid, regions, hint)
+                if base:
+                    self._pid = pid
+                    self._base = base
+                    name = self._read_string(PLAYER_NAME)
+                    hp = self._read_i32(PLAYER_CUR_HP)
+                    logger.info(f"Attached to MegaMUD — base=0x{self._base:08X} player={name} hp={hp}")
+                    self._attached = True
+                    self._connect_dll_bridge()
+                    return True
+            except Exception:
+                continue
+
+        logger.debug("MegaMUD found but struct not located (not in-game?)")
+        return False
+
+    def _connect_dll_bridge(self):
+        """Connect (or reconnect) the DLL bridge after attaching to a process."""
+        # Force reconnect — old socket from previous process is dead
+        self._dll.disconnect()
+        if self._dll.connect():
+            self._dll.set_base(self._base)
+            try:
+                from .config import Config
+                cfg = Config()
+                self._dll.set_ports(cfg.proxy_port, cfg.web_port)
+            except Exception:
+                pass
+            logger.info("DLL bridge connected and base set")
 
     def detach(self):
         self._attached = False
         self._pid = None
         self._base = None
         _release_handle()
+        self._dll.disconnect()
         if self._poll_task:
             self._poll_task.cancel()
             self._poll_task = None
@@ -563,6 +656,11 @@ class MegaMUDMemReader:
         current = self._read_u32(ROOM_CHECKSUM)
         if current == checksum:
             return {"ok": True, "room": name, "already_there": True}
+
+        # Clear loop state so MegaMUD doesn't auto-resume a loop on arrival
+        self._write_i32(LOOPING, 0)
+        self._write_i32(ON_ENTRY_ACTION, 0)
+        self._write_i32(MODE, 14)  # walking, not looping
 
         if run:
             self._write_u32(AUTO_COMBAT, 0)
@@ -723,6 +821,7 @@ class MegaMUDMemReader:
             "connected": bool(self._read_i32(CONNECTED)),
             "in_game": bool(self._read_i32(IN_GAME)),
             "in_combat": bool(self._read_i32(IN_COMBAT)),
+            "combat_target": self._read_string(COMBAT_TARGET, 40) if self._read_i32(IN_COMBAT) else "",
             "resting": bool(self._read_i32(IS_RESTING)),
             "meditating": bool(self._read_i32(IS_MEDITATING)),
             "sneaking": bool(self._read_i32(IS_SNEAKING)),
@@ -763,6 +862,38 @@ class MegaMUDMemReader:
             "leader": leader,
             "members": members,
             "following": bool(self._read_i32(FOLLOWING)),
+        }
+
+    def get_bless_slots(self) -> dict:
+        """Read the 10 bless command slots + 4 party bless slots + bless settings."""
+        bless_offsets = [
+            BLESS_CMD1, BLESS_CMD2, BLESS_CMD3, BLESS_CMD4, BLESS_CMD5,
+            BLESS_CMD6, BLESS_CMD7, BLESS_CMD8, BLESS_CMD9, BLESS_CMD10,
+        ]
+        slots = []
+        for i, off in enumerate(bless_offsets):
+            cmd = self._read_string(off, 21).strip('\x00').strip()
+            slots.append({"slot": i + 1, "command": cmd})
+
+        party_offsets = [
+            PARTY_BLESS1_CMD, PARTY_BLESS2_CMD, PARTY_BLESS3_CMD, PARTY_BLESS4_CMD,
+        ]
+        party_wait_offsets = [
+            PARTY_BLESS_WAIT1, PARTY_BLESS_WAIT2, PARTY_BLESS_WAIT3, PARTY_BLESS_WAIT4,
+        ]
+        party_slots = []
+        for i, (cmd_off, wait_off) in enumerate(zip(party_offsets, party_wait_offsets)):
+            cmd = self._read_string(cmd_off, 21).strip('\x00').strip()
+            wait = self._read_i32(wait_off) or 0
+            party_slots.append({"slot": i + 1, "command": cmd, "timeout_secs": wait})
+
+        return {
+            "self_slots": slots,
+            "party_slots": party_slots,
+            "auto_bless": bool(self._read_i32(AUTO_BLESS)),
+            "bless_resting": bool(self._read_i32(BLESS_RESTING)),
+            "bless_combat": bool(self._read_i32(BLESS_COMBAT)),
+            "mana_bless_pct": self._read_i32(MANA_BLESS_PCT) or 0,
         }
 
     def get_exp_meter(self) -> dict:
@@ -892,6 +1023,7 @@ class MegaMUDMemReader:
                 "exp_meter": self.get_exp_meter(),
                 "toggles": self.get_toggles(),
                 "pathing": self.get_pathing(),
+                "bless_slots": self.get_bless_slots(),
                 "lag_wait": self._read_i32(LAG_WAIT_SECONDS),
             }
         except Exception as e:
@@ -916,6 +1048,10 @@ class MegaMUDMemReader:
                             await asyncio.sleep(5.0)
                             continue
 
+                    # Reconnect DLL bridge if attached but bridge is down
+                    if not self._dll.connected and self._base:
+                        self._connect_dll_bridge()
+
                     state = self.get_full_state()
                     if state and state != self._last_state:
                         self._last_state = state
@@ -929,7 +1065,10 @@ class MegaMUDMemReader:
                     import traceback
                     logger.warning(f"Memory poll error: {e} (pid={self._pid}, base={'0x{:08X}'.format(self._base) if self._base else None}, attached={self._attached})\n{traceback.format_exc()}")
                     self._attached = False
+                    self._pid = None
                     self._base = None
+                    _release_handle()
+                    self._dll.disconnect()
                     await asyncio.sleep(5.0)
 
         self._poll_task = asyncio.create_task(_loop())
