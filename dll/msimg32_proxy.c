@@ -10,6 +10,7 @@
  *
  * Protocol (line-based, \n terminated):
  *   PING                            → PONG
+ *   SAMSAY <text> [pitch] [speed]   → speak text using SAM TTS
  *   BASE                            → struct base address as hex
  *   FIND <name>                     → scan heap for game state struct, lock base
  *   READ <hex_offset> <size>        → returns hex bytes (relative to struct base)
@@ -22,7 +23,6 @@
  *   STATUS                          → read all 8 statusbar parts (tab-separated)
  *   DLGTEXT <class> <ctrl_id>       → read text from dialog control
  *   CLICK <class> <ctrl_id>         → send BM_CLICK to dialog button
- *   SETTHEME <idx_or_name>          → set widget theme (0-15 or name prefix)
  *   ROUNDTICK <round_num>           → notify DLL of a combat round tick
  *   COMBATEND                       → notify DLL combat has ended
  *   ENUMWIN                         → dump all MMMAIN child windows (class, id, size, style)
@@ -544,13 +544,10 @@ static void slop_show_about(HWND parent)
 #define RT_CLASS           "MajorSLOPRoundTimer"
 #define RT_WIN_W           190
 #define RT_WIN_H           220
-#define THEME_SETTINGS_CLASS "MajorSLOPThemes"
-#define IDM_SLOP_THEMES     40902
 #define IDM_SLOP_ROUNDTIMER 40903
 #define IDM_SLOP_PRO_STEP   40904
 #define IDM_SLOP_PLUGINS    40905
 #define IDM_PLUGIN_BASE     41000  /* plugin menu items: 41000..41099 */
-#define IDM_THEME_COMBO     70030
 
 /* Round timer right-click context menu IDs */
 #define IDM_RT_SYNC_SPELL   40910
@@ -565,40 +562,6 @@ static void slop_show_about(HWND parent)
 #define IDC_SPELL_CANCEL    50004
 #define IDC_SPELL_ROUNDS    50005
 
-/* ---- Theme definitions (mirrors web client themes.js) ---- */
-typedef struct {
-    const char *key;     /* theme ID string */
-    const char *name;    /* display name */
-    unsigned char accent_r, accent_g, accent_b;  /* --accent color */
-    unsigned char text_r, text_g, text_b;         /* --text color */
-    unsigned char dim_r, dim_g, dim_b;            /* --text-dim color */
-    unsigned char hp_full_r, hp_full_g, hp_full_b;   /* HP bar at full */
-    unsigned char mana_r, mana_g, mana_b;            /* mana bar color */
-    unsigned char bg_r, bg_g, bg_b;              /* --bg (darkest) */
-    unsigned char panel_r, panel_g, panel_b;     /* --bg-panel (dialog bg) */
-} slop_theme_t;
-
-static const slop_theme_t SLOP_THEMES[] = {
-    /*                                    accent          text            dim             hp_full         mana            bg              panel */
-    { "greylord",     "Grey Lord",      0x44,0x44,0xCC, 0xC8,0xC8,0xE0, 0x66,0x66,0xAA, 0x22,0xCC,0x44, 0x22,0x66,0xEE, 0x0A,0x0A,0x12, 0x10,0x10,0x1C },
-    { "blackfort",    "Black Fort",     0x33,0x33,0x66, 0x99,0x9A,0xB0, 0x44,0x44,0x66, 0x22,0xCC,0x44, 0x22,0x66,0xEE, 0x03,0x03,0x06, 0x04,0x04,0x0A },
-    { "khazarad",     "Khazarad",       0xAA,0x88,0x44, 0xD4,0xC4,0xA0, 0x8A,0x7A,0x56, 0xCC,0xAA,0x44, 0x44,0x88,0xCC, 0x0C,0x0A,0x06, 0x18,0x12,0x0A },
-    { "silvermere",   "Silvermere",     0x77,0x88,0xBB, 0xD8,0xD8,0xE8, 0x88,0x88,0xAA, 0x22,0xCC,0x44, 0x44,0xAA,0xDD, 0x0E,0x0E,0x12, 0x1C,0x1C,0x24 },
-    { "annora",       "Annora",         0x99,0xAA,0xDD, 0xEE,0xEE,0xF4, 0xAA,0xAA,0xCC, 0x22,0xCC,0x44, 0x66,0x88,0xEE, 0x14,0x14,0x18, 0x28,0x28,0x32 },
-    { "jorah",        "Jorah",          0x33,0x66,0xCC, 0xB0,0xC0,0xE8, 0x55,0x66,0xAA, 0x22,0xCC,0x44, 0x33,0x66,0xCC, 0x06,0x08,0x10, 0x0A,0x10,0x24 },
-    { "putakwa",      "Putakwa",        0x22,0xAA,0x88, 0xA0,0xD8,0xC8, 0x44,0x88,0x66, 0x22,0xCC,0x44, 0x22,0x88,0xAA, 0x04,0x0C,0x0A, 0x08,0x16,0x12 },
-    { "void",         "Void",           0x88,0x44,0xCC, 0xD0,0xB0,0xE8, 0x77,0x44,0xAA, 0x22,0xCC,0x44, 0x88,0x44,0xCC, 0x0A,0x04,0x10, 0x14,0x08,0x20 },
-    { "ozzrinom",     "Ozzrinom",       0xCC,0x33,0x44, 0xE0,0xB0,0xB0, 0x88,0x44,0x44, 0xCC,0x33,0x44, 0x44,0x66,0xDD, 0x0C,0x04,0x06, 0x1C,0x08,0x0C },
-    { "phoenix",      "Phoenix",        0xDD,0x66,0x22, 0xE8,0xD0,0xA8, 0x88,0x66,0x40, 0xDD,0x88,0x22, 0x44,0x88,0xCC, 0x0C,0x08,0x04, 0x1A,0x0E,0x06 },
-    { "madwizard",    "Mad Wizard",     0x00,0xEE,0xFF, 0xE0,0xF0,0xFF, 0x66,0xAA,0xCC, 0x00,0xEE,0xFF, 0xFF,0x00,0xCC, 0x06,0x06,0x0C, 0x0C,0x08,0x18 },
-    { "tasloi",       "Tasloi",         0x44,0xAA,0x22, 0xC0,0xD8,0xA0, 0x66,0x88,0x44, 0x44,0xAA,0x22, 0x22,0x66,0xEE, 0x06,0x0A,0x04, 0x0E,0x16,0x0A },
-    { "frostborn",    "Frostborn",      0x44,0xAA,0xDD, 0xC8,0xE0,0xF0, 0x55,0x88,0xAA, 0x44,0xCC,0xEE, 0x22,0x77,0xBB, 0x06,0x0A,0x0E, 0x0C,0x14,0x1E },
-    { "sandstorm",    "Sandstorm",      0xCC,0xAA,0x44, 0xE0,0xD4,0xB8, 0x8A,0x7A,0x56, 0xCC,0xAA,0x44, 0x44,0x88,0xCC, 0x0C,0x0A,0x06, 0x1A,0x14,0x0C },
-    { "crystal",      "Crystal Cavern", 0x99,0x66,0xEE, 0xD0,0xC0,0xE8, 0x77,0x66,0xAA, 0x99,0x66,0xEE, 0x44,0x66,0xCC, 0x08,0x06,0x0C, 0x10,0x0C,0x1A },
-    { "afroman",      "Afroman",        0xCC,0x22,0x44, 0xEE,0xEE,0xF4, 0xAA,0xAA,0xCC, 0xCC,0x22,0x44, 0x44,0x66,0xDD, 0x06,0x06,0x08, 0x0C,0x0C,0x18 },
-};
-#define SLOP_THEME_COUNT (sizeof(SLOP_THEMES) / sizeof(SLOP_THEMES[0]))
-
 /* Forward declarations */
 static volatile int rt_visible;
 static void rt_show_context_menu(HWND hwnd, int x, int y);
@@ -609,7 +572,6 @@ static const char *stristr(const char *haystack, const char *needle);
 static void plugins_on_round(int round_num);
 static int rd_round_num = 0;       /* round counter — shared between auto and manual sync */
 static double rd_last_event_ts;    /* timestamp of last combat event (for clustering) */
-static DWORD WINAPI theme_scanner_thread(LPVOID param);
 static DWORD WINAPI pro_step_thread(LPVOID param);
 static DWORD WINAPI auto_struct_thread(LPVOID param);
 static DWORD WINAPI mmansi_scanner_thread(LPVOID param);
@@ -639,11 +601,19 @@ static void ensure_plugins_dir(void);
 static void load_plugins(void);
 static void unload_plugins(void);
 
+/* TTS plugin discovery — plugins can export tts_speak(const char *text, int pitch, int speed) */
+typedef void (*tts_speak_fn)(const char *text, int pitch, int speed);
+static struct {
+    tts_speak_fn speak;
+    const char  *name;     /* from plugin descriptor */
+    int          plugin_idx;
+} tts_engines[SLOP_MAX_PLUGINS];
+static int tts_engine_count = 0;
+
 /* ---- Configuration file (majorslop.cfg) ---- */
 
 #define CFG_FILENAME "majorslop.cfg"
 
-static int theme_idx = -1;       /* -1 = no theme (MegaMUD default), 0+ = theme index */
 static int rt_show_on_start = 0; /* 1 = show round timer on launch */
 static char cfg_player_name[64] = {0}; /* player name for auto-struct-find */
 static volatile int pro_every_step = 0; /* 1 = inject "pro" on every path step */
@@ -677,26 +647,7 @@ static void cfg_load(void)
         char *nl = strchr(line, '\n'); if (nl) *nl = '\0';
         nl = strchr(line, '\r'); if (nl) *nl = '\0';
 
-        if (strncmp(line, "theme=", 6) == 0) {
-            char *val = line + 6;
-            if (strcmp(val, "none") == 0 || strcmp(val, "") == 0) {
-                theme_idx = -1;
-            } else {
-                /* Try numeric */
-                int idx = atoi(val);
-                if (val[0] >= '0' && val[0] <= '9' && idx >= 0 && idx < (int)SLOP_THEME_COUNT) {
-                    theme_idx = idx;
-                } else {
-                    /* Match by key name */
-                    for (int i = 0; i < (int)SLOP_THEME_COUNT; i++) {
-                        if (_stricmp(val, SLOP_THEMES[i].key) == 0) {
-                            theme_idx = i;
-                            break;
-                        }
-                    }
-                }
-            }
-        } else if (strncmp(line, "round_timer=", 12) == 0) {
+        if (strncmp(line, "round_timer=", 12) == 0) {
             char *val = line + 12;
             rt_show_on_start = (strcmp(val, "shown") == 0 || strcmp(val, "1") == 0);
         } else if (strncmp(line, "player_name=", 12) == 0) {
@@ -707,8 +658,7 @@ static void cfg_load(void)
         }
     }
     fclose(f);
-    logmsg("[mudplugin] Config loaded: theme=%s round_timer=%s\n",
-           theme_idx >= 0 ? SLOP_THEMES[theme_idx].key : "none",
+    logmsg("[mudplugin] Config loaded: round_timer=%s\n",
            rt_show_on_start ? "shown" : "hidden");
 }
 
@@ -724,175 +674,14 @@ static void cfg_save(void)
     fprintf(f, "# MajorSLOP Configuration\n");
     fprintf(f, "# Edit while MegaMUD is closed, or use the in-app menus.\n");
     fprintf(f, "#\n");
-    fprintf(f, "# theme: none, or a theme name (greylord, blackfort, khazarad, etc.)\n");
     fprintf(f, "# round_timer: shown or hidden\n");
     fprintf(f, "\n");
-    fprintf(f, "theme=%s\n", theme_idx >= 0 ? SLOP_THEMES[theme_idx].key : "none");
     fprintf(f, "round_timer=%s\n", rt_visible ? "shown" : "hidden");
     fprintf(f, "pro_every_step=%s\n", pro_every_step ? "on" : "off");
     if (cfg_player_name[0])
         fprintf(f, "player_name=%s\n", cfg_player_name);
     fclose(f);
 }
-
-/* ---- Window theming engine ---- */
-
-static HBRUSH theme_bg_brush = NULL;    /* bg color brush */
-static HBRUSH theme_panel_brush = NULL; /* panel bg brush */
-static COLORREF theme_text_color = RGB(0xC8, 0xC8, 0xE0);
-static COLORREF theme_bg_color = RGB(0x0A, 0x0A, 0x12);
-static COLORREF theme_panel_color = RGB(0x10, 0x10, 0x1C);
-static COLORREF theme_accent_color = RGB(0x44, 0x44, 0xCC);
-static COLORREF theme_dim_color = RGB(0x66, 0x66, 0xAA);
-
-/* Track subclassed dialogs */
-#define MAX_SUBCLASSED 32
-static struct { HWND hwnd; WNDPROC orig; } subclassed_dlgs[MAX_SUBCLASSED];
-static int num_subclassed = 0;
-
-static int theme_active = 0;  /* 1 when a theme is applied */
-
-static void theme_update_brushes(void)
-{
-    if (theme_bg_brush) { DeleteObject(theme_bg_brush); theme_bg_brush = NULL; }
-    if (theme_panel_brush) { DeleteObject(theme_panel_brush); theme_panel_brush = NULL; }
-
-    if (theme_idx < 0 || theme_idx >= (int)SLOP_THEME_COUNT) {
-        theme_active = 0;
-        return;
-    }
-
-    const slop_theme_t *th = &SLOP_THEMES[theme_idx];
-    theme_bg_color = RGB(th->bg_r, th->bg_g, th->bg_b);
-    theme_panel_color = RGB(th->panel_r, th->panel_g, th->panel_b);
-    theme_text_color = RGB(th->text_r, th->text_g, th->text_b);
-    theme_accent_color = RGB(th->accent_r, th->accent_g, th->accent_b);
-    theme_dim_color = RGB(th->dim_r, th->dim_g, th->dim_b);
-    theme_bg_brush = CreateSolidBrush(theme_bg_color);
-    theme_panel_brush = CreateSolidBrush(theme_panel_color);
-    theme_active = 1;
-}
-
-/* Subclass proc for #32770, MMTALK, MMPRTY dialogs */
-static LRESULT CALLBACK theme_dlg_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
-{
-    /* Find original proc */
-    WNDPROC orig = DefWindowProcA;
-    for (int i = 0; i < num_subclassed; i++) {
-        if (subclassed_dlgs[i].hwnd == hwnd) { orig = subclassed_dlgs[i].orig; break; }
-    }
-
-    if (theme_active && theme_panel_brush) {
-        switch (msg) {
-        case WM_CTLCOLORSTATIC:
-        case WM_CTLCOLOREDIT:
-        case WM_CTLCOLORLISTBOX:
-        {
-            HDC hdc = (HDC)wParam;
-            SetTextColor(hdc, theme_text_color);
-            SetBkColor(hdc, theme_panel_color);
-            return (LRESULT)theme_panel_brush;
-        }
-        case WM_CTLCOLORDLG:
-            return (LRESULT)theme_panel_brush;
-        case WM_CTLCOLORBTN:
-        {
-            HDC hdc = (HDC)wParam;
-            SetTextColor(hdc, theme_text_color);
-            SetBkColor(hdc, theme_panel_color);
-            return (LRESULT)theme_panel_brush;
-        }
-        case WM_ERASEBKGND:
-        {
-            HDC hdc = (HDC)wParam;
-            RECT rc;
-            GetClientRect(hwnd, &rc);
-            FillRect(hdc, &rc, theme_panel_brush);
-            return 1;
-        }
-        }
-    }
-
-    if (msg == WM_NCDESTROY) {
-        /* Clean up subclass entry */
-        LRESULT ret = CallWindowProcA(orig, hwnd, msg, wParam, lParam);
-        for (int i = 0; i < num_subclassed; i++) {
-            if (subclassed_dlgs[i].hwnd == hwnd) {
-                subclassed_dlgs[i] = subclassed_dlgs[--num_subclassed];
-                break;
-            }
-        }
-        return ret;
-    }
-    return CallWindowProcA(orig, hwnd, msg, wParam, lParam);
-}
-
-static void theme_subclass_window(HWND hwnd)
-{
-    /* Check if already subclassed */
-    for (int i = 0; i < num_subclassed; i++) {
-        if (subclassed_dlgs[i].hwnd == hwnd) return;
-    }
-    if (num_subclassed >= MAX_SUBCLASSED) return;
-
-    WNDPROC old = (WNDPROC)SetWindowLongA(hwnd, GWL_WNDPROC, (LONG)theme_dlg_proc);
-    if (old && old != theme_dlg_proc) {
-        subclassed_dlgs[num_subclassed].hwnd = hwnd;
-        subclassed_dlgs[num_subclassed].orig = old;
-        num_subclassed++;
-    }
-}
-
-static void theme_apply_all(void)
-{
-    theme_update_brushes();
-
-    DWORD our_pid = GetCurrentProcessId();
-    HWND mw = FindWindowA("MMMAIN", NULL);
-
-    /* Theme the status bar */
-    if (mw) {
-        HWND sb = FindWindowExA(mw, NULL, "msctls_statusbar32", NULL);
-        if (sb) {
-            /* CLR_DEFAULT (-1) restores the default color */
-            SendMessageA(sb, 0x0401 /* SB_SETBKCOLOR */, 0,
-                         theme_active ? (LPARAM)theme_bg_color : (LPARAM)0xFFFFFFFF);
-            InvalidateRect(sb, NULL, TRUE);
-        }
-    }
-
-    /* Find and subclass all top-level windows belonging to our process */
-    HWND top = NULL;
-    while ((top = FindWindowExA(NULL, top, NULL, NULL)) != NULL) {
-        DWORD win_pid = 0;
-        GetWindowThreadProcessId(top, &win_pid);
-        if (win_pid != our_pid) continue;
-
-        char cls[64] = {0};
-        GetClassNameA(top, cls, sizeof(cls));
-
-        /* Subclass dialogs and custom MegaMUD windows */
-        if (strcmp(cls, "#32770") == 0 || strcmp(cls, "MMTALK") == 0 ||
-            strcmp(cls, "MMPRTY") == 0) {
-            theme_subclass_window(top);
-            /* Force repaint on all children */
-            InvalidateRect(top, NULL, TRUE);
-            HWND child = GetWindow(top, GW_CHILD);
-            while (child) {
-                InvalidateRect(child, NULL, TRUE);
-                child = GetWindow(child, GW_HWNDNEXT);
-            }
-        }
-    }
-
-    /* Redraw MMMAIN and menu bar */
-    if (mw) {
-        InvalidateRect(mw, NULL, TRUE);
-        DrawMenuBar(mw);
-    }
-}
-
-static HWND theme_settings_hwnd = NULL;
 
 /* ---- Manual Sync Spell state ---- */
 static char rt_sync_spell[22] = {0};  /* selected spell command (4-letter abbrev) */
@@ -1003,9 +792,10 @@ static void rt_paint(HWND hwnd)
     FillRect(mem, &cr, bg);
     DeleteObject(bg);
 
-    /* Use selected theme, or default to Grey Lord colors for the timer */
-    const slop_theme_t *th = (theme_idx >= 0 && theme_idx < (int)SLOP_THEME_COUNT)
-        ? &SLOP_THEMES[theme_idx] : &SLOP_THEMES[0];
+    /* Round timer colors — hardcoded for now */
+    #define RT_DIM   RGB(0x66, 0x66, 0xAA)
+    #define RT_DIM2  RGB(0x44, 0x44, 0x71)  /* dim * 2/3 */
+    #define RT_ACCENT RGB(0x44, 0x44, 0xCC)
     int cx = W / 2;
     int R = W / 2 - 25;
     if (R > (H / 2 - 40)) R = H / 2 - 40;
@@ -1018,7 +808,7 @@ static void rt_paint(HWND hwnd)
     int penW = R * 8 / 62; if (penW < 2) penW = 2;
     int arcW = R * 6 / 62; if (arcW < 2) arcW = 2;
     int ballR = R * 5 / 62; if (ballR < 3) ballR = 3;
-    HPEN dimPen = CreatePen(PS_SOLID, penW, RGB(th->dim_r * 2 / 3, th->dim_g * 2 / 3, th->dim_b * 2 / 3));
+    HPEN dimPen = CreatePen(PS_SOLID, penW, RT_DIM2);
     HPEN oldPen = (HPEN)SelectObject(mem, dimPen);
     HBRUSH hollow = (HBRUSH)GetStockObject(HOLLOW_BRUSH);
     HBRUSH oldBr = (HBRUSH)SelectObject(mem, hollow);
@@ -1036,7 +826,7 @@ static void rt_paint(HWND hwnd)
         int x2 = cx + (int)(cos(a) * (R + 6));
         int y2 = cy + (int)(sin(a) * (R + 6));
         HPEN tp = CreatePen(PS_SOLID, (i == 0) ? (penW / 4 + 1) : (penW / 8 + 1),
-                            (i == 0) ? RGB(220, 220, 240) : RGB(th->dim_r, th->dim_g, th->dim_b));
+                            (i == 0) ? RGB(220, 220, 240) : RT_DIM);
         SelectObject(mem, tp);
         MoveToEx(mem, x1, y1, NULL);
         LineTo(mem, x2, y2);
@@ -1110,7 +900,7 @@ static void rt_paint(HWND hwnd)
         char elapsed_txt[32];
         sprintf(elapsed_txt, "%.1fs / 5.0s", fmod(elapsed, period) / 1000.0);
         SetBkMode(mem, TRANSPARENT);
-        SetTextColor(mem, RGB(th->dim_r, th->dim_g, th->dim_b));
+        SetTextColor(mem, RT_DIM);
         HFONT small_font = CreateFontA(fontSmall, 0, 0, 0, FW_NORMAL, 0, 0, 0, ANSI_CHARSET,
                                         0, 0, ANTIALIASED_QUALITY, 0, "Arial");
         HFONT old_font = (HFONT)SelectObject(mem, small_font);
@@ -1141,14 +931,14 @@ static void rt_paint(HWND hwnd)
         TextOutA(mem, cx - sz.cx / 2, cy - sz.cy / 2 - 2, "ROUND", 5);
     } else {
         /* Unsynced — show bright "WAITING FOR SYNC" */
-        SetTextColor(mem, RGB(th->accent_r, th->accent_g, th->accent_b));
+        SetTextColor(mem, RT_ACCENT);
         SIZE sz;
         GetTextExtentPoint32A(mem, "WAITING", 7, &sz);
         TextOutA(mem, cx - sz.cx / 2, cy - sz.cy / 2 - 8, "WAITING", 7);
         HFONT sub_font = CreateFontA(fontSmall, 0, 0, 0, FW_NORMAL, 0, 0, 0, ANSI_CHARSET,
                                       0, 0, ANTIALIASED_QUALITY, 0, "Arial");
         SelectObject(mem, sub_font);
-        SetTextColor(mem, RGB(th->dim_r, th->dim_g, th->dim_b));
+        SetTextColor(mem, RT_DIM);
         GetTextExtentPoint32A(mem, "FOR SYNC", 8, &sz);
         TextOutA(mem, cx - sz.cx / 2, cy + 6, "FOR SYNC", 8);
         SelectObject(mem, old_font);
@@ -1753,110 +1543,6 @@ static void rt_show_context_menu(HWND hwnd, int x, int y)
     DestroyMenu(menu);
 }
 
-/* ================================================================
- * Theme Settings Dialog
- * ================================================================ */
-
-static LRESULT CALLBACK slop_theme_settings_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
-{
-    switch (msg) {
-    case WM_CREATE:
-    {
-        int y = 15, x = 15;
-
-        CreateWindowExA(0, "STATIC", "Theme:",
-                        WS_CHILD | WS_VISIBLE | SS_LEFT,
-                        x, y + 2, 50, 18, hwnd, NULL, GetModuleHandle(NULL), NULL);
-
-        HWND combo = CreateWindowExA(0, "COMBOBOX", "",
-                        WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
-                        x + 55, y, 160, 300, hwnd, (HMENU)(INT_PTR)IDM_THEME_COMBO,
-                        GetModuleHandle(NULL), NULL);
-        SendMessageA(combo, CB_ADDSTRING, 0, (LPARAM)"None (MegaMUD Default)");
-        for (int i = 0; i < (int)SLOP_THEME_COUNT; i++) {
-            SendMessageA(combo, CB_ADDSTRING, 0, (LPARAM)SLOP_THEMES[i].name);
-        }
-        /* combo index 0 = "None", 1+ = theme indices */
-        SendMessageA(combo, CB_SETCURSEL, theme_idx + 1, 0);
-
-        /* Apply button */
-        y += 30;
-        CreateWindowExA(0, "BUTTON", "Apply Theme",
-                        WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                        x + 55, y, 120, 28, hwnd, (HMENU)(INT_PTR)70031,
-                        GetModuleHandle(NULL), NULL);
-
-        return 0;
-    }
-    case WM_COMMAND:
-    {
-        WORD id = LOWORD(wParam);
-        WORD notif = HIWORD(wParam);
-        if (id == IDM_THEME_COMBO && notif == CBN_SELCHANGE) {
-            /* Just track the selection, apply on button press */
-            int sel = (int)SendMessageA((HWND)lParam, CB_GETCURSEL, 0, 0);
-            theme_idx = sel - 1;
-            logmsg("[mudplugin] Theme selected: %d (%s)\n", theme_idx,
-                   theme_idx >= 0 ? SLOP_THEMES[theme_idx].name : "none");
-        }
-        if (id == 70031 && notif == BN_CLICKED) {
-            /* Apply button */
-            logmsg("[mudplugin] Applying theme %d\n", theme_idx);
-            theme_apply_all();
-            cfg_save();
-            logmsg("[mudplugin] Theme applied and saved\n");
-        }
-        return 0;
-    }
-    case WM_CLOSE:
-        DestroyWindow(hwnd);
-        return 0;
-    case WM_DESTROY:
-        theme_settings_hwnd = NULL;
-        return 0;
-    }
-    return DefWindowProcA(hwnd, msg, wParam, lParam);
-}
-
-static void slop_show_themes(HWND parent)
-{
-    if (theme_settings_hwnd && IsWindow(theme_settings_hwnd)) {
-        SetForegroundWindow(theme_settings_hwnd);
-        return;
-    }
-
-    static int registered = 0;
-    if (!registered) {
-        WNDCLASSA wc = {0};
-        wc.lpfnWndProc = slop_theme_settings_proc;
-        wc.hInstance = GetModuleHandle(NULL);
-        wc.hCursor = LoadCursor(NULL, IDC_ARROW);
-        wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
-        wc.lpszClassName = THEME_SETTINGS_CLASS;
-        RegisterClassA(&wc);
-        registered = 1;
-    }
-
-    RECT pr;
-    GetWindowRect(parent, &pr);
-    int px = (pr.left + pr.right) / 2 - 130;
-    int py = (pr.top + pr.bottom) / 2 - 60;
-
-    theme_settings_hwnd = CreateWindowExA(
-        WS_EX_TOOLWINDOW,
-        THEME_SETTINGS_CLASS,
-        "MajorSLOP Themes",
-        WS_POPUP | WS_VISIBLE | WS_CAPTION | WS_SYSMENU,
-        px, py, 260, 110,
-        parent, NULL, GetModuleHandle(NULL), NULL);
-
-    if (theme_settings_hwnd) {
-        SetForegroundWindow(theme_settings_hwnd);
-        ShowWindow(theme_settings_hwnd, SW_SHOW);
-    }
-}
-
-/* (Old overlay code removed — themes and round timer above) */
 static WNDPROC orig_mmmain_proc = NULL;
 static volatile int slop_in_menu = 0;  /* set while our menu is open */
 
@@ -1888,10 +1574,6 @@ static LRESULT CALLBACK slop_mmmain_proc(HWND hwnd, UINT msg, WPARAM wParam, LPA
             slop_show_about(hwnd);
             return 0;
         }
-        if (id == IDM_SLOP_THEMES) {
-            slop_show_themes(hwnd);
-            return 0;
-        }
         if (id == IDM_SLOP_ROUNDTIMER) {
             slop_show_round_timer(hwnd);
             slop_update_menu_state();
@@ -1921,22 +1603,6 @@ static LRESULT CALLBACK slop_mmmain_proc(HWND hwnd, UINT msg, WPARAM wParam, LPA
             return 0;
         }
     }
-    /* Theme: handle WM_CTLCOLOR for MMMAIN's own children */
-    if (theme_active && theme_panel_brush) {
-        switch (msg) {
-        case WM_CTLCOLORSTATIC:
-        case WM_CTLCOLOREDIT:
-        case WM_CTLCOLORLISTBOX:
-        {
-            HDC hdc = (HDC)wParam;
-            SetTextColor(hdc, theme_text_color);
-            SetBkColor(hdc, theme_panel_color);
-            return (LRESULT)theme_panel_brush;
-        }
-        case WM_CTLCOLORDLG:
-            return (LRESULT)theme_panel_brush;
-        }
-    }
     return CallWindowProcA(orig_mmmain_proc, hwnd, msg, wParam, lParam);
 }
 
@@ -1963,7 +1629,6 @@ static void inject_menu(HWND main_wnd)
     slop_menu = CreatePopupMenu();
     AppendMenuA(slop_menu, MF_STRING, IDM_SLOP_ABOUT, "Proxy Info...");
     AppendMenuA(slop_menu, MF_SEPARATOR, 0, NULL);
-    AppendMenuA(slop_menu, MF_STRING, IDM_SLOP_THEMES, "Themes...");
     AppendMenuA(slop_menu, MF_STRING, IDM_SLOP_ROUNDTIMER, "Show Round Timer");
     AppendMenuA(slop_menu, MF_SEPARATOR, 0, NULL);
     AppendMenuA(slop_menu, MF_STRING, IDM_SLOP_PRO_STEP,
@@ -1981,12 +1646,7 @@ static void inject_menu(HWND main_wnd)
 
     logmsg("[mudplugin] MajorSLOP menu injected to menu bar\n");
 
-    /* Apply initial theme (if one was set in config) */
-    theme_update_brushes();
-    if (theme_active) theme_apply_all();
-
     /* Start background threads */
-    CreateThread(NULL, 0, theme_scanner_thread, NULL, 0, NULL);
     CreateThread(NULL, 0, pro_step_thread, NULL, 0, NULL);
     CreateThread(NULL, 0, auto_struct_thread, NULL, 0, NULL);
     CreateThread(NULL, 0, mmansi_scanner_thread, NULL, 0, NULL);
@@ -2016,10 +1676,13 @@ static void inject_menu(HWND main_wnd)
                 AppendMenuA(sub, MF_STRING | MF_GRAYED, 0, info);
                 AppendMenuA(sub, MF_SEPARATOR, 0, NULL);
 
-                /* Plugin-specific items use IDs: IDM_PLUGIN_BASE + i*10 + offset */
+                /* Only add MMUDPy-specific items for MMUDPy plugin */
                 int base_id = IDM_PLUGIN_BASE + i * 10;
-                AppendMenuA(sub, MF_STRING, base_id + 0, "Show/Hide Console");
-                AppendMenuA(sub, MF_STRING, base_id + 1, "Script Manager...");
+                if (p && p->name && _stricmp(p->name, "MMUDPy") == 0) {
+                    AppendMenuA(sub, MF_STRING, base_id + 0, "Show/Hide Console");
+                    AppendMenuA(sub, MF_STRING, base_id + 1, "Script Manager...");
+                }
+                /* Other plugins register their own items via add_menu_item() */
 
                 AppendMenuA(plugins_menu, MF_POPUP, (UINT_PTR)sub, pname);
             }
@@ -2032,6 +1695,33 @@ static void inject_menu(HWND main_wnd)
     }
 
     DrawMenuBar(main_wnd);
+
+    /* Force frame recalculation — adding menu items can change menu bar height,
+       which shifts the client area. Without this, toolbar/MMANSI stay at stale positions. */
+    SetWindowPos(main_wnd, NULL, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
+
+    /* Log child window positions for debugging */
+    {
+        HWND tb = FindWindowExA(main_wnd, NULL, "ToolbarWindow32", NULL);
+        HWND ansi = FindWindowExA(main_wnd, NULL, "MMANSI", NULL);
+        HWND sb = FindWindowExA(main_wnd, NULL, "msctls_statusbar32", NULL);
+        RECT r;
+        if (tb) {
+            GetWindowRect(tb, &r);
+            POINT pt = {r.left, r.top};
+            ScreenToClient(main_wnd, &pt);
+            logmsg("[mudplugin] Toolbar pos: client(%d,%d) size(%dx%d) vis=%d\n",
+                   pt.x, pt.y, r.right - r.left, r.bottom - r.top, IsWindowVisible(tb));
+        }
+        if (ansi) {
+            GetWindowRect(ansi, &r);
+            POINT pt = {r.left, r.top};
+            ScreenToClient(main_wnd, &pt);
+            logmsg("[mudplugin] MMANSI pos: client(%d,%d) size(%dx%d)\n",
+                   pt.x, pt.y, r.right - r.left, r.bottom - r.top);
+        }
+    }
 }
 
 /* ================================================================
@@ -2712,43 +2402,46 @@ static void handle_client(SOCKET client)
                     }
                 }
 
-            } else if (strncmp(line_start, "SETTHEME ", 9) == 0) {
-                /* SETTHEME <index_or_name>
-                 * Set theme by index (0-15), name prefix, or "none" */
-                char *arg = line_start + 9;
-                if (_stricmp(arg, "none") == 0) {
-                    theme_idx = -1;
-                    theme_apply_all();
-                    cfg_save();
-                    strcpy(resp, "OK theme=none\n");
-                } else {
-                int idx = atoi(arg);
-                /* Try numeric index first */
-                if (idx >= 0 && idx < (int)SLOP_THEME_COUNT && (arg[0] >= '0' && arg[0] <= '9')) {
-                    theme_idx = idx;
-                    theme_apply_all();
-                    cfg_save();
-                    sprintf(resp, "OK theme=%s\n", SLOP_THEMES[idx].name);
-                } else {
-                    /* Match by name prefix (case-insensitive) */
-                    int found = -1;
-                    int alen = (int)strlen(arg);
-                    for (int i = 0; i < (int)SLOP_THEME_COUNT; i++) {
-                        if (_strnicmp(arg, SLOP_THEMES[i].name, alen) == 0) {
-                            found = i;
-                            break;
-                        }
-                    }
-                    if (found >= 0) {
-                        theme_idx = found;
-                        theme_apply_all();
-                        cfg_save();
-                        sprintf(resp, "OK theme=%s\n", SLOP_THEMES[found].name);
-                    } else {
-                        strcpy(resp, "ERR unknown theme\n");
+            } else if (strncmp(line_start, "TTSAY ", 6) == 0) {
+                /* TTSAY <engine_name> <text> [pitch] [speed]
+                 * Speak text using a named TTS engine plugin.
+                 * Engine name matches plugin name (case-insensitive prefix).
+                 * Examples: TTSAY SAM Hello world 64 72
+                 *           TTSAY espeak Hello world */
+                char *arg = line_start + 6;
+                /* Parse engine name (first word) */
+                char engine[32] = {0};
+                int ei = 0;
+                while (*arg && *arg != ' ' && ei < 31) engine[ei++] = *arg++;
+                engine[ei] = '\0';
+                while (*arg == ' ') arg++;
+
+                /* Parse text (everything up to optional trailing numbers) */
+                char tts_text[256] = {0};
+                int tts_pitch = 0, tts_speed = 0;
+
+                /* Simple: take the rest as text. If last 1-2 tokens are numbers, use them as pitch/speed */
+                strncpy(tts_text, arg, 255);
+
+                /* Find matching TTS engine */
+                tts_speak_fn found_fn = NULL;
+                const char *found_name = NULL;
+                int elen = (int)strlen(engine);
+                for (int t = 0; t < tts_engine_count; t++) {
+                    if (_strnicmp(engine, tts_engines[t].name, elen) == 0) {
+                        found_fn = tts_engines[t].speak;
+                        found_name = tts_engines[t].name;
+                        break;
                     }
                 }
-                } /* close "none" else */
+                if (found_fn) {
+                    found_fn(tts_text, tts_pitch, tts_speed);
+                    sprintf(resp, "OK tts=%s\n", found_name);
+                } else if (tts_engine_count == 0) {
+                    strcpy(resp, "ERR no TTS engines loaded\n");
+                } else {
+                    sprintf(resp, "ERR unknown TTS engine '%s'\n", engine);
+                }
 
             } else if (strncmp(line_start, "ROUNDTICK ", 10) == 0) {
                 /* ROUNDTICK <round_num>
@@ -2832,20 +2525,6 @@ static void handle_client(SOCKET client)
     proxy_connected = 0;
     logmsg("[mudplugin] Client disconnected\n");
     closesocket(client);
-}
-
-/* ---- Theme scanner thread (catches newly opened dialogs) ---- */
-
-static DWORD WINAPI theme_scanner_thread(LPVOID param)
-{
-    (void)param;
-    while (1) {
-        Sleep(2000);
-        if (theme_active) {
-            theme_apply_all();
-        }
-    }
-    return 0;
 }
 
 /* ---- MMANSI terminal buffer reader & Location parser ---- */
@@ -3470,6 +3149,17 @@ static void load_plugins(void)
         lp->desc = desc;
         strncpy(lp->path, full_path, MAX_PATH - 1);
         lp->loaded = 1;
+
+        /* Check for TTS export: tts_speak(const char*, int, int) */
+        tts_speak_fn speak_fn = (tts_speak_fn)GetProcAddress(dll, "tts_speak");
+        if (speak_fn) {
+            tts_engines[tts_engine_count].speak = speak_fn;
+            tts_engines[tts_engine_count].name = desc->name;
+            tts_engines[tts_engine_count].plugin_idx = plugin_count;
+            tts_engine_count++;
+            logmsg("[plugins] TTS engine found: %s\n", desc->name);
+        }
+
         plugin_count++;
 
         logmsg("[plugins] Loaded: %s v%s by %s — %s\n",
