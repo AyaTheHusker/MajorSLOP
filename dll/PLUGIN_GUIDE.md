@@ -76,9 +76,7 @@ static void my_shutdown(void) {
 
 static void my_on_line(const char *line) {
     /* Fired for every new terminal line */
-    if (strstr(line, "drops dead")) {
-        api->log("[hello] Something died: %s\n", line);
-    }
+    api->log("[hello] %s\n", line);
 }
 
 static slop_plugin_t plugin = {
@@ -86,7 +84,7 @@ static slop_plugin_t plugin = {
     .api_version = SLOP_API_VERSION,
     .name        = "Hello Plugin",
     .author      = "YourName",
-    .description = "Logs monster deaths",
+    .description = "Logs all terminal lines",
     .version     = "1.0.0",
     .init        = my_init,
     .shutdown    = my_shutdown,
@@ -767,31 +765,26 @@ way to react to game output.
 
 **What you get:** Plain ASCII text, trailing spaces stripped.
 
-**Common patterns to match:**
+**Verified combat patterns** (from the working `is_combat_event()` in MajorSLOP and `parser.py`):
 
 ```c
-// Damage dealt/received
-if (strstr(line, " damage!"))              // "X hits Y for N damage!"
-// Misses
-if (stristr(line, "misses "))              // "X misses Y"
-if (stristr(line, "dodges "))              // "X dodges Y"
-if (stristr(line, "fumbles "))             // "X fumbles"
-if (stristr(line, "blocks "))              // "X blocks Y"
-if (stristr(line, "bounces off"))          // "X bounces off Y"
-if (stristr(line, "parries "))             // "X parries Y"
-// Player attacks
-if (starts_with("You ") && strstr(line, " at "))   // "You swing at X"
+// These are the patterns used by the round timer — tested and confirmed:
+if (strstr(line, " damage!"))              // hit for N damage
+if (stristr(line, "misses "))              // miss
+if (stristr(line, "dodges "))              // dodge
+if (stristr(line, "fumbles "))             // fumble
+if (stristr(line, "blocks "))              // block
+if (stristr(line, "bounces off"))          // bounce off armor
+if (stristr(line, "parries "))             // parry
+if (starts_with("You ") && strstr(line, " at "))   // "You swing at ..."
 if (starts_with("Your ") && strstr(line, " glances off"))  // glancing blow
-// Death
-if (strstr(line, " drops dead"))           // monster died
-// Room changes
-if (strstr(line, "Also here:"))            // entities in room
-// Communication
-if (strstr(line, " gossips: "))            // gossip channel
-if (strstr(line, " telepaths: "))          // telepathy
-// Location (from `rm` command)
+
+// Location from `rm` command output (verified):
 if (strncmp(line, "Location:", 9) == 0)    // "Location: X,Y"
 ```
+
+Other game output patterns (chat, death, room descriptions, etc.) should be verified
+against actual terminal output before relying on them in plugins.
 
 ### `on_round(int round_num)`
 
@@ -973,128 +966,197 @@ static void my_shutdown(void) {
 
 ---
 
-## Example Plugins
+## Example: How the Round Timer Works
 
-### DPS Meter
+This is extracted from the actual working MajorSLOP source code (`msimg32_proxy.c`).
+It shows how the built-in round timer detects combat rounds by parsing terminal lines
+and renders a GDI timer widget. This is the same code running in production.
 
-```c
-#include "slop_plugin.h"
-#include <string.h>
-#include <stdlib.h>
+### Combat Round Detection
 
-static const slop_api_t *api = NULL;
-static int total_damage = 0;
-static int round_count = 0;
-
-static int parse_damage(const char *line) {
-    /* Look for "for N damage!" */
-    const char *p = strstr(line, " for ");
-    if (!p) return 0;
-    p += 5;
-    int dmg = atoi(p);
-    if (dmg > 0 && strstr(p, " damage!"))
-        return dmg;
-    return 0;
-}
-
-static void on_line(const char *line) {
-    int dmg = parse_damage(line);
-    if (dmg > 0) total_damage += dmg;
-}
-
-static void on_round(int round_num) {
-    round_count = round_num;
-    if (round_count > 0) {
-        float dps = (float)total_damage / (round_count * 5.0f);
-        api->log("[dps] Total: %d dmg over %d rounds (%.1f DPS)\n",
-                 total_damage, round_count, dps);
-    }
-}
-
-static int my_init(const slop_api_t *a) {
-    api = a;
-    api->log("[dps_meter] Loaded\n");
-    return 0;
-}
-
-static void my_shutdown(void) {}
-
-static slop_plugin_t plugin = {
-    .magic = SLOP_PLUGIN_MAGIC, .api_version = SLOP_API_VERSION,
-    .name = "DPS Meter", .author = "You", .version = "1.0.0",
-    .description = "Tracks damage per second",
-    .init = my_init, .shutdown = my_shutdown,
-    .on_line = on_line, .on_round = on_round, .on_wndproc = NULL,
-};
-
-SLOP_EXPORT slop_plugin_t *slop_get_plugin(void) { return &plugin; }
-BOOL WINAPI DllMain(HINSTANCE h, DWORD r, LPVOID p) { return TRUE; }
-```
-
-### Kill Counter with Popup
+Rounds are detected by watching for combat event patterns in the terminal output.
+On ParaMUD, rounds are always 5 seconds apart. Multiple events can fire within the
+same round (multi-hit, party members, etc.), so we cluster events within a 500ms window.
+The first event in a new cluster = new round.
 
 ```c
-#include "slop_plugin.h"
-#include <string.h>
+#define RD_CLUSTER_GAP 500.0  /* ms — events within this gap are same round */
 
-static const slop_api_t *api = NULL;
-static int kills = 0;
-static HWND counter_hwnd = NULL;
+static double rd_last_event_ts = 0.0;
+static int rd_round_num = 0;
 
-static LRESULT CALLBACK counter_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
-    if (msg == WM_PAINT) {
-        PAINTSTRUCT ps; HDC hdc = BeginPaint(hwnd, &ps);
-        RECT r; GetClientRect(hwnd, &r);
-        FillRect(hdc, &r, (HBRUSH)GetStockObject(BLACK_BRUSH));
-        SetBkMode(hdc, TRANSPARENT);
-        SetTextColor(hdc, RGB(255, 80, 80));
-        char buf[32]; sprintf(buf, "Kills: %d", kills);
-        HFONT f = CreateFontA(28,0,0,0,FW_BOLD,0,0,0,0,0,0,ANTIALIASED_QUALITY,0,"Arial");
-        SelectObject(hdc, f);
-        DrawTextA(hdc, buf, -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-        DeleteObject(f);
-        EndPaint(hwnd, &ps);
-        return 0;
+/* Case-insensitive strstr */
+static const char *stristr(const char *haystack, const char *needle)
+{
+    if (!needle[0]) return haystack;
+    for (; *haystack; haystack++) {
+        const char *h = haystack, *n = needle;
+        while (*h && *n && ((*h | 0x20) == (*n | 0x20))) { h++; n++; }
+        if (!*n) return haystack;
     }
-    if (msg == WM_CLOSE) { ShowWindow(hwnd, SW_HIDE); return 0; }
-    return DefWindowProcA(hwnd, msg, wp, lp);
+    return NULL;
 }
 
-static void on_line(const char *line) {
-    if (strstr(line, " drops dead")) {
-        kills++;
-        if (counter_hwnd) InvalidateRect(counter_hwnd, NULL, FALSE);
+static int starts_with_i(const char *line, const char *prefix)
+{
+    while (*prefix) {
+        if ((*line | 0x20) != (*prefix | 0x20)) return 0;
+        line++; prefix++;
     }
+    return 1;
 }
 
-static int my_init(const slop_api_t *a) {
-    api = a;
-    WNDCLASSA wc = {0};
-    wc.lpfnWndProc = counter_proc;
-    wc.hInstance = GetModuleHandle(NULL);
-    wc.lpszClassName = "KillCounter";
-    RegisterClassA(&wc);
-    counter_hwnd = CreateWindowExA(WS_EX_TOPMOST|WS_EX_TOOLWINDOW,
-        "KillCounter","Kills",WS_POPUP|WS_VISIBLE|WS_CAPTION,
-        20,200,160,60,NULL,NULL,GetModuleHandle(NULL),NULL);
+/* Check if a line is a combat event (hit, miss, dodge, fumble, etc.)
+ * These all fire at round onset. Matches the EXACT same patterns as
+ * parser.py: RE_DAMAGE, RE_COMBAT_MISS, RE_PLAYER_SWING, RE_GLANCES_OFF */
+static int is_combat_event(const char *line)
+{
+    int len = (int)strlen(line);
+    if (len < 5) return 0;
+
+    /* RE_DAMAGE: "for N damage!" */
+    if (strstr(line, " damage!")) return 1;
+
+    /* RE_COMBAT_MISS: miss, dodge, fumble, block, bounce off, parry */
+    if (stristr(line, "misses ")) return 1;
+    if (stristr(line, "miss ")) return 1;
+    if (stristr(line, "dodges ")) return 1;
+    if (stristr(line, "dodge ")) return 1;
+    if (stristr(line, "fumbles ")) return 1;
+    if (stristr(line, "fumble ")) return 1;
+    if (stristr(line, "blocks ")) return 1;
+    if (stristr(line, "block ")) return 1;
+    if (stristr(line, "bounces off")) return 1;
+    if (stristr(line, "bounce off")) return 1;
+    if (stristr(line, "parries ")) return 1;
+    if (stristr(line, "parry ")) return 1;
+
+    /* RE_PLAYER_SWING: "You swing at ...", "You swipe at ..." */
+    if (starts_with_i(line, "You ") && strstr(line, " at ")) return 1;
+
+    /* RE_GLANCES_OFF: "Your sword glances off ..." */
+    if (starts_with_i(line, "Your ") && strstr(line, " glances off")) return 1;
+
     return 0;
 }
 
-static void my_shutdown(void) {
-    if (counter_hwnd) DestroyWindow(counter_hwnd);
+/* Process one line from the terminal.
+ * Round detection is ONLY based on actual swings (hits/misses/damage).
+ * Combat Engaged/Off are IRRELEVANT — they fire 100x per round via macros. */
+static void rd_process_line(const char *line)
+{
+    if (!line[0]) return;
+
+    if (is_combat_event(line)) {
+        double now = (double)GetTickCount64();
+        /* First event, or >500ms since last cluster = NEW ROUND */
+        if (rd_last_event_ts == 0.0 || (now - rd_last_event_ts) > RD_CLUSTER_GAP) {
+            rd_round_num++;
+            rt_on_round_tick(rd_round_num);
+        }
+        rd_last_event_ts = now;
+    }
+}
+```
+
+### MMANSI Terminal Scanner
+
+The round timer reads directly from MegaMUD's MMANSI terminal buffer (reverse engineered
+via Ghidra). It uses a rolling hash set to detect genuinely new lines vs. scrolled
+old content.
+
+```c
+#define MMANSI_TEXT_OFF    0x62    /* text buffer start in window data struct */
+#define MMANSI_ROW_STRIDE  0x84   /* 132 bytes per row */
+#define MMANSI_MAX_ROWS    60
+
+/* Read one row of plain text from the MMANSI terminal buffer */
+static int mmansi_read_row(HWND mmansi, int row, char *out, int out_sz)
+{
+    LONG wdata = GetWindowLongA(mmansi, 4);
+    if (!wdata) return 0;
+    int offset = MMANSI_TEXT_OFF + row * MMANSI_ROW_STRIDE;
+    const char *src = (const char *)(wdata + offset);
+    int max = (out_sz - 1 < MMANSI_ROW_STRIDE) ? out_sz - 1 : MMANSI_ROW_STRIDE;
+    memcpy(out, src, max);
+    out[max] = '\0';
+    /* Strip trailing spaces */
+    for (int i = max - 1; i >= 0 && out[i] == ' '; i--)
+        out[i] = '\0';
+    return (int)strlen(out);
 }
 
-static slop_plugin_t plugin = {
-    .magic = SLOP_PLUGIN_MAGIC, .api_version = SLOP_API_VERSION,
-    .name = "Kill Counter", .author = "You", .version = "1.0.0",
-    .description = "Floating kill counter overlay",
-    .init = my_init, .shutdown = my_shutdown,
-    .on_line = on_line, .on_round = NULL, .on_wndproc = NULL,
-};
+/* Hash-based dedup: track last 256 line hashes to detect new content */
+static unsigned int line_hash(const char *s)
+{
+    unsigned int h = 5381;
+    while (*s) { h = h * 33 + (unsigned char)*s; s++; }
+    return h;
+}
 
-SLOP_EXPORT slop_plugin_t *slop_get_plugin(void) { return &plugin; }
-BOOL WINAPI DllMain(HINSTANCE h, DWORD r, LPVOID p) { return TRUE; }
+#define SEEN_SIZE 256
+static unsigned int seen_hashes[SEEN_SIZE];
+static int seen_head = 0;
+static int seen_count = 0;
+
+/* Scanner thread: polls terminal every 80ms, feeds new lines to round detector */
+/* Each poll reads all 60 rows. If a row's content changed AND its hash
+ * isn't in the seen set, it's a genuinely new line — process it. */
 ```
+
+### Round Timer GDI Widget
+
+The timer renders a circular progress arc that sweeps from green to yellow to red
+over the 5-second round period. All sizes scale proportionally when the window is
+resized.
+
+```c
+static void rt_paint(HWND hwnd)
+{
+    PAINTSTRUCT ps;
+    HDC hdc = BeginPaint(hwnd, &ps);
+    RECT cr;
+    GetClientRect(hwnd, &cr);
+    int W = cr.right, H = cr.bottom;
+
+    /* Double buffer */
+    HDC mem = CreateCompatibleDC(hdc);
+    HBITMAP bmp = CreateCompatibleBitmap(hdc, W, H);
+    SelectObject(mem, bmp);
+
+    /* Scale ring to window size */
+    int cx = W / 2;
+    int R = W / 2 - 25;
+    if (R > (H / 2 - 40)) R = H / 2 - 40;
+    if (R < 20) R = 20;
+    int cy = R + 20;
+
+    /* Draw progress arc as series of line segments — green -> yellow -> red */
+    double elapsed = now - rt_last_tick_ts;
+    double phase = fmod(elapsed, period) / period;
+    int steps = 48;
+    for (int i = 0; i <= steps; i++) {
+        double t = (double)i / steps;
+        if (t > phase) break;
+        double a = -PI/2 + t * 2*PI;
+        int px = cx + (int)(cos(a) * R);
+        int py = cy + (int)(sin(a) * R);
+        /* Color: green -> yellow at 50%, yellow -> red at 67%+ */
+        /* ... segment drawing with CreatePen/LineTo ... */
+    }
+
+    /* Ball at current phase position */
+    /* Elapsed text: "2.3s / 5.0s" */
+    /* Center text: "ROUND" or "WAITING FOR SYNC" */
+
+    BitBlt(hdc, 0, 0, W, H, mem, 0, 0, SRCCOPY);
+    /* ... cleanup GDI objects ... */
+    EndPaint(hwnd, &ps);
+}
+```
+
+The full source code for the round timer, MMANSI scanner, combat detection, and all
+other MajorSLOP features is in `dll/msimg32_proxy.c`.
 
 ---
 

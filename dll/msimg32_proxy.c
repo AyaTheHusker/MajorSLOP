@@ -78,6 +78,18 @@
 #define OFF_CUR_PATH_STEP 0x5898  /* int32 - current path step (1-based) */
 #define OFF_PATH_TOTAL    0x5894  /* int32 - total steps in path */
 #define OFF_PATHING_ACTIVE 0x5664 /* int32 - non-zero if currently pathing */
+
+/* Bless command slots (10 × char[21], stride 0x15) */
+#define OFF_BLESS_CMD1    0x4F1F
+#define OFF_BLESS_STRIDE  0x15
+#define OFF_BLESS_COUNT   10
+/* Party bless command slots (4 × char[21]) */
+#define OFF_PARTY_BLESS1  0x4FF1
+#define OFF_PARTY_BLESS_COUNT 4
+/* Heal/Regen/Flux command slots (char[21] each) */
+#define OFF_HEAL_CMD      0x4E40
+#define OFF_REGEN_CMD     0x4E55
+#define OFF_FLUX_CMD      0x4E6A
 #define STRUCT_MIN_SIZE   0x9700
 
 /* MMANSI terminal buffer layout (from Ghidra RE)
@@ -540,6 +552,19 @@ static void slop_show_about(HWND parent)
 #define IDM_PLUGIN_BASE     41000  /* plugin menu items: 41000..41099 */
 #define IDM_THEME_COMBO     70030
 
+/* Round timer right-click context menu IDs */
+#define IDM_RT_SYNC_SPELL   40910
+#define IDM_RT_PERFORM_SYNC 40911
+#define IDM_RT_HIDE         40912
+
+/* Manual sync spell picker window */
+#define RT_SPELL_CLASS      "MajorSLOPSpellPicker"
+#define IDC_SPELL_LIST      50001
+#define IDC_SPELL_EDIT      50002
+#define IDC_SPELL_OK        50003
+#define IDC_SPELL_CANCEL    50004
+#define IDC_SPELL_ROUNDS    50005
+
 /* ---- Theme definitions (mirrors web client themes.js) ---- */
 typedef struct {
     const char *key;     /* theme ID string */
@@ -576,6 +601,14 @@ static const slop_theme_t SLOP_THEMES[] = {
 
 /* Forward declarations */
 static volatile int rt_visible;
+static void rt_show_context_menu(HWND hwnd, int x, int y);
+static void rt_show_spell_picker(HWND parent);
+static void rt_perform_manual_sync(void);
+static int starts_with_i(const char *line, const char *prefix);
+static const char *stristr(const char *haystack, const char *needle);
+static void plugins_on_round(int round_num);
+static int rd_round_num = 0;       /* round counter — shared between auto and manual sync */
+static double rd_last_event_ts;    /* timestamp of last combat event (for clustering) */
 static DWORD WINAPI theme_scanner_thread(LPVOID param);
 static DWORD WINAPI pro_step_thread(LPVOID param);
 static DWORD WINAPI auto_struct_thread(LPVOID param);
@@ -587,6 +620,16 @@ static int loc_map;
 static int loc_room;
 
 /* Plugin system forward declarations */
+#define SLOP_MAX_PLUGINS 16
+
+typedef struct {
+    HMODULE            dll;
+    slop_plugin_t     *desc;
+    char               path[MAX_PATH];
+    int                loaded;
+} loaded_plugin_t;
+
+static loaded_plugin_t plugins[SLOP_MAX_PLUGINS];
 static int plugin_count;
 static void plugins_on_line(const char *line);
 static void plugins_on_round(int round_num);
@@ -851,6 +894,25 @@ static void theme_apply_all(void)
 
 static HWND theme_settings_hwnd = NULL;
 
+/* ---- Manual Sync Spell state ---- */
+static char rt_sync_spell[22] = {0};  /* selected spell command (4-letter abbrev) */
+static HWND rt_spell_picker_hwnd = NULL;
+
+/* Read a null-terminated string from MegaMUD struct */
+static const char *rt_read_str(DWORD offset, int maxlen)
+{
+    static char buf[64];
+    if (!struct_base) { buf[0] = '\0'; return buf; }
+    const char *src = (const char *)(struct_base + offset);
+    int i;
+    for (i = 0; i < maxlen && i < 63 && src[i] && src[i] != '\0'; i++)
+        buf[i] = src[i];
+    buf[i] = '\0';
+    /* trim trailing spaces */
+    while (i > 0 && buf[i-1] == ' ') buf[--i] = '\0';
+    return buf;
+}
+
 /* Read an i32 from struct (used by round timer for combat state) */
 static int rt_read_i32(DWORD offset)
 {
@@ -1046,7 +1108,7 @@ static void rt_paint(HWND hwnd)
 
         /* Elapsed text */
         char elapsed_txt[32];
-        sprintf(elapsed_txt, "%.1fs / %.1fs", fmod(elapsed, period) / 1000.0, period / 1000.0);
+        sprintf(elapsed_txt, "%.1fs / 5.0s", fmod(elapsed, period) / 1000.0);
         SetBkMode(mem, TRANSPARENT);
         SetTextColor(mem, RGB(th->dim_r, th->dim_g, th->dim_b));
         HFONT small_font = CreateFontA(fontSmall, 0, 0, 0, FW_NORMAL, 0, 0, 0, ANSI_CHARSET,
@@ -1111,21 +1173,6 @@ static void rt_paint(HWND hwnd)
         DeleteObject(df);
     }
 
-    /* Period label */
-    {
-        char period_txt[48];
-        sprintf(period_txt, "Period: %.0fms", rt_round_period);
-        HFONT pf = CreateFontA(fontTiny, 0, 0, 0, FW_NORMAL, 0, 0, 0, ANSI_CHARSET,
-                                0, 0, ANTIALIASED_QUALITY, 0, "Arial");
-        HFONT opf = (HFONT)SelectObject(mem, pf);
-        SetTextColor(mem, RGB(th->dim_r * 3 / 4, th->dim_g * 3 / 4, th->dim_b * 3 / 4));
-        SIZE sz;
-        GetTextExtentPoint32A(mem, period_txt, (int)strlen(period_txt), &sz);
-        TextOutA(mem, cx - sz.cx / 2, H - 16, period_txt, (int)strlen(period_txt));
-        SelectObject(mem, opf);
-        DeleteObject(pf);
-    }
-
     /* Blit to screen */
     BitBlt(hdc, 0, 0, W, H, mem, 0, 0, SRCCOPY);
     SelectObject(mem, oldBr);
@@ -1141,6 +1188,11 @@ static LRESULT CALLBACK slop_rt_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
     case WM_CREATE:
         SetTimer(hwnd, RT_TIMER_ID, RT_TIMER_MS, NULL);
         return 0;
+    case WM_MOUSEACTIVATE:
+        return MA_NOACTIVATE;
+    case WM_LBUTTONDBLCLK:
+        rt_perform_manual_sync();
+        return 0;
     case WM_TIMER:
         if (wParam == RT_TIMER_ID) {
             if (rt_delta_fade > 0.01) rt_delta_fade -= 0.008;
@@ -1153,6 +1205,33 @@ static LRESULT CALLBACK slop_rt_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
     case WM_SIZE:
         InvalidateRect(hwnd, NULL, FALSE);
         return 0;
+    case WM_RBUTTONUP:
+    {
+        POINT pt;
+        pt.x = (short)LOWORD(lParam);
+        pt.y = (short)HIWORD(lParam);
+        ClientToScreen(hwnd, &pt);
+        rt_show_context_menu(hwnd, pt.x, pt.y);
+        return 0;
+    }
+    case WM_COMMAND:
+    {
+        int id = LOWORD(wParam);
+        if (id == IDM_RT_SYNC_SPELL) {
+            HWND mw = FindWindowA("MMMAIN", NULL);
+            rt_show_spell_picker(mw ? mw : hwnd);
+            return 0;
+        }
+        if (id == IDM_RT_PERFORM_SYNC) {
+            rt_perform_manual_sync();
+            return 0;
+        }
+        if (id == IDM_RT_HIDE) {
+            SendMessageA(hwnd, WM_CLOSE, 0, 0);
+            return 0;
+        }
+        return 0;
+    }
     case WM_CLOSE:
         rt_visible = 0;
         ShowWindow(hwnd, SW_HIDE);
@@ -1196,6 +1275,7 @@ static void slop_show_round_timer(HWND parent)
     static int registered = 0;
     if (!registered) {
         WNDCLASSA wc = {0};
+        wc.style = CS_DBLCLKS;
         wc.lpfnWndProc = slop_rt_proc;
         wc.hInstance = GetModuleHandle(NULL);
         wc.hCursor = LoadCursor(NULL, IDC_ARROW);
@@ -1218,24 +1298,459 @@ static void slop_show_round_timer(HWND parent)
     logmsg("[mudplugin] Creating round timer at %d,%d (%dx%d)\n", px, py, RT_WIN_W, RT_WIN_H);
 
     rt_hwnd = CreateWindowExA(
-        WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+        WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
         RT_CLASS,
         "Round Timer",
         WS_POPUP | WS_VISIBLE | WS_CAPTION | WS_THICKFRAME,
         px, py, RT_WIN_W, RT_WIN_H,
-        NULL, NULL, GetModuleHandle(NULL), NULL);
+        FindWindowA("MMMAIN", NULL), NULL, GetModuleHandle(NULL), NULL);
 
     logmsg("[mudplugin] CreateWindowExA returned %p\n", rt_hwnd);
 
     if (rt_hwnd) {
         rt_visible = 1;
-        SetWindowPos(rt_hwnd, HWND_TOPMOST, px, py, RT_WIN_W, RT_WIN_H,
-                     SWP_SHOWWINDOW);
+        SetWindowPos(rt_hwnd, NULL, px, py, RT_WIN_W, RT_WIN_H,
+                     SWP_SHOWWINDOW | SWP_NOZORDER);
         if (slop_menu)
             ModifyMenuA(slop_menu, IDM_SLOP_ROUNDTIMER, MF_BYCOMMAND | MF_STRING,
                         IDM_SLOP_ROUNDTIMER, "Hide Round Timer");
         logmsg("[mudplugin] Round timer created and shown\n");
     }
+}
+
+/* ================================================================
+ * Manual Sync Spell Picker
+ * ================================================================ */
+
+/* ---- Read buff/heal spells from Default/Spells.md (MDB2) ---- */
+
+#define RT_MAX_SPELLS 300
+#define OFF_PLAYER_CLASS 0x53C8
+
+typedef struct {
+    char name[32];   /* spell name */
+    char cmd[10];    /* command abbreviation */
+    int  level;      /* level required */
+} rt_spell_entry_t;
+
+static rt_spell_entry_t rt_spell_bank[RT_MAX_SPELLS];
+static int rt_spell_bank_count = 0;
+
+/* Map class ID → allowed spell schools.
+ * Class 3=Cleric→school 1, Class 5=Mage→school 3,4,
+ * Class 7=Bard→school 10, Class 8=Missionary→school 1,
+ * Class 9=Ranger→school 7, Class 10=Paladin→school 1,
+ * Class 11=Warlock→school 5, Class 12=Ninja→school 11,
+ * Class 13=Druid→school 7 */
+static int rt_class_allows_school(int class_id, int school)
+{
+    switch (class_id) {
+    case 3: case 8: case 10: return school == 1;        /* Cleric/Missionary/Paladin */
+    case 5:                  return school == 3 || school == 4; /* Mage */
+    case 7:                  return school == 10;        /* Bard */
+    case 9: case 13:         return school == 7;         /* Ranger/Druid */
+    case 11:                 return school == 5;         /* Warlock */
+    case 12:                 return school == 11;        /* Ninja */
+    default:                 return 0;                   /* Warrior/Thief/Ganbusher etc. */
+    }
+}
+
+static void rt_collect_spells(void)
+{
+    rt_spell_bank_count = 0;
+
+    /* Get player class and level from memory */
+    int player_class = struct_base ? *(int *)(struct_base + OFF_PLAYER_CLASS) : 0;
+    int player_level = struct_base ? *(int *)(struct_base + OFF_PLAYER_LEVEL) : 0;
+
+    /* Build path to Default/Spells.md next to the exe */
+    char path[MAX_PATH];
+    GetModuleFileNameA(NULL, path, MAX_PATH);
+    char *slash = strrchr(path, '\\');
+    if (slash) *(slash + 1) = '\0'; else path[0] = '\0';
+    strcat(path, "Default\\Spells.md");
+
+    /* Read file */
+    HANDLE hf = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL,
+                            OPEN_EXISTING, 0, NULL);
+    if (hf == INVALID_HANDLE_VALUE) {
+        logmsg("[spells] Cannot open %s\n", path);
+        return;
+    }
+    DWORD file_size = GetFileSize(hf, NULL);
+    if (file_size < 0x400) { CloseHandle(hf); return; }
+
+    unsigned char *data = (unsigned char *)malloc(file_size);
+    if (!data) { CloseHandle(hf); return; }
+    DWORD bytes_read;
+    ReadFile(hf, data, file_size, &bytes_read, NULL);
+    CloseHandle(hf);
+
+    int page_size = 0x400;
+    int num_pages = (int)(file_size / page_size);
+
+    for (int pg = 1; pg < num_pages && rt_spell_bank_count < RT_MAX_SPELLS; pg++) {
+        unsigned char *page = data + pg * page_size;
+        /* Data leaf pages have type 0x0000 */
+        unsigned short page_type = *(unsigned short *)page;
+        if (page_type != 0) continue;
+
+        int pos = 0x0C;  /* skip page header */
+        while (pos < page_size - 10) {
+            int rec_len_byte = page[pos];
+            if (rec_len_byte == 0 || rec_len_byte == 0xFF) break;
+            int total = rec_len_byte + 1;
+            if (pos + total > page_size) break;
+
+            /* Find 0x80 marker after key */
+            int marker = -1;
+            for (int i = 2; i < 20 && i < total; i++) {
+                if (page[pos + i] == 0x80) { marker = i; break; }
+            }
+            if (marker < 0 || marker + 3 + 156 > total) {
+                pos += total;
+                continue;
+            }
+
+            unsigned char *payload = &page[pos + marker + 3];
+
+            /* Spell name at +0x00 (30 bytes) */
+            char name[32] = {0};
+            memcpy(name, payload, 30);
+            name[30] = '\0';
+            /* Null-terminate at first \0 */
+            for (int i = 0; i < 30; i++) if (name[i] == '\0') break;
+
+            /* Command at +0x1E (7 bytes) */
+            char cmd[10] = {0};
+            memcpy(cmd, payload + 0x1E, 7);
+            cmd[7] = '\0';
+
+            /* Level required at +0x52 */
+            int spell_level = payload[0x52];
+            /* Target type at +0x60 */
+            int target_type = payload[0x60];
+            /* Spell school at +0x61 */
+            int school = payload[0x61];
+
+            /* Filter: must have name and command */
+            if (!name[0] || !cmd[0]) { pos += total; continue; }
+            /* Filter: skip item-granted spells (id >= 10000, cmd starts with #) */
+            if (cmd[0] == '#') { pos += total; continue; }
+
+            /* Filter: buff/heal/utility only — NOT attacks
+             * 1=self buff, 2=heal/cure, 7=utility, 13=party buff */
+            if (target_type != 1 && target_type != 2 &&
+                target_type != 7 && target_type != 13) {
+                pos += total;
+                continue;
+            }
+
+            /* Filter by class (only if we know it — if 0, show all) */
+            if (player_class > 0 && school > 0 && !rt_class_allows_school(player_class, school)) {
+                pos += total;
+                continue;
+            }
+
+            /* Filter by level (only if we know it — if 0, show all) */
+            if (player_level > 0 && spell_level > 0 && spell_level > player_level) {
+                pos += total;
+                continue;
+            }
+
+            /* Add to bank */
+            rt_spell_entry_t *e = &rt_spell_bank[rt_spell_bank_count];
+            strncpy(e->name, name, 31); e->name[31] = '\0';
+            strncpy(e->cmd, cmd, 9); e->cmd[9] = '\0';
+            e->level = spell_level;
+            rt_spell_bank_count++;
+
+            pos += total;
+        }
+    }
+
+    free(data);
+    logmsg("[spells] Loaded %d buff/heal spells for class=%d level=%d\n",
+           rt_spell_bank_count, player_class, player_level);
+}
+
+/* Populate a ComboBox with "name (cmd)" entries */
+static void rt_populate_spell_combo(HWND cb)
+{
+    SendMessageA(cb, CB_RESETCONTENT, 0, 0);
+    rt_collect_spells();
+    if (rt_spell_bank_count == 0) {
+        SendMessageA(cb, CB_ADDSTRING, 0, (LPARAM)"(no spells available)");
+        SendMessageA(cb, CB_SETCURSEL, 0, 0);
+        return;
+    }
+    int sel_idx = -1;
+    for (int i = 0; i < rt_spell_bank_count; i++) {
+        char display[48];
+        sprintf(display, "%s (%s)", rt_spell_bank[i].name, rt_spell_bank[i].cmd);
+        int idx = (int)SendMessageA(cb, CB_ADDSTRING, 0, (LPARAM)display);
+        /* Store the spell bank index as item data */
+        SendMessageA(cb, CB_SETITEMDATA, idx, (LPARAM)i);
+        if (rt_sync_spell[0] && _stricmp(rt_spell_bank[i].cmd, rt_sync_spell) == 0)
+            sel_idx = idx;
+    }
+    if (sel_idx >= 0)
+        SendMessageA(cb, CB_SETCURSEL, sel_idx, 0);
+}
+
+/* Manual sync rounds setting */
+/* Forward declaration */
+static void rt_perform_manual_sync(void);
+
+static LRESULT CALLBACK slop_spell_picker_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+{
+    switch (msg) {
+    case WM_CREATE:
+    {
+        HINSTANCE hinst = GetModuleHandle(NULL);
+        int y = 10;
+
+        /* Spell command entry */
+        CreateWindowExA(0, "STATIC", "Spell cmd:",
+                        WS_CHILD | WS_VISIBLE,
+                        10, y + 2, 70, 18, hwnd, NULL, hinst, NULL);
+        HWND ed = CreateWindowExA(WS_EX_CLIENTEDGE, "EDIT", rt_sync_spell,
+                        WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_LOWERCASE,
+                        82, y, 120, 22, hwnd,
+                        (HMENU)(UINT_PTR)IDC_SPELL_EDIT,
+                        hinst, NULL);
+        SendMessageA(ed, EM_SETLIMITTEXT, 20, 0);
+        y += 32;
+
+        /* OK / Cancel */
+        CreateWindowExA(0, "BUTTON", "OK",
+                        WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
+                        40, y, 70, 26, hwnd, (HMENU)(UINT_PTR)IDC_SPELL_OK,
+                        hinst, NULL);
+        CreateWindowExA(0, "BUTTON", "Cancel",
+                        WS_CHILD | WS_VISIBLE,
+                        120, y, 70, 26, hwnd, (HMENU)(UINT_PTR)IDC_SPELL_CANCEL,
+                        hinst, NULL);
+
+        return 0;
+    }
+    case WM_COMMAND:
+    {
+        int id = LOWORD(wParam);
+
+        if (id == IDC_SPELL_OK) {
+            HWND ed = GetDlgItem(hwnd, IDC_SPELL_EDIT);
+            if (ed) {
+                char manual[32] = {0};
+                GetWindowTextA(ed, manual, sizeof(manual));
+                char *p = manual; while (*p == ' ') p++;
+                if (p[0]) {
+                    strncpy(rt_sync_spell, p, 21);
+                    rt_sync_spell[21] = '\0';
+                    int l = (int)strlen(rt_sync_spell);
+                    while (l > 0 && rt_sync_spell[l-1] == ' ') rt_sync_spell[--l] = '\0';
+                    logmsg("[roundtimer] Sync spell set: '%s'\n", rt_sync_spell);
+                }
+            }
+            DestroyWindow(hwnd);
+            return 0;
+        }
+
+        if (id == IDC_SPELL_CANCEL) {
+            DestroyWindow(hwnd);
+            return 0;
+        }
+        return 0;
+    }
+    case WM_DESTROY:
+        rt_spell_picker_hwnd = NULL;
+        return 0;
+    case WM_CLOSE:
+        DestroyWindow(hwnd);
+        return 0;
+    }
+    return DefWindowProcA(hwnd, msg, wParam, lParam);
+}
+
+static void rt_show_spell_picker(HWND parent)
+{
+    if (rt_spell_picker_hwnd) {
+        SetForegroundWindow(rt_spell_picker_hwnd);
+        return;
+    }
+
+    static int registered = 0;
+    if (!registered) {
+        WNDCLASSA wc = {0};
+        wc.lpfnWndProc = slop_spell_picker_proc;
+        wc.hInstance = GetModuleHandle(NULL);
+        wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+        wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+        wc.lpszClassName = RT_SPELL_CLASS;
+        RegisterClassA(&wc);
+        registered = 1;
+    }
+
+    /* Position near the round timer */
+    RECT pr;
+    if (rt_hwnd) GetWindowRect(rt_hwnd, &pr);
+    else GetWindowRect(parent, &pr);
+    int px = pr.left;
+    int py = pr.bottom + 4;
+
+    /* Clamp to screen */
+    int sw = GetSystemMetrics(SM_CXSCREEN);
+    int sh = GetSystemMetrics(SM_CYSCREEN);
+    if (px + 230 > sw) px = sw - 230;
+    if (py + 100 > sh) py = pr.top - 104;
+    if (px < 0) px = 0;
+    if (py < 0) py = 0;
+
+    rt_spell_picker_hwnd = CreateWindowExA(
+        WS_EX_TOOLWINDOW,
+        RT_SPELL_CLASS,
+        "Manual Sync Spell",
+        WS_POPUP | WS_VISIBLE | WS_CAPTION | WS_SYSMENU,
+        px, py, 230, 100,
+        parent, NULL, GetModuleHandle(NULL), NULL);
+}
+
+/* ---- Manual Sync State Machine ---- */
+
+/* States */
+#define MS_IDLE        0
+#define MS_SPAMMING    1  /* actively spamming spell, waiting for round boundaries */
+#define MS_DONE        2
+
+static volatile int ms_state = MS_IDLE;
+static volatile int ms_already_count = 0;   /* consecutive "already cast" lines */
+static volatile int ms_rounds_detected = 0; /* rounds detected during 15s window */
+
+/* Spam thread: sends the spell command rapidly until ms_state != MS_SPAMMING */
+static DWORD WINAPI ms_spam_thread(LPVOID param)
+{
+    (void)param;
+    logmsg("[mansync] Spam thread started: spell='%s' (15s window)\n",
+           rt_sync_spell);
+
+    HWND mw = FindWindowA("MMMAIN", NULL);
+    if (!mw) { ms_state = MS_IDLE; return 0; }
+    HWND ansi = FindWindowExA(mw, NULL, "MMANSI", NULL);
+    HWND target = ansi ? ansi : mw;
+
+    DWORD start_time = GetTickCount();
+
+    while (ms_state == MS_SPAMMING) {
+        /* 10 second sync window — enough for 2 round ticks */
+        if (GetTickCount() - start_time > 10000) {
+            logmsg("[mansync] 10s sync complete — detected %d rounds\n", ms_rounds_detected);
+            ms_state = MS_DONE;
+            break;
+        }
+        /* Send spell command + enter */
+        for (int i = 0; rt_sync_spell[i]; i++)
+            PostMessageA(target, WM_CHAR, (WPARAM)(unsigned char)rt_sync_spell[i], 0);
+        PostMessageA(target, WM_CHAR, (WPARAM)'\r', 0);
+
+        /* ~150ms between spam attempts — fast enough to catch the round boundary
+         * but not so fast we flood the terminal */
+        Sleep(150);
+    }
+
+    logmsg("[mansync] Spam thread ended: detected %d rounds\n", ms_rounds_detected);
+    return 0;
+}
+
+/* Called from rd_process_line when manual sync is active.
+ * Watches for:
+ *   "You have already cast a spell this round" → increment already_count
+ *   "You cast"/"You sing"/"You invoke"/"You attempt" → round boundary if already_count >= 2
+ */
+static void ms_process_line(const char *line)
+{
+    if (ms_state != MS_SPAMMING) return;
+
+    /* "You have already cast a spell this round" */
+    if (stristr(line, "You have already cast")) {
+        ms_already_count++;
+        return;
+    }
+
+    /* Round boundary: cast/sing/invoke/attempt — but only if we had 2+ "already cast" first */
+    if (ms_already_count >= 2) {
+        int is_boundary = 0;
+        if (starts_with_i(line, "You cast ")) is_boundary = 1;
+        else if (starts_with_i(line, "You sing ")) is_boundary = 1;
+        else if (starts_with_i(line, "You invoke ")) is_boundary = 1;
+        else if (starts_with_i(line, "You attempt to cast")) is_boundary = 1;
+        else if (starts_with_i(line, "You attempt to sing")) is_boundary = 1;
+        else if (starts_with_i(line, "You attempt to invoke")) is_boundary = 1;
+
+        if (is_boundary) {
+            ms_rounds_detected++;
+            logmsg("[mansync] Round boundary #%d detected (already_count=%d)\n",
+                   ms_rounds_detected, ms_already_count);
+
+            /* Fire the round tick */
+            rd_round_num++;
+            rt_on_round_tick(rd_round_num);
+            plugins_on_round(rd_round_num);
+
+            ms_already_count = 0;
+        }
+    }
+
+    /* Any line that isn't "already cast" resets the counter
+     * (unless it's empty or a prompt line) */
+    if (line[0] && !stristr(line, "You have already cast")) {
+        /* Don't reset on the boundary line itself — already handled above.
+         * Only reset on unrelated lines (monster says something, etc.) */
+        if (ms_already_count > 0 && ms_already_count < 2) {
+            /* Had <2 already-casts, then got an unrelated line — false start, reset */
+            ms_already_count = 0;
+        }
+    }
+}
+
+static void rt_perform_manual_sync(void)
+{
+    if (!rt_sync_spell[0]) return;
+    if (ms_state == MS_SPAMMING) {
+        /* Already running — cancel it */
+        ms_state = MS_IDLE;
+        logmsg("[mansync] Cancelled by user\n");
+        return;
+    }
+
+    /* Reset round timer state — throw away old ticks, start fresh */
+    rt_synced = 0;
+    rt_last_tick_ts = 0.0;
+    rt_interval_count = 0;
+    rt_round_period = 5000.0;
+    rt_delta_text[0] = '\0';
+    rt_delta_fade = 0.0;
+    rd_last_event_ts = 0.0;
+
+    ms_state = MS_SPAMMING;
+    ms_already_count = 0;
+    ms_rounds_detected = 0;
+
+    logmsg("[mansync] Starting 15s manual sync: spell='%s'\n", rt_sync_spell);
+
+    CreateThread(NULL, 0, ms_spam_thread, NULL, 0, NULL);
+}
+
+/* Round timer right-click context menu */
+static void rt_show_context_menu(HWND hwnd, int x, int y)
+{
+    HMENU menu = CreatePopupMenu();
+    AppendMenuA(menu, MF_STRING, IDM_RT_SYNC_SPELL, "Manual Sync Spell...");
+    AppendMenuA(menu, MF_STRING | (rt_sync_spell[0] ? 0 : MF_GRAYED),
+                IDM_RT_PERFORM_SYNC, "Perform Manual Sync");
+    AppendMenuA(menu, MF_SEPARATOR, 0, NULL);
+    AppendMenuA(menu, MF_STRING, IDM_RT_HIDE, "Hide Round Timer");
+    TrackPopupMenu(menu, TPM_RIGHTBUTTON, x, y, 0, hwnd, NULL);
+    DestroyMenu(menu);
 }
 
 /* ================================================================
@@ -1453,24 +1968,16 @@ static void inject_menu(HWND main_wnd)
     AppendMenuA(slop_menu, MF_SEPARATOR, 0, NULL);
     AppendMenuA(slop_menu, MF_STRING, IDM_SLOP_PRO_STEP,
                 pro_every_step ? "RM Every Step  [ON]" : "RM Every Step  [OFF]");
-    AppendMenuA(slop_menu, MF_SEPARATOR, 0, NULL);
-    {
-        char plabel[64];
-        sprintf(plabel, "Plugins... (%d)", plugin_count);
-        AppendMenuA(slop_menu, MF_STRING, IDM_SLOP_PLUGINS, plabel);
-    }
-
-    /* Append to menu bar after the last item (right of Help) */
+    /* Append MajorSLOP to menu bar */
     AppendMenuA(menu_bar, MF_POPUP, (UINT_PTR)slop_menu, "MajorSLOP");
-    DrawMenuBar(main_wnd);
 
-    slop_menu_owner = main_wnd;
-    slop_update_menu_state();
-
-    /* Subclass to catch our menu commands */
+    /* Subclass to catch our menu commands (before plugin load so callbacks work) */
     if (!orig_mmmain_proc) {
         orig_mmmain_proc = (WNDPROC)SetWindowLongA(main_wnd, GWL_WNDPROC, (LONG)slop_mmmain_proc);
     }
+
+    slop_menu_owner = main_wnd;
+    slop_update_menu_state();
 
     logmsg("[mudplugin] MajorSLOP menu injected to menu bar\n");
 
@@ -1478,21 +1985,53 @@ static void inject_menu(HWND main_wnd)
     theme_update_brushes();
     if (theme_active) theme_apply_all();
 
-    /* Start background thread to theme newly opened dialogs */
+    /* Start background threads */
     CreateThread(NULL, 0, theme_scanner_thread, NULL, 0, NULL);
-
-    /* Start Pro Every Step watcher thread */
     CreateThread(NULL, 0, pro_step_thread, NULL, 0, NULL);
-
-    /* Start auto struct finder so DLL features work without proxy */
     CreateThread(NULL, 0, auto_struct_thread, NULL, 0, NULL);
-
-    /* Start MMANSI terminal scanner for round detection without proxy */
     CreateThread(NULL, 0, mmansi_scanner_thread, NULL, 0, NULL);
 
-    /* Plugin system — create dir and load plugins */
+    /* Plugin system — load plugins FIRST, then build Plugins menu */
     ensure_plugins_dir();
     load_plugins();
+
+    /* Create "Plugins" top-level menu with per-plugin submenus */
+    {
+        HMENU plugins_menu = CreatePopupMenu();
+
+        if (plugin_count == 0) {
+            AppendMenuA(plugins_menu, MF_STRING | MF_GRAYED, 0, "(no plugins loaded)");
+        } else {
+            for (int i = 0; i < plugin_count; i++) {
+                slop_plugin_t *p = plugins[i].desc;
+                const char *pname = (p && p->name) ? p->name : "Unknown";
+
+                /* Each plugin gets a submenu with its items */
+                HMENU sub = CreatePopupMenu();
+
+                /* Let the plugin populate its submenu via on_wndproc
+                 * with a custom message. For now, add a generic info item. */
+                char info[128];
+                sprintf(info, "%s v%s", pname, (p && p->version) ? p->version : "?");
+                AppendMenuA(sub, MF_STRING | MF_GRAYED, 0, info);
+                AppendMenuA(sub, MF_SEPARATOR, 0, NULL);
+
+                /* Plugin-specific items use IDs: IDM_PLUGIN_BASE + i*10 + offset */
+                int base_id = IDM_PLUGIN_BASE + i * 10;
+                AppendMenuA(sub, MF_STRING, base_id + 0, "Show/Hide Console");
+                AppendMenuA(sub, MF_STRING, base_id + 1, "Script Manager...");
+
+                AppendMenuA(plugins_menu, MF_POPUP, (UINT_PTR)sub, pname);
+            }
+        }
+
+        AppendMenuA(plugins_menu, MF_SEPARATOR, 0, NULL);
+        AppendMenuA(plugins_menu, MF_STRING, IDM_SLOP_PLUGINS, "Plugin Info...");
+
+        AppendMenuA(menu_bar, MF_POPUP, (UINT_PTR)plugins_menu, "Plugins");
+    }
+
+    DrawMenuBar(main_wnd);
 }
 
 /* ================================================================
@@ -1521,9 +2060,9 @@ static int recv_line_pos = 0;
  * Multiple swings can happen in the same round (multi-hit, party members, etc).
  * We cluster events within a short window — first event in a new cluster = round tick.
  * Rounds are always 5s on ParaMUD, so any gap > ~3s between clusters = new round. */
-static int rd_round_num = 0;            /* our own round counter */
-static double rd_last_event_ts = 0.0;   /* timestamp of last combat event (for clustering) */
-#define RD_CLUSTER_GAP 500.0            /* ms — events within this are same round (burst is ~200ms, next round ~5s away) */
+/* rd_round_num declared earlier (forward decl section) */
+/* rd_last_event_ts declared earlier (forward decl section) */
+#define RD_CLUSTER_GAP 500.0            /* ms — events within this are same round (only "You " lines now, so burst is tight) */
 
 /* Strip ANSI escape sequences from a line in-place.
  * ESC [ ... final_byte  where final_byte is 0x40-0x7E */
@@ -1591,28 +2130,50 @@ static int is_combat_event(const char *line)
     int len = (int)strlen(line);
     if (len < 5) return 0;
 
-    /* RE_DAMAGE: "for N damage!" */
+    /* "Your sword glances off ..." — weapon ineffective (before "You " guard) */
+    if (starts_with_i(line, "Your ") && strstr(line, " glances off")) return 1;
+
+    /* ONLY track YOUR combat actions — not monster attacks, not spells.
+     * "You cast", "You sing", "You invoke", "You use" are NOT combat rounds,
+     * those are buff/heal spells — reserved for a future manual-set system. */
+    if (!starts_with_i(line, "You ")) return 0;
+
+    /* "You hit/slash/crush/hurl/etc ... for N damage!" */
     if (strstr(line, " damage!")) return 1;
 
-    /* RE_COMBAT_MISS: miss, dodge, fumble, block, bounce off, parry */
-    if (stristr(line, "misses ")) return 1;
-    if (stristr(line, "miss ")) return 1;
-    if (stristr(line, "dodges ")) return 1;
-    if (stristr(line, "dodge ")) return 1;
-    if (stristr(line, "fumbles ")) return 1;
-    if (stristr(line, "fumble ")) return 1;
-    if (stristr(line, "blocks ")) return 1;
-    if (stristr(line, "block ")) return 1;
-    if (stristr(line, "bounces off")) return 1;
-    if (stristr(line, "bounce off")) return 1;
-    if (stristr(line, "parries ")) return 1;
-    if (stristr(line, "parry ")) return 1;
+    /* "You ... who dodges your attack!" — miss via dodge (melee AND ranged) */
+    if (strstr(line, "dodges your attack")) return 1;
 
-    /* RE_PLAYER_SWING: "You swing at ...", "You swipe at ..." */
-    if (starts_with_i(line, "You ") && strstr(line, " at ")) return 1;
+    /* "You miss" — straight miss */
+    if (stristr(line, "You miss ")) return 1;
 
-    /* RE_GLANCES_OFF: "Your sword glances off ..." */
-    if (starts_with_i(line, "Your ") && strstr(line, " glances off")) return 1;
+    /* "You fumble" */
+    if (stristr(line, "You fumble")) return 1;
+
+    /* Exclude ALL spells/songs/invocations — not on the melee round timer.
+     * Future manual mode will handle spell round detection separately. */
+    if (starts_with_i(line, "You cast ") ||
+        starts_with_i(line, "You sing ") ||
+        starts_with_i(line, "You invoke ")) return 0;
+
+    /* Generic melee/ranged miss: "You [verb] at [target]!"
+     * Format from WCC: You %s at %s!  (msg #8446)
+     * Only match if exactly ONE word between "You " and " at " to avoid
+     * false positives from item use ("You point your wand at X!"),
+     * exploration ("You step into the water at..."), etc.
+     * Also match ranged: "You hurl/fire/throw a X at Y!" (multiple words ok) */
+    {
+        const char *at_ptr = strstr(line + 4, " at ");
+        if (at_ptr && len > 0 && line[len - 1] == '!') {
+            /* Check if single word between "You " and " at " (melee miss) */
+            const char *first_space = strchr(line + 4, ' ');
+            if (first_space == at_ptr) return 1;  /* "You [verb] at X!" */
+            /* Ranged miss: "You hurl/fire/throw ..." with " at " and no damage */
+            if (starts_with_i(line, "You hurl ") ||
+                starts_with_i(line, "You fire ") ||
+                starts_with_i(line, "You throw ")) return 1;
+        }
+    }
 
     return 0;
 }
@@ -1623,6 +2184,12 @@ static int is_combat_event(const char *line)
 static void rd_process_line(const char *line)
 {
     if (!line[0]) return;
+
+    /* Manual sync: takes over completely — skip normal combat detection */
+    if (ms_state == MS_SPAMMING) {
+        ms_process_line(line);
+        return;
+    }
 
     if (is_combat_event(line)) {
         double now = (double)GetTickCount64();
@@ -1635,8 +2202,7 @@ static void rd_process_line(const char *line)
         rd_last_event_ts = now;
     }
 
-    /* Notify plugins of every line */
-    plugins_on_line(line);
+    /* plugins already notified with raw ANSI in rd_feed_data */
 }
 
 /* Feed raw recv data into line buffer, process complete lines */
@@ -1650,9 +2216,11 @@ static void rd_feed_data(const char *data, int len)
             /* Strip trailing \r */
             if (recv_line_pos > 0 && recv_line_buf[recv_line_pos - 1] == '\r')
                 recv_line_buf[recv_line_pos - 1] = '\0';
-            /* Strip ANSI */
+            /* Pass raw line (with ANSI) to plugins first */
+            plugins_on_line(recv_line_buf);
+            /* Strip ANSI for round detection */
             strip_ansi(recv_line_buf);
-            /* Process */
+            /* Process (round detection only, plugins already notified) */
             rd_process_line(recv_line_buf);
             recv_line_pos = 0;
         } else if (recv_line_pos < RECV_LINE_BUF - 1) {
@@ -2365,8 +2933,13 @@ static DWORD WINAPI mmansi_scanner_thread(LPVOID param)
             if (!rows[r][0]) continue;
             if (strcmp(rows[r], prev_rows[r]) == 0) continue;
             unsigned int h = line_hash(rows[r]);
-            if (was_seen(h)) continue;
+            /* During manual sync, skip dedup — we need to count repeated
+             * "You have already cast" lines which have identical hashes */
+            if (ms_state != MS_SPAMMING) {
+                if (was_seen(h)) continue;
+            }
             mark_seen(h);
+            plugins_on_line(rows[r]);
             rd_process_line(rows[r]);
         }
 
@@ -2505,19 +3078,34 @@ static DWORD WINAPI pro_step_thread(LPVOID param)
 }
 
 /* ---- Auto struct finder thread ---- */
-/* Periodically tries to find struct_base using cfg_player_name so DLL
-   features work without the proxy ever connecting. */
+/* Finds struct_base WITHOUT needing a player name by scanning for valid
+   game data patterns (HP, MaxHP, Level, Mana at known offsets). */
+
+/* ---- Auto struct finder thread ---- */
+/* Gets struct base directly from MMMAIN window extra data (offset 4),
+   as documented in MEGAMUD_RE.md: GetWindowLongA(hWnd, 4) */
+
 static DWORD WINAPI auto_struct_thread(LPVOID param)
 {
     (void)param;
     while (1) {
-        Sleep(3000);
+        Sleep(1000);
         if (struct_base) continue;  /* already found */
-        if (!cfg_player_name[0]) continue;  /* no name configured */
-        DWORD base = find_struct(cfg_player_name);
+
+        HWND mw = FindWindowA("MMMAIN", NULL);
+        if (!mw) continue;
+
+        DWORD base = (DWORD)GetWindowLongA(mw, 4);
         if (base) {
             struct_base = base;
-            logmsg("[mudplugin] Auto-found struct at 0x%08lX for '%s'\n", base, cfg_player_name);
+            /* Read player name from the struct */
+            char *name = (char *)(base + 0x537C);
+            if (name[0] >= 'A' && name[0] <= 'Z') {
+                strncpy(cfg_player_name, name, sizeof(cfg_player_name) - 1);
+                cfg_player_name[sizeof(cfg_player_name) - 1] = '\0';
+            }
+            logmsg("[mudplugin] Struct base from MMMAIN window data: 0x%08lX (player: %s)\n",
+                   base, cfg_player_name);
         }
     }
     return 0;
@@ -2625,18 +3213,6 @@ static DWORD WINAPI payload_main(LPVOID param)
 /* ================================================================
  * Plugin System
  * ================================================================ */
-
-#define SLOP_MAX_PLUGINS 16
-
-typedef struct {
-    HMODULE            dll;
-    slop_plugin_t     *desc;
-    char               path[MAX_PATH];
-    int                loaded;
-} loaded_plugin_t;
-
-static loaded_plugin_t plugins[SLOP_MAX_PLUGINS];
-static int plugin_count = 0;
 
 /* Callbacks registered by plugins */
 static void (*plugin_round_cbs[SLOP_MAX_PLUGINS])(int round_num);
