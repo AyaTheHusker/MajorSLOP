@@ -21,12 +21,18 @@
 #include <stdlib.h>
 #include <math.h>
 
+/* Proper byte-by-byte ANSI/VT100 state machine parser */
+#define AP_ROWS 25
+#define AP_COLS 80
+#define ANSI_PARSER_IMPLEMENTATION
+#include "ansi_parser.h"
+
 /* ---- Terminal constants ---- */
 
 #define TERM_ROWS       25
 #define TERM_COLS       80
 
-#define INPUT_BAR_H     80      /* pixels — needs to be visible at 4K */
+#define INPUT_BAR_H     40      /* pixels for input bar */
 #define MAX_HISTORY     64
 #define INPUT_BUF_SZ    256
 
@@ -54,10 +60,23 @@ typedef struct {
 typedef struct { float r, g, b; } rgb_t;
 
 static rgb_t pal_classic[16] = {
-    {0.00f,0.00f,0.00f}, {0.00f,0.00f,0.67f}, {0.00f,0.67f,0.00f}, {0.00f,0.67f,0.67f},
-    {0.67f,0.00f,0.00f}, {0.67f,0.00f,0.67f}, {0.67f,0.33f,0.00f}, {0.67f,0.67f,0.67f},
-    {0.33f,0.33f,0.33f}, {0.33f,0.33f,1.00f}, {0.33f,1.00f,0.33f}, {0.33f,1.00f,1.00f},
-    {1.00f,0.33f,0.33f}, {1.00f,0.33f,1.00f}, {1.00f,1.00f,0.33f}, {1.00f,1.00f,1.00f},
+    /* ANSI order: SGR 30-37 maps directly to indices 0-7 */
+    {0.00f,0.00f,0.00f},  /*  0 black   */
+    {0.67f,0.00f,0.00f},  /*  1 red     */
+    {0.00f,0.67f,0.00f},  /*  2 green   */
+    {0.67f,0.33f,0.00f},  /*  3 brown   */
+    {0.00f,0.00f,0.67f},  /*  4 blue    */
+    {0.67f,0.00f,0.67f},  /*  5 magenta */
+    {0.00f,0.67f,0.67f},  /*  6 cyan    */
+    {0.67f,0.67f,0.67f},  /*  7 light gray */
+    {0.33f,0.33f,0.33f},  /*  8 dark gray  */
+    {1.00f,0.33f,0.33f},  /*  9 light red  */
+    {0.33f,1.00f,0.33f},  /* 10 light green */
+    {1.00f,1.00f,0.33f},  /* 11 yellow     */
+    {0.33f,0.33f,1.00f},  /* 12 light blue */
+    {1.00f,0.33f,1.00f},  /* 13 light magenta */
+    {0.33f,1.00f,1.00f},  /* 14 light cyan */
+    {1.00f,1.00f,1.00f},  /* 15 bright white */
 };
 static rgb_t pal_dracula[16] = {
     {0.16f,0.16f,0.21f}, {0.38f,0.45f,0.94f}, {0.31f,0.98f,0.48f}, {0.55f,0.91f,0.99f},
@@ -129,8 +148,8 @@ static int fs_width = 1920;
 static int fs_height = 1080;
 
 /* Terminal buffer */
-static unsigned char term_text[TERM_ROWS][TERM_COLS];
-static unsigned char term_attr[TERM_ROWS][TERM_COLS];
+/* ANSI terminal state machine — replaces old term_text/term_attr arrays */
+static ap_term_t ansi_term;
 
 /* Input state */
 static char input_buf[INPUT_BUF_SZ];
@@ -211,258 +230,22 @@ static uint32_t vk_find_memory(VkPhysicalDevice pd, uint32_t type_bits, VkMemory
     return UINT32_MAX;
 }
 
-/* ---- ANSI Terminal Emulator ---- */
+/* ---- ANSI Terminal — uses ansi_parser.h state machine ---- */
 
-/* Our own terminal buffer — fed by on_line, read by renderer */
 static CRITICAL_SECTION ansi_lock;
-static int ansi_cursor_row = 0;
-static int ansi_cursor_col = 0;
-static unsigned char ansi_cur_fg = 7;   /* default: light gray */
-static unsigned char ansi_cur_bg = 0;   /* default: black */
-static int ansi_bold = 0;              /* bold = bright foreground */
 
-/* Pack fg (0-15) and bg (0-7) into one byte matching MMANSI attr format:
- * bits 0-3 = fg, bits 4-6 = bg, bit 7 = blink (unused) */
-static unsigned char ansi_pack_attr(void)
-{
-    unsigned char fg = ansi_cur_fg;
-    if (ansi_bold && fg < 8) fg += 8;  /* bold → bright */
-    return (unsigned char)((ansi_cur_bg << 4) | (fg & 0x0F));
-}
-
-static void ansi_scroll_up(void)
-{
-    /* Scroll buffer up by 1 row */
-    memmove(term_text[0], term_text[1], (TERM_ROWS - 1) * TERM_COLS);
-    memmove(term_attr[0], term_attr[1], (TERM_ROWS - 1) * TERM_COLS);
-    memset(term_text[TERM_ROWS - 1], ' ', TERM_COLS);
-    memset(term_attr[TERM_ROWS - 1], 0x07, TERM_COLS);
-    ansi_cursor_row = TERM_ROWS - 1;
-}
-
-static void ansi_newline(void)
-{
-    ansi_cursor_col = 0;
-    ansi_cursor_row++;
-    if (ansi_cursor_row >= TERM_ROWS) {
-        ansi_scroll_up();
-    }
-}
-
-static void ansi_put_char(unsigned char c)
-{
-    if (ansi_cursor_col >= TERM_COLS) {
-        ansi_newline();
-    }
-    if (ansi_cursor_row >= 0 && ansi_cursor_row < TERM_ROWS &&
-        ansi_cursor_col >= 0 && ansi_cursor_col < TERM_COLS) {
-        term_text[ansi_cursor_row][ansi_cursor_col] = c;
-        term_attr[ansi_cursor_row][ansi_cursor_col] = ansi_pack_attr();
-    }
-    ansi_cursor_col++;
-}
-
-/* Map 256-color index to nearest VGA 16-color */
-static unsigned char ansi_256_to_16(int n)
-{
-    if (n < 16) return (unsigned char)n;
-    if (n >= 232) { /* grayscale ramp */
-        int g = (n - 232) * 10 + 8;
-        if (g < 48) return 0;
-        if (g < 128) return 8;
-        if (g < 210) return 7;
-        return 15;
-    }
-    /* 6x6x6 color cube → nearest of 16 */
-    n -= 16;
-    int r = n / 36, g = (n / 6) % 6, b = n % 6;
-    int bright = (r > 3 || g > 3 || b > 3) ? 8 : 0;
-    int idx = 0;
-    if (r > 1) idx |= 1;
-    if (g > 1) idx |= 2;
-    if (b > 1) idx |= 4;
-    return (unsigned char)(idx + bright);
-}
-
-/* Parse SGR parameters from ESC[...m */
-static void ansi_handle_sgr(const char *params, int len)
-{
-    /* Parse semicolon-separated numbers */
-    int nums[16];
-    int num_count = 0;
-    int cur = 0;
-    int has_num = 0;
-
-    for (int i = 0; i <= len; i++) {
-        if (i == len || params[i] == ';') {
-            nums[num_count++] = has_num ? cur : 0;
-            if (num_count >= 16) break;
-            cur = 0;
-            has_num = 0;
-        } else if (params[i] >= '0' && params[i] <= '9') {
-            cur = cur * 10 + (params[i] - '0');
-            has_num = 1;
-        }
-    }
-
-    for (int i = 0; i < num_count; i++) {
-        int n = nums[i];
-        if (n == 0) {
-            ansi_cur_fg = 7; ansi_cur_bg = 0; ansi_bold = 0;
-        } else if (n == 1) {
-            ansi_bold = 1;
-        } else if (n == 2 || n == 22) {
-            ansi_bold = 0;
-        } else if (n >= 30 && n <= 37) {
-            ansi_cur_fg = (unsigned char)(n - 30);
-        } else if (n == 39) {
-            ansi_cur_fg = 7; /* default fg */
-        } else if (n >= 40 && n <= 47) {
-            ansi_cur_bg = (unsigned char)(n - 40);
-        } else if (n == 49) {
-            ansi_cur_bg = 0; /* default bg */
-        } else if (n >= 90 && n <= 97) {
-            ansi_cur_fg = (unsigned char)(n - 90 + 8); /* bright fg */
-        } else if (n >= 100 && n <= 107) {
-            ansi_cur_bg = (unsigned char)(n - 100 + 8); /* bright bg */
-        } else if (n == 38 && i + 2 < num_count && nums[i+1] == 5) {
-            /* ESC[38;5;Nm — 256-color foreground */
-            ansi_cur_fg = ansi_256_to_16(nums[i+2]);
-            i += 2;
-        } else if (n == 48 && i + 2 < num_count && nums[i+1] == 5) {
-            /* ESC[48;5;Nm — 256-color background */
-            ansi_cur_bg = ansi_256_to_16(nums[i+2]);
-            i += 2;
-        }
-    }
-}
-
-/* Parse a single line with ANSI escape codes and write to our buffer */
-static void ansi_process_line(const char *line)
-{
-    const char *p = line;
-
-    while (*p) {
-        if (*p == '\x1b' && *(p+1) == '[') {
-            /* CSI sequence */
-            p += 2;
-            const char *param_start = p;
-            /* Collect parameter bytes (0x30-0x3F) */
-            while (*p && (unsigned char)*p >= 0x30 && (unsigned char)*p <= 0x3F) p++;
-            int param_len = (int)(p - param_start);
-            /* Skip intermediate bytes (0x20-0x2F) */
-            while (*p && (unsigned char)*p >= 0x20 && (unsigned char)*p <= 0x2F) p++;
-            /* Final byte */
-            if (*p) {
-                char cmd = *p++;
-                if (cmd == 'm') {
-                    /* SGR — Select Graphic Rendition */
-                    ansi_handle_sgr(param_start, param_len);
-                } else if (cmd == 'H' || cmd == 'f') {
-                    /* Cursor position: ESC[row;colH */
-                    int row = 1, col = 1;
-                    if (param_len > 0) {
-                        sscanf(param_start, "%d;%d", &row, &col);
-                    }
-                    ansi_cursor_row = (row > 0 ? row - 1 : 0);
-                    ansi_cursor_col = (col > 0 ? col - 1 : 0);
-                    if (ansi_cursor_row >= TERM_ROWS) ansi_cursor_row = TERM_ROWS - 1;
-                    if (ansi_cursor_col >= TERM_COLS) ansi_cursor_col = TERM_COLS - 1;
-                } else if (cmd == 'J') {
-                    /* Erase display */
-                    int mode = 0;
-                    if (param_len > 0) mode = param_start[0] - '0';
-                    if (mode == 2 || mode == 3) {
-                        /* Clear entire screen */
-                        memset(term_text, ' ', sizeof(term_text));
-                        memset(term_attr, 0x07, sizeof(term_attr));
-                        ansi_cursor_row = 0;
-                        ansi_cursor_col = 0;
-                    }
-                } else if (cmd == 'K') {
-                    /* Erase line */
-                    int mode = 0;
-                    if (param_len > 0) mode = param_start[0] - '0';
-                    if (mode == 0) {
-                        /* Clear from cursor to end of line */
-                        for (int c = ansi_cursor_col; c < TERM_COLS; c++) {
-                            term_text[ansi_cursor_row][c] = ' ';
-                            term_attr[ansi_cursor_row][c] = 0x07;
-                        }
-                    } else if (mode == 2) {
-                        /* Clear entire line */
-                        memset(term_text[ansi_cursor_row], ' ', TERM_COLS);
-                        memset(term_attr[ansi_cursor_row], 0x07, TERM_COLS);
-                    }
-                } else if (cmd == 'A') {
-                    /* Cursor up */
-                    int n = 1;
-                    if (param_len > 0) n = atoi(param_start);
-                    if (n < 1) n = 1;
-                    ansi_cursor_row -= n;
-                    if (ansi_cursor_row < 0) ansi_cursor_row = 0;
-                } else if (cmd == 'B') {
-                    /* Cursor down */
-                    int n = 1;
-                    if (param_len > 0) n = atoi(param_start);
-                    if (n < 1) n = 1;
-                    ansi_cursor_row += n;
-                    if (ansi_cursor_row >= TERM_ROWS) ansi_cursor_row = TERM_ROWS - 1;
-                } else if (cmd == 'C') {
-                    /* Cursor forward */
-                    int n = 1;
-                    if (param_len > 0) n = atoi(param_start);
-                    if (n < 1) n = 1;
-                    ansi_cursor_col += n;
-                    if (ansi_cursor_col >= TERM_COLS) ansi_cursor_col = TERM_COLS - 1;
-                } else if (cmd == 'D') {
-                    /* Cursor back */
-                    int n = 1;
-                    if (param_len > 0) n = atoi(param_start);
-                    if (n < 1) n = 1;
-                    ansi_cursor_col -= n;
-                    if (ansi_cursor_col < 0) ansi_cursor_col = 0;
-                }
-                /* Other sequences: ignore */
-            }
-        } else if (*p == '\r') {
-            ansi_cursor_col = 0;
-            p++;
-        } else if (*p == '\n') {
-            ansi_newline();
-            p++;
-        } else if (*p == '\t') {
-            /* Tab to next 8-col stop */
-            int next = (ansi_cursor_col + 8) & ~7;
-            while (ansi_cursor_col < next && ansi_cursor_col < TERM_COLS)
-                ansi_put_char(' ');
-            p++;
-        } else if (*p == '\b') {
-            if (ansi_cursor_col > 0) ansi_cursor_col--;
-            p++;
-        } else {
-            ansi_put_char((unsigned char)*p);
-            p++;
-        }
-    }
-}
-
-/* on_line callback — called from proxy thread */
-static void vkt_on_line(const char *line)
+/* on_data callback — raw server bytes fed to state machine */
+static void vkt_on_data(const char *data, int len)
 {
     EnterCriticalSection(&ansi_lock);
-    ansi_process_line(line);
-    ansi_newline();  /* each on_line call = one complete line */
+    ap_feed(&ansi_term, (const uint8_t *)data, len);
     LeaveCriticalSection(&ansi_lock);
 }
 
-/* Read buffer for renderer — just copies under lock */
+/* Read buffer for renderer — snapshot under lock */
 static void vkt_read_buffer(void)
 {
-    /* Buffer is already populated by on_line callbacks.
-     * We just need the lock to safely snapshot it for rendering. */
     EnterCriticalSection(&ansi_lock);
-    /* term_text and term_attr are already our buffers — nothing to copy */
     LeaveCriticalSection(&ansi_lock);
 }
 
@@ -489,8 +272,8 @@ static void vkt_build_vertices(void)
 
     int vp_w = (int)vk_sc_extent.width;
     int vp_h = (int)vk_sc_extent.height;
-    int top_pad = 20;
-    int bot_pad = 20;
+    int top_pad = 4;
+    int bot_pad = 4;
     int term_h = vp_h - INPUT_BAR_H - top_pad - bot_pad;
 
     /* Maintain 1:2 (w:h) CP437 aspect ratio per character.
@@ -522,7 +305,7 @@ static void vkt_build_vertices(void)
     /* Pass 1: background colors */
     for (int r = 0; r < TERM_ROWS; r++) {
         for (int c = 0; c < TERM_COLS; c++) {
-            int bg = (term_attr[r][c] >> 4) & 0x07;
+            int bg = ansi_term.grid[r][c].attr.bg & 0x07;
             if (bg == 0) continue;
             float px0 = c * cw, py0 = r * ch;
             float px1 = px0 + cw, py1 = py0 + ch;
@@ -554,7 +337,7 @@ static void vkt_build_vertices(void)
     /* Pass 1: backgrounds using solid glyph */
     for (int r = 0; r < TERM_ROWS; r++) {
         for (int c = 0; c < TERM_COLS; c++) {
-            int bg = (term_attr[r][c] >> 4) & 0x07;
+            int bg = ansi_term.grid[r][c].attr.bg & 0x07;
             if (bg == 0) continue;
             float px0 = x_offset + c * cw, py0 = top_pad + r * ch;
             float px1 = px0 + cw, py1 = py0 + ch;
@@ -567,9 +350,10 @@ static void vkt_build_vertices(void)
     /* Pass 2: text characters */
     for (int r = 0; r < TERM_ROWS; r++) {
         for (int c = 0; c < TERM_COLS; c++) {
-            unsigned char byte = term_text[r][c];
+            unsigned char byte = ansi_term.grid[r][c].ch;
             if (byte == 0 || byte == 32) continue;
-            int fg = term_attr[r][c] & 0x0F;
+            ap_attr_t *a = &ansi_term.grid[r][c].attr;
+            int fg = (a->fg & 0x07) | (a->bold ? 0x08 : 0);
             float u0 = (byte % 16) * tex_cw;
             float v0 = (byte / 16) * tex_ch;
             float u1 = u0 + tex_cw;
@@ -1780,10 +1564,7 @@ static int vkt_init(const slop_api_t *a)
 
     /* Initialize ANSI terminal emulator */
     InitializeCriticalSection(&ansi_lock);
-    memset(term_text, ' ', sizeof(term_text));
-    memset(term_attr, 0x07, sizeof(term_attr));
-    ansi_cursor_row = 0;
-    ansi_cursor_col = 0;
+    ap_init(&ansi_term, TERM_ROWS, TERM_COLS);
 
     palette = theme_palettes[current_theme];
     input_buf[0] = '\0';
@@ -1817,9 +1598,10 @@ static slop_plugin_t vkt_plugin = {
     .version     = "0.1.0",
     .init        = vkt_init,
     .shutdown    = vkt_shutdown,
-    .on_line     = vkt_on_line,
+    .on_line     = NULL,
     .on_round    = NULL,
     .on_wndproc  = vkt_on_wndproc,
+    .on_data     = vkt_on_data,
 };
 
 SLOP_EXPORT slop_plugin_t *slop_get_plugin(void) { return &vkt_plugin; }

@@ -119,8 +119,14 @@ typedef struct slop_plugin {
     /* Optional: WndProc hook — return non-zero if handled (NULL if unused) */
     int           (*on_wndproc)(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
+    /* Optional: called with raw server data bytes (NULL if unused).
+     * Unlike on_line, data is NOT split on \n — arrives in arbitrary chunks
+     * with full ANSI escape codes intact. For terminal emulators that need
+     * byte-by-byte processing. */
+    void          (*on_data)(const char *data, int len);
+
     /* Reserved for future expansion */
-    void          *_reserved[4];
+    void          *_reserved[3];
 } slop_plugin_t;
 
 

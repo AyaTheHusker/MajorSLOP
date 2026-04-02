@@ -595,6 +595,7 @@ typedef struct {
 static loaded_plugin_t plugins[SLOP_MAX_PLUGINS];
 static int plugin_count;
 static void plugins_on_line(const char *line);
+static void plugins_on_data(const char *data, int len);
 static void plugins_on_round(int round_num);
 static int plugins_on_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
 static void show_plugins_dialog(HWND parent);
@@ -1782,6 +1783,9 @@ static void __cdecl hooked_process_incoming(int sbase, void *data, int len)
 {
     /* Tap the raw ANSI data for plugins */
     if (len > 0 && data) {
+        /* Raw byte stream for terminal emulators (byte-by-byte processing) */
+        plugins_on_data((const char *)data, len);
+        /* Line-delimited for other plugins (round detection, triggers, etc.) */
         incoming_feed_data((const char *)data, len);
     }
 
@@ -3558,6 +3562,15 @@ static void plugins_on_line(const char *line)
     }
     for (int i = 0; i < plugin_line_cb_count; i++) {
         if (plugin_line_cbs[i]) plugin_line_cbs[i](line);
+    }
+}
+
+/* Notify plugins that implement on_data with raw server bytes */
+static void plugins_on_data(const char *data, int len)
+{
+    for (int i = 0; i < plugin_count; i++) {
+        if (plugins[i].loaded && plugins[i].desc->on_data)
+            plugins[i].desc->on_data(data, len);
     }
 }
 
