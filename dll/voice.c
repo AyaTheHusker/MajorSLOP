@@ -27,6 +27,9 @@
  * Voice.dll handles speech RECOGNITION only.
  * TTS is accessed via TCP bridge: SAMSAY, ESPEAKSAY */
 
+/* SAM debug flag — required by sam.c / reciter.c / render.c */
+int debug = 0;
+
 /* Disable pocketsphinx DLL import decorations (we link statically) */
 #ifdef POCKETSPHINX_EXPORT
 #undef POCKETSPHINX_EXPORT
@@ -374,6 +377,96 @@ static void voice_start_recording(void)
     api->log("[voice] Recording started (PTT held)\n");
 }
 
+/* Dispatch recognized speech to the right handler */
+static void voice_dispatch(const char *text)
+{
+    /* Commands that go through fake_remote (MegaMUD internal functions) */
+
+    /* "stop" / "stop loop" */
+    if (_stricmp(text, "stop") == 0 || _stricmp(text, "stop loop") == 0) {
+        api->fake_remote("stop");
+        return;
+    }
+
+    /* "loop <name>" — "loop ancient crypt" */
+    if (_strnicmp(text, "loop ", 5) == 0) {
+        char cmd[128];
+        snprintf(cmd, sizeof(cmd), "loop %s", text + 5);
+        api->fake_remote(cmd);
+        return;
+    }
+
+    /* "go to <name>" / "walk me to <name>" / "run me to <name>" → goto */
+    const char *dest = NULL;
+    if (_strnicmp(text, "go to ", 6) == 0) dest = text + 6;
+    else if (_strnicmp(text, "walk me to ", 11) == 0) dest = text + 11;
+    else if (_strnicmp(text, "run me to ", 10) == 0) dest = text + 10;
+    if (dest) {
+        char cmd[128];
+        snprintf(cmd, sizeof(cmd), "goto %s", dest);
+        api->fake_remote(cmd);
+        return;
+    }
+
+    /* Direction shortcuts — map spoken "northeast" to "ne" etc. */
+    static const struct { const char *spoken; const char *mud; } dirs[] = {
+        {"north",     "n"},  {"south",     "s"},
+        {"east",      "e"},  {"west",      "w"},
+        {"up",        "u"},  {"down",      "d"},
+        {"northeast", "ne"}, {"northwest", "nw"},
+        {"southeast", "se"}, {"southwest", "sw"},
+        /* Short forms pass through directly */
+        {"n", "n"}, {"s", "s"}, {"e", "e"}, {"w", "w"},
+        {"ne", "ne"}, {"nw", "nw"}, {"se", "se"}, {"sw", "sw"},
+        {NULL, NULL}
+    };
+    for (int i = 0; dirs[i].spoken; i++) {
+        if (_stricmp(text, dirs[i].spoken) == 0) {
+            api->inject_command(dirs[i].mud);
+            return;
+        }
+    }
+
+    /* Combat commands → direct MUD commands */
+    if (_stricmp(text, "attack") == 0) { api->inject_command("a"); return; }
+    if (_stricmp(text, "flee") == 0)   { api->inject_command("flee"); return; }
+    if (_stricmp(text, "backstab") == 0) { api->inject_command("backstab"); return; }
+    if (_stricmp(text, "kill") == 0)   { api->inject_command("a"); return; }
+
+    /* Utility commands → direct MUD commands */
+    if (_stricmp(text, "rest") == 0)       { api->inject_command("rest"); return; }
+    if (_stricmp(text, "meditate") == 0)   { api->inject_command("meditate"); return; }
+    if (_stricmp(text, "look") == 0)       { api->inject_command("l"); return; }
+    if (_stricmp(text, "search") == 0)     { api->inject_command("search"); return; }
+    if (_stricmp(text, "sneak") == 0)      { api->inject_command("sneak"); return; }
+    if (_stricmp(text, "hide") == 0)       { api->inject_command("hide"); return; }
+    if (_stricmp(text, "pick lock") == 0)  { api->inject_command("pick lock"); return; }
+    if (_stricmp(text, "get all") == 0)    { api->inject_command("get all"); return; }
+    if (_stricmp(text, "drop all") == 0)   { api->inject_command("drop all"); return; }
+    if (_stricmp(text, "inventory") == 0)  { api->inject_command("inv"); return; }
+
+    /* Query commands */
+    if (_stricmp(text, "status") == 0 || _stricmp(text, "check stats") == 0 ||
+        _stricmp(text, "check health") == 0) {
+        api->inject_command("stat"); return;
+    }
+
+    /* Safety filter — block dangerous commands */
+    static const char *blocked[] = {
+        "suicide", "reroll", NULL
+    };
+    for (int i = 0; blocked[i]; i++) {
+        if (_stricmp(text, blocked[i]) == 0) {
+            api->log("[voice] BLOCKED dangerous command: '%s'\n", text);
+            return;
+        }
+    }
+
+    /* Fallback: inject as raw MUD command */
+    api->log("[voice] Unrecognized, sending raw: '%s'\n", text);
+    api->inject_command(text);
+}
+
 static void voice_stop_recording(void)
 {
     if (!recording) return;
@@ -400,9 +493,8 @@ static void voice_stop_recording(void)
         last_result[VOICE_MAX_RESULT - 1] = '\0';
         api->log("[voice] Recognized: \"%s\"\n", last_result);
 
-        /* TODO: Map recognized text to MUD command and inject.
-         * For now, just log it. Command mapping will be Phase 6. */
-        api->inject_command(last_result);
+        /* Route command through fake_remote or inject_command */
+        voice_dispatch(last_result);
     } else {
         api->log("[voice] No speech recognized\n");
         last_result[0] = '\0';

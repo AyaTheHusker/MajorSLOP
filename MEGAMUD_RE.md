@@ -94,7 +94,7 @@ Reset script: `wine python scripts/reset_stats.py [exp|accuracy|other|all]`
 
 | Offset | Size | Name | Description |
 |---|---|---|---|
-| 0x000C | ptr | HWND_OFFSET | HWND of main window |
+| 0x000C | ptr | HWND_MMMAIN | HWND of MMMAIN window (used by @stop/@rego for SendMessageA) |
 | 0x014C | i32 | SOUND_ENABLED | Sound on/off |
 | 0x0150 | i32 | SHOW_TALK | Show talk window |
 | 0x0154 | i32 | SHOW_WHO | Show who list |
@@ -130,7 +130,9 @@ Entity array element:
 | Offset | Size | Name | Description |
 |---|---|---|---|
 | 0x2C18 | i32 | ROOM_DB_COUNT | Number of rooms in database |
-| 0x2C20 | ptr | ROOM_DB_PTR | Pointer to room entry array (checksum at +0x44, name at +0x06) |
+| 0x2C20 | ptr | ROOM_DB_PTR | Pointer to room entry array (see Room Entry Struct below) |
+| 0x2C58 | i32 | LOOP_DB_COUNT | Number of loops in database |
+| 0x2C60 | ptr | LOOP_DB_PTR | Pointer to loop entry array (see Loop Entry Struct below) |
 | 0x2D9C | char[] | ROOM_NAME | Current room name (null-terminated ASCII) |
 | 0x2E70 | u32 | ROOM_CHECKSUM | Current room checksum/hash |
 | 0x2E78 | i32[10] | ROOM_EXITS | Exit types per direction (0=none, 2=closed, 3=open, 4=special, 5=unlocked) |
@@ -316,7 +318,7 @@ Gated by AUTO_CASH (0x4D14) and AUTO_GET (0x4D18).
 | 0x54BC | i32 | MODE | 11=idle/manual, 14=walking/running, 15=looping, 16=auto-roaming, 17=lost (re-syncing). Missing "Obvious exits:" drops to 11 (not 17). |
 | 0x54D4 | i32 | MSG_CODE | Last WM_ message code received |
 | 0x54D8 | i32 | STEPS_REMAINING | Countdown of steps remaining in current path segment |
-| 0x54DC | i32 | UNK_54DC | Set to -1 before loop, cleared to 0 on loop start |
+| 0x54DC | i32 | LOOP_STATS | Set to -1 before loop, zeroed (4 bytes at 0x54DC–0x54DF) on @loop start to clear session stats |
 
 ### Connection
 
@@ -324,7 +326,7 @@ Gated by AUTO_CASH (0x4D14) and AUTO_GET (0x4D18).
 |---|---|---|---|
 | 0x563C | i32 | CONNECTED | Non-zero if connected to BBS |
 | 0x5644 | i32 | IN_GAME | Non-zero if in the game world |
-| 0x564C | i32 | GO_FLAG | **WRITABLE** — master go/stop toggle. 1=go, 0=stop. Stop button clears this. Required for walk/run/loop to work. |
+| 0x564C | i32 | GO_FLAG | **WRITABLE** — master go/stop toggle. 1=go, 0=stop. StopGo button (WM_COMMAND 0x0803) toggles this flag. Must be 1 for any path to execute. When starting a loop/goto while resting, must send StopGo to kick movement. |
 | 0x565C | i32 | FIX_STEPS | |
 
 ### Pathing / Loop Control
@@ -807,6 +809,142 @@ MegaMUD will:
 
 Note: Do NOT clear LOOPING, path file, waypoints, or step data — MegaMUD
 manages those internally. Only clear the two flags the stop button uses.
+
+---
+
+## Internal Function Table (Ghidra RE)
+
+Functions discovered via Ghidra disassembly of megamud.exe. All are cdecl unless noted.
+"struct" refers to the main game state struct base pointer.
+
+| VA | Name | Signature | Description |
+|---|---|---|---|
+| 0x00428970 | VA_STOP_PATH | void(int struct) | Clears path history array at struct+0x2EA4 |
+| 0x0045FEE0 | VA_PREP_LOOP | void(void *struct, int dest_buf) | Prepare loop destination buffer |
+| 0x0045F860 | VA_LOAD_PATH | void(int struct, char *dest, void *entry, int 0) | Load path file from loop/path entry |
+| 0x0042B510 | VA_START_PATH | int(int struct, void *dest, int entry) | Start walking a path. Returns 1=success, 0=fail. Calls FUN_00428bc0 internally. |
+| 0x00428FA0 | VA_VERIFY_PATH | uint(int *struct, int 0) | Verify path is valid. Returns 0=success. |
+| 0x004455B0 | VA_UPDATE_ROAM | void(int *struct) | Update auto-roam state |
+| 0x004A31F0 | VA_MM_STRICMP | int(void *s1, void *s2) | Case-insensitive string compare. Returns 0=match. |
+| 0x0047C870 | VA_NORMALIZE_STR | void(void *str) | Normalize/lowercase/trim a string |
+| 0x00478A70 | VA_RESET_FN1 | void(?) | Part of @reset handler chain |
+| 0x00478920 | VA_RESET_FN2 | void(?) | Part of @reset handler chain |
+| 0x00478B10 | VA_RESET_FN3 | void(?) | Part of @reset handler chain |
+| 0x0040E8D0 | VA_RESET_FN4 | void(?) | Part of @reset handler chain |
+
+---
+
+## @Command Handler (FUN_0047CF70)
+
+**VA:** 0x0047CF70 — **Size:** 17,634 bytes
+
+This is the main @command dispatch function. It receives the command string from
+telepath or local input and branches to the appropriate handler. Key commands:
+
+### @stop
+
+Checks pathing flag (0x5664). If pathing, sends `SendMessageA(struct+0xC, WM_COMMAND, 0x0803, 0)`
+which is the StopGo button — this clears GO_FLAG (0x564C) and stops all movement.
+
+### @rego
+
+If not currently pathing, sends StopGo (WM_COMMAND 0x0803) to kick movement,
+then checks if pathing actually started.
+
+### @goto \<room\>
+
+```
+1. stop_path(struct)                           — VA_STOP_PATH
+2. start_path(struct, dest_ptr, 0)             — VA_START_PATH
+3. verify_path(struct, 0)                      — VA_VERIFY_PATH
+```
+
+**Bug:** The real @goto handler does NOT clear the LOOPING flag (0x5668) before
+starting the goto. This causes MegaMUD to resume the old loop after reaching the
+goto destination. The fake_remote implementation fixes this by explicitly writing
+0x5668=0 before executing the goto sequence.
+
+### @loop \<name\>
+
+```
+1. stop_path(struct)                           — VA_STOP_PATH
+2. prep_loop(struct, struct+0x5930)            — VA_PREP_LOOP
+3. load_path(struct, struct+0x5930, entry, 0)  — VA_LOAD_PATH
+4. start_path(struct, NULL, entry)             — VA_START_PATH
+5. verify_path(struct, 0)                      — VA_VERIFY_PATH
+6. zero 4 bytes at 0x54DC–0x54DF              — clear session stats
+```
+
+### @looponce \<name\>
+
+Same sequence as @loop but with different prep (does not set infinite repeat).
+
+### @roam on/off
+
+Writes 0x566C (AUTO_ROAMING flag). If enabling roam, also sets 0x5664 (PATHING_ACTIVE).
+Calls VA_UPDATE_ROAM (0x004455B0).
+
+### @reset
+
+Calls VA_RESET_FN1 through VA_RESET_FN4, which zero many flag ranges in the struct.
+
+---
+
+## fake_remote System (DLL Direct Calls)
+
+The fake_remote system bypasses the telepath-based @command injection path and
+instead calls MegaMUD's internal functions directly from the injected DLL. This
+avoids telepath overhead, timing issues, and the @goto loop-clear bug.
+
+### Why fake_remote exists
+
+The original ghost character system injects @commands by faking telepath messages
+from a ghost player. This works but has drawbacks:
+- Requires the ghost to be in the WHO list
+- Has telepath parsing overhead and timing sensitivity
+- The real @goto handler has the loop-clear bug (see above)
+
+fake_remote calls the same VA functions that the @command handler uses, but from
+within the DLL's address space, giving direct control over the execution sequence.
+
+### Key advantage: @goto loop-clear fix
+
+When fake_remote executes a @goto, it explicitly clears LOOPING (0x5668=0) before
+calling start_path. This prevents MegaMUD from resuming an old loop after reaching
+the goto destination — a bug present in the real @goto handler (FUN_0047CF70).
+
+---
+
+## Room Entry Struct (array at struct+0x2C20)
+
+Each entry in the room database array:
+
+| Offset | Size | Type | Description |
+|---|---|---|---|
+| +0x01 | char[] | str | Short code/name (e.g. "SBNK") |
+| +0x06 | char[] | str | Full room name (e.g. "Bank of Godfrey") |
+| +0x44 | ptr | void* | Destination data pointer (used by start_path) |
+
+## Loop Entry Struct (array at struct+0x2C60)
+
+Each entry in the loop database array:
+
+| Offset | Size | Type | Description |
+|---|---|---|---|
+| +0x04 | ptr | char* | Pointer to filename string (e.g. "DCCWLOOP.mp") |
+| +0x0C | char[] | str | Inline display name (e.g. "Cave Worm Loop") |
+| +0x58 | ptr | void* | Destination data pointer (used by start_path) |
+
+---
+
+## Plugin System Notes (msimg32 proxy DLL)
+
+### menu_base_id
+
+Added to `slop_api_t` struct. The loader sets `menu_base_id` before calling each
+plugin's `init()`. Plugins use this value as the base for their WM_COMMAND menu item
+IDs instead of hardcoding IDs. This fixes an issue where alphabetical plugin load
+order would shift menu IDs and break command routing between plugins.
 
 ---
 

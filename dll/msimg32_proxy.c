@@ -1600,6 +1600,7 @@ static LRESULT CALLBACK slop_mmmain_proc(HWND hwnd, UINT msg, WPARAM wParam, LPA
         }
         /* Forward to plugin WndProc handlers */
         if (id >= IDM_PLUGIN_BASE) {
+            logmsg("[wndproc] WM_COMMAND id=%u forwarding to plugins\n", (unsigned)id);
             if (plugins_on_wndproc(hwnd, msg, wParam, lParam))
                 return 0;
         }
@@ -2127,6 +2128,321 @@ static void inject_server_data_impl(const char *data, int len)
     }
 
     logmsg("[inject] Injected %d bytes via FUN_0041C8D0\n", len);
+}
+
+/* ================================================================
+ * Fake Remote — call MegaMUD's internal @command functions directly
+ * without telepath overhead or response messages.
+ * Ghidra RE of FUN_0047cf70 (the master @command dispatcher, 17KB).
+ * ================================================================ */
+
+/* Internal function VAs from Ghidra RE */
+#define VA_STOP_PATH     0x00428970  /* void(int struct) — stop current path/movement */
+#define VA_PREP_LOOP     0x0045fee0  /* void(void *struct, int dest_buf) — prepare loop dest */
+#define VA_LOAD_PATH     0x0045f860  /* void(int struct, char *dest, void *entry, int 0) */
+#define VA_START_PATH    0x0042b510  /* int(int struct, void *dest, int entry) — start path */
+#define VA_VERIFY_PATH   0x00428fa0  /* uint(int *struct, int 0) — 0 = success */
+#define VA_UPDATE_ROAM   0x004455b0  /* void(int *struct) — update roaming state */
+#define VA_MM_STRICMP    0x004a31f0  /* int(void *s1, void *s2) — 0 = match */
+#define VA_NORMALIZE_STR 0x0047c870  /* void(void *str) — normalize (lowercase/trim) */
+/* Reset update functions */
+#define VA_RESET_FN1     0x00478a70  /* void(int struct) */
+#define VA_RESET_FN2     0x00478920  /* void(int struct) */
+#define VA_RESET_FN3     0x00478b10  /* void(int struct) */
+#define VA_RESET_FN4     0x0040e8d0  /* void(int struct, int 1) */
+
+/* Struct offsets for @command state (Ghidra RE of FUN_0047cf70) */
+#define OFF_FR_GO_FLAG    0x564C   /* int32: master go/stop toggle. 1=go, 0=stop */
+#define OFF_FR_PATHING    0x5664   /* int32: non-zero if currently pathing */
+#define OFF_FR_LOOPING    0x5668   /* int32: 1 = loop mode */
+#define OFF_FR_ROAMING    0x566C   /* int32: auto-roam enabled */
+#define OFF_FR_IS_RESTING 0x5678   /* int32: player is resting */
+#define OFF_FR_IS_MEDIT   0x567C   /* int32: player is meditating */
+#define OFF_FR_LOOP_COUNT 0x2C58   /* int32: number of loop/path entries */
+#define OFF_FR_LOOP_ARRAY 0x2C60   /* ptr: array of loop entry pointers */
+#define OFF_FR_ROOM_COUNT 0x2C18   /* int32: number of room entries */
+#define OFF_FR_ROOM_ARRAY 0x2C20   /* ptr: array of room entry pointers */
+#define OFF_FR_LOOP_DEST  0x5930   /* char[]: loop destination buffer */
+#define OFF_FR_MMMAIN_HWND 0x0C   /* HWND: MMMAIN window handle in struct */
+#define MEGAMUD_CMD_STOPGO 0x0803  /* WM_COMMAND ID for stop/go toggle */
+
+/* Loop entry struct (from Ghidra):
+ *   +0x04  char* — pointer to filename string
+ *   +0x0C  char[] — inline display name
+ * Room entry struct:
+ *   +0x01  char[] — short code/name
+ *   +0x06  char[] — full room name
+ *   +0x44  void* — destination data pointer */
+
+typedef void (__cdecl *fn_vi)(int);
+typedef void (__cdecl *fn_vpi)(void *, int);
+typedef void (__cdecl *fn_vicpi)(int, char *, void *, int);
+typedef int  (__cdecl *fn_iippi)(int, void *, int);
+typedef unsigned int (__cdecl *fn_uipi)(int *, int);
+typedef void (__cdecl *fn_vip)(int *);
+typedef int  (__cdecl *fn_ipp)(void *, void *);
+typedef void (__cdecl *fn_vp)(void *);
+typedef void (__cdecl *fn_vii)(int, int);
+
+static int fake_remote_impl(const char *cmd)
+{
+    if (!struct_base || !cmd || !cmd[0]) return -1;
+    int sb = (int)struct_base;
+    unsigned char *sbp = (unsigned char *)struct_base;  /* pointer form */
+
+    /* --- stop --- */
+    if (_stricmp(cmd, "stop") == 0) {
+        if (*(int *)(sbp + OFF_FR_PATHING) != 0) {
+            HWND mw = FindWindowA("MMMAIN", NULL);
+            if (mw) SendMessageA(mw, WM_COMMAND, MEGAMUD_CMD_STOPGO, 0);
+        }
+        logmsg("[fake_remote] stop\n");
+        return 0;
+    }
+
+    /* --- rego --- */
+    if (_stricmp(cmd, "rego") == 0) {
+        if (*(int *)(sbp + OFF_FR_PATHING) != 0) {
+            logmsg("[fake_remote] rego — already pathing\n");
+            return 0;
+        }
+        HWND mw = FindWindowA("MMMAIN", NULL);
+        if (mw) SendMessageA(mw, WM_COMMAND, MEGAMUD_CMD_STOPGO, 0);
+        int ok = (*(int *)(sbp + OFF_FR_PATHING) != 0);
+        logmsg("[fake_remote] rego — %s\n", ok ? "resumed" : "can't");
+        return ok ? 0 : -1;
+    }
+
+    /* --- roam on|off --- */
+    if (_strnicmp(cmd, "roam", 4) == 0 &&
+        (cmd[4] == ' ' || cmd[4] == '\0')) {
+        const char *arg = cmd + 4;
+        while (*arg == ' ') arg++;
+        if (_stricmp(arg, "on") == 0) {
+            *(int *)(sbp + OFF_FR_ROAMING) = 1;
+            *(int *)(sbp + OFF_FR_PATHING) = 1;
+        } else if (_stricmp(arg, "off") == 0) {
+            *(int *)(sbp + OFF_FR_ROAMING) = 0;
+        } else {
+            logmsg("[fake_remote] roam — need 'on' or 'off'\n");
+            return -1;
+        }
+        ((fn_vip)VA_UPDATE_ROAM)((int *)sbp);
+        logmsg("[fake_remote] roam %s\n", arg);
+        return 0;
+    }
+
+    /* --- loop <name> --- */
+    if (_strnicmp(cmd, "loop ", 5) == 0) {
+        const char *name = cmd + 5;
+        while (*name == ' ') name++;
+        if (!*name) return -1;
+
+        char nb[0x29];
+        strncpy(nb, name, 0x28);
+        nb[0x28] = '\0';
+        ((fn_vp)VA_NORMALIZE_STR)(nb);
+
+        int count = *(int *)(sbp + OFF_FR_LOOP_COUNT);
+        int arr   = *(int *)(sbp + OFF_FR_LOOP_ARRAY);
+        fn_ipp cmp = (fn_ipp)VA_MM_STRICMP;
+
+        for (int i = 0; i < count; i++) {
+            int entry = *(int *)(arr + i * 4);
+            if (!entry) continue;
+
+            char *fname = *(char **)(entry + 4);
+            int fm = (fname && cmp(fname, nb) == 0);
+            int dm = (cmp((char *)(entry + 0xC), nb) == 0);
+
+            if (fm || dm) {
+                ((fn_vi)VA_STOP_PATH)(sb);
+                ((fn_vpi)VA_PREP_LOOP)(sbp, (int)(sbp + OFF_FR_LOOP_DEST));
+                ((fn_vicpi)VA_LOAD_PATH)(sb, (char *)(sbp + OFF_FR_LOOP_DEST),
+                                         (void *)entry, 0);
+                int rv = ((fn_iippi)VA_START_PATH)(sb, NULL, entry);
+                if (rv == 0) {
+                    logmsg("[fake_remote] loop '%s' — start failed\n", name);
+                    return -1;
+                }
+                unsigned int vr = ((fn_uipi)VA_VERIFY_PATH)((int *)sbp, 0);
+                if (vr != 0) {
+                    logmsg("[fake_remote] loop '%s' — verify failed\n", name);
+                    return -1;
+                }
+                *(int *)(sbp + 0x54dc) = 0;
+                /* Kick movement: if GO_FLAG is not set, send StopGo to start.
+                 * Real @loop assumes you're already going; we may be resting. */
+                if (*(int *)(sbp + OFF_FR_GO_FLAG) == 0) {
+                    HWND mw = *(HWND *)(sbp + OFF_FR_MMMAIN_HWND);
+                    if (mw) SendMessageA(mw, WM_COMMAND, MEGAMUD_CMD_STOPGO, 0);
+                    logmsg("[fake_remote] loop — sent StopGo to kick movement\n");
+                }
+                logmsg("[fake_remote] loop '%s' — started (entry %d)\n", name, i);
+                return 0;
+            }
+        }
+        logmsg("[fake_remote] loop '%s' — not found (%d entries)\n", name, count);
+        return -1;
+    }
+
+    /* --- goto <name> --- */
+    if (_strnicmp(cmd, "goto ", 5) == 0) {
+        const char *name = cmd + 5;
+        while (*name == ' ') name++;
+        if (!*name) return -1;
+
+        char nb[0x29];
+        strncpy(nb, name, 0x28);
+        nb[0x28] = '\0';
+        ((fn_vp)VA_NORMALIZE_STR)(nb);
+
+        int count = *(int *)(sbp + OFF_FR_ROOM_COUNT);
+        int arr   = *(int *)(sbp + OFF_FR_ROOM_ARRAY);
+        fn_ipp cmp = (fn_ipp)VA_MM_STRICMP;
+
+        for (int i = 0; i < count; i++) {
+            int entry = *(int *)(arr + i * 4);
+            if (!entry) continue;
+
+            int m1 = (cmp((char *)(entry + 6), nb) == 0);
+            int m2 = (cmp((char *)(entry + 1), nb) == 0);
+
+            if (m1 || m2) {
+                ((fn_vi)VA_STOP_PATH)(sb);
+                /* Clear loop state so MegaMUD doesn't resume the old loop
+                 * after reaching the goto destination. Real @goto has this
+                 * bug too — LOOPING flag persists. We fix it here. */
+                *(int *)(sbp + OFF_FR_LOOPING) = 0;
+                void *dest = *(void **)(entry + 0x44);
+                int rv = ((fn_iippi)VA_START_PATH)(sb, dest, 0);
+                if (rv == 0) {
+                    logmsg("[fake_remote] goto '%s' — start failed\n", name);
+                    return -1;
+                }
+                unsigned int vr = ((fn_uipi)VA_VERIFY_PATH)((int *)sbp, 0);
+                if (vr != 0) {
+                    logmsg("[fake_remote] goto '%s' — verify failed\n", name);
+                    return -1;
+                }
+                /* Kick movement if stopped/resting */
+                if (*(int *)(sbp + OFF_FR_GO_FLAG) == 0) {
+                    HWND mw = *(HWND *)(sbp + OFF_FR_MMMAIN_HWND);
+                    if (mw) SendMessageA(mw, WM_COMMAND, MEGAMUD_CMD_STOPGO, 0);
+                    logmsg("[fake_remote] goto — sent StopGo to kick movement\n");
+                }
+                logmsg("[fake_remote] goto '%s' — started (room %d)\n", name, i);
+                return 0;
+            }
+        }
+        logmsg("[fake_remote] goto '%s' — not found (%d rooms)\n", name, count);
+        return -1;
+    }
+
+    /* --- reset --- */
+    if (_stricmp(cmd, "reset") == 0) {
+        /* Zero all internal flags/statistics (from Ghidra RE of @reset handler) */
+        *(int *)(sbp + 0x3194) = 0;
+        *(int *)(sbp + 0x358c) = 0;
+        *(int *)(sbp + 0x4d98) = 0;
+        *(int *)(sbp + 0x4d9c) = 0;
+        *(int *)(sbp + 0x4da0) = 0;
+        *(int *)(sbp + 0x5448) = 0;
+        *(int *)(sbp + 0x4e3c) = 0;
+        *(int *)(sbp + 0x54d0) = -1;  /* 0xFFFFFFFF */
+        *(int *)(sbp + 0x5508) = 0;
+        *(int *)(sbp + 0x3784) = 0;
+        *(int *)(sbp + 0x5674) = 0;
+        *(int *)(sbp + 0x5694) = 0;
+        *(int *)(sbp + 0x56a4) = 0;
+        *(int *)(sbp + 0x3558) = 0;
+        *(int *)(sbp + 0x56ac) = 0;
+        *(int *)(sbp + 0x56b0) = 0;
+        *(int *)(sbp + 0x56b4) = 0;
+        *(int *)(sbp + 0x56b8) = 0;
+        *(int *)(sbp + 0x56bc) = 0;
+        *(int *)(sbp + 0x56c0) = 0;
+        *(int *)(sbp + 0x56c4) = 0;
+        *(int *)(sbp + 0x56c8) = 0;
+        *(int *)(sbp + 0x56cc) = 0;
+        *(int *)(sbp + 0x56d0) = 0;
+        *(int *)(sbp + 0x56d4) = 0;
+        *(int *)(sbp + 0x56e0) = 0;
+        *(int *)(sbp + 0x56e4) = 0;
+        *(int *)(sbp + 0x56f0) = 0;
+        *(int *)(sbp + 0x5730) = 0;
+        *(int *)(sbp + 0x5734) = 0;
+        *(int *)(sbp + 0x5738) = 0;
+        *(int *)(sbp + 0x573c) = 1;  /* auto-combat default ON */
+        *(int *)(sbp + 0x5744) = 1;
+        *(int *)(sbp + 0x5748) = 1;
+        *(int *)(sbp + 0x574c) = 1;
+        *(int *)(sbp + 0x5750) = 1;
+        *(int *)(sbp + 0x5754) = 0;
+        *(int *)(sbp + 0x5758) = 0;
+        *(int *)(sbp + 0x575c) = 0;
+        *(int *)(sbp + 0x5764) = 0;
+        *(int *)(sbp + 0x5768) = 0;
+        *(int *)(sbp + 0x576c) = 0;
+        *(int *)(sbp + 0x5770) = 0;
+        *(int *)(sbp + 0x5778) = 0;
+        *(int *)(sbp + 0x577c) = 0;
+        *(int *)(sbp + 0x5788) = 0;
+        *(int *)(sbp + 0x578c) = 0;
+        *(int *)(sbp + 0x5790) = 0;
+        *(int *)(sbp + 0x5794) = 0;
+        *(int *)(sbp + 0x5a0c) = 0;
+        *(int *)(sbp + 0x5510) = 0;
+
+        /* Clear flags in spell/room entry arrays */
+        int n1 = *(int *)(sbp + 0x1f14);
+        int a1 = *(int *)(sbp + 0x1f1c);
+        for (int i = 0; i < n1; i++) {
+            unsigned short *p = (unsigned short *)(*(int *)(a1 + i * 4) + 0x116);
+            *p &= 0xfffc;
+        }
+
+        /* Copy exp/time stamps for rate calculation reset */
+        *(int *)(sbp + 0x95d8) = *(int *)(sbp + 0x9468);
+        *(int *)(sbp + 0x95dc) = *(int *)(sbp + 0x946c);
+        *(int *)(sbp + 0x95e0) = *(int *)(sbp + 0x9468);
+        *(int *)(sbp + 0x95e4) = *(int *)(sbp + 0x946c);
+        memset(sbp + 0x95f0, 0, 0x28);
+
+        /* Reset HP/mana baseline */
+        *(int *)(sbp + 0x9618) = *(int *)(sbp + 0x53d4);
+        *(int *)(sbp + 0x961c) = *(int *)(sbp + 0x53e0);
+
+        /* Clear status strings */
+        memset(sbp + 0x319c, 0, 0x1f);
+        memset(sbp + 0x5590, 0, 0x0b);
+        memset(sbp + 0x559b, 0, 0x0b);
+        memset(sbp + 0x55a6, 0, 0x0b);
+        memset(sbp + 0x55b1, 0, 100);
+
+        /* Clear item flags */
+        int n2 = *(int *)(sbp + 0x1e28);
+        int a2 = *(int *)(sbp + 0x1e30);
+        for (int i = 0; i < n2; i++) {
+            int e = *(int *)(a2 + i * 4);
+            *(unsigned int *)(e + 0x54) &= 0xffff3fff;
+            *(int *)(e + 0x78) = 0;
+        }
+        *(int *)(sbp + 0x9610) = 0;
+        *(int *)(sbp + 0x9614) = 0;
+
+        /* Call internal update functions */
+        ((fn_vi)VA_RESET_FN1)(sb);
+        ((fn_vi)VA_RESET_FN2)(sb);
+        ((fn_vi)VA_RESET_FN3)(sb);
+        ((fn_vii)VA_RESET_FN4)(sb, 1);
+
+        logmsg("[fake_remote] reset — all flags/stats cleared\n");
+        return 0;
+    }
+
+    logmsg("[fake_remote] unknown: '%s'\n", cmd);
+    return -1;
 }
 
 /* ---- Client handler ---- */
@@ -3074,8 +3390,9 @@ static void api_inject_command(const char *cmd)
 
 static int api_add_menu_item(const char *label, unsigned int id)
 {
-    if (!slop_menu) return 0;
+    if (!slop_menu) { logmsg("[menu] add_menu_item('%s', %u) — no menu!\n", label, id); return 0; }
     AppendMenuA(slop_menu, MF_STRING, id, label);
+    logmsg("[menu] Added '%s' (id=%u) to MegaMud+ menu\n", label, id);
     HWND mw = FindWindowA("MMMAIN", NULL);
     if (mw) DrawMenuBar(mw);
     return (int)id;
@@ -3108,6 +3425,12 @@ static void api_inject_server_data(const char *data, int len)
     inject_server_data_impl(data, len);
 }
 
+/* Fake remote — call @command handlers without telepath */
+static int api_fake_remote(const char *cmd)
+{
+    return fake_remote_impl(cmd);
+}
+
 /* The API struct that gets passed to every plugin */
 static slop_api_t slop_api = {0};
 
@@ -3130,6 +3453,7 @@ static void slop_api_init(void)
     slop_api.on_round_tick     = api_on_round_tick;
     slop_api.on_terminal_line  = api_on_terminal_line;
     slop_api.inject_server_data = api_inject_server_data;
+    slop_api.fake_remote        = api_fake_remote;
 }
 
 /* Notify all plugins + registered callbacks of a terminal line */
@@ -3254,7 +3578,8 @@ static void load_plugins(void)
             continue;
         }
 
-        /* Call init */
+        /* Call init — tell plugin its menu base ID */
+        slop_api.menu_base_id = IDM_PLUGIN_BASE + plugin_count * 10;
         if (desc->init) {
             int ret = desc->init(&slop_api);
             if (ret != 0) {

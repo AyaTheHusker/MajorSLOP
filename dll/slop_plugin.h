@@ -72,14 +72,25 @@ typedef struct slop_api {
     void          (*on_round_tick)(void (*callback)(int round_num));
     void          (*on_terminal_line)(void (*callback)(const char *line));
 
-    /* Server data injection — feeds raw bytes through MegaMUD's real pipeline
-     * (ReadFile hook). Data appears in MMANSI terminal and goes through the
-     * full line parser, exit detection, etc. Use ANSI/telnet format.
+    /* Server data injection — feeds raw bytes through MegaMUD's real pipeline.
+     * Data appears in MMANSI terminal and goes through the full line parser,
+     * exit detection, etc. Use ANSI/telnet format.
      * Example: inject_server_data("\r\nObvious exits: NONE\r\n", 23) */
     void          (*inject_server_data)(const char *data, int len);
 
+    /* Fake remote — execute @commands without telepath overhead.
+     * Calls MegaMUD's internal functions directly (Ghidra RE of FUN_0047cf70).
+     * No telepath response is sent. Returns 0 on success, -1 on failure.
+     * Commands: "stop", "rego", "roam on", "roam off",
+     *           "loop <name>", "goto <room>", "reset" */
+    int           (*fake_remote)(const char *cmd);
+
+    /* Set by the loader before init() — the base menu command ID for this plugin.
+     * Menu items are at menu_base_id+0, menu_base_id+1, etc. (up to +9) */
+    int             menu_base_id;
+
     /* Reserved for future expansion */
-    void          *_reserved[7];
+    void          *_reserved[5];
 } slop_api_t;
 
 

@@ -97,6 +97,7 @@ static void *saved_gil_state = NULL;  /* For releasing GIL from main thread */
 /* ---- Plugin state ---- */
 
 static const slop_api_t *api = NULL;
+static int menu_base = 41000;  /* set from api->menu_base_id in init */
 static int py_ready = 0;
 static HWND con_hwnd = NULL;        /* Console window */
 static HWND con_output = NULL;      /* Output edit control */
@@ -1115,6 +1116,12 @@ __declspec(dllexport) void mmudpy_inject_server(const char *data, int len)
         api->inject_server_data(data, len);
 }
 
+__declspec(dllexport) int mmudpy_fake_remote(const char *cmd)
+{
+    if (!api || !api->fake_remote || !cmd) return -1;
+    return api->fake_remote(cmd);
+}
+
 __declspec(dllexport) int mmudpy_line_register(void)
 {
     /* Allocate a reader slot, returns reader_id (0-7) or -1 */
@@ -1713,6 +1720,8 @@ static const char *py_bootstrap =
     "    _dll.mmudpy_read_terminal_attrs.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int]\n"
     "    _dll.mmudpy_inject_server.restype = None\n"
     "    _dll.mmudpy_inject_server.argtypes = [ctypes.c_char_p, ctypes.c_int]\n"
+    "    _dll.mmudpy_fake_remote.restype = ctypes.c_int\n"
+    "    _dll.mmudpy_fake_remote.argtypes = [ctypes.c_char_p]\n"
     "    _dll.mmudpy_line_register.restype = ctypes.c_int\n"
     "    _dll.mmudpy_line_register.argtypes = []\n"
     "    _dll.mmudpy_line_unregister.restype = None\n"
@@ -2177,7 +2186,44 @@ static const char *py_bootstrap =
     "        lines.append('  Type OFF to see all game struct offsets.')\n"
     "        return '\\n'.join(lines)\n"
     "\n"
+    "class _Remote:\n"
+    "    '''Execute MegaMUD @commands directly — no telepath, no response.\n"
+    "    Calls the exact same internal functions as the real @commands.\n"
+    "    Usage: mud.remote.loop(\"ancient crypt\")'''\n"
+    "    def _call(self, cmd):\n"
+    "        rv = _dll.mmudpy_fake_remote(cmd.encode('utf-8'))\n"
+    "        if rv != 0:\n"
+    "            print(f'remote: {cmd} — failed')\n"
+    "        return rv == 0\n"
+    "    def stop(self):\n"
+    "        '''Stop current path/movement.'''\n"
+    "        return self._call('stop')\n"
+    "    def rego(self):\n"
+    "        '''Resume path movement.'''\n"
+    "        return self._call('rego')\n"
+    "    def loop(self, name):\n"
+    "        '''Start a loop by name or filename. Case-insensitive.'''\n"
+    "        return self._call(f'loop {name}')\n"
+    "    def goto(self, room):\n"
+    "        '''Go to a room by name. Case-insensitive.'''\n"
+    "        return self._call(f'goto {room}')\n"
+    "    def roam(self, on=True):\n"
+    "        '''Set auto-roaming on or off.'''\n"
+    "        return self._call(f'roam {\"on\" if on else \"off\"}')\n"
+    "    def reset(self):\n"
+    "        '''Reset all MegaMUD internal flags and statistics.'''\n"
+    "        return self._call('reset')\n"
+    "    def __repr__(self):\n"
+    "        return ('MegaMUD Remote Commands (no telepath):\\n'\n"
+    "                '  mud.remote.stop()              — stop movement\\n'\n"
+    "                '  mud.remote.rego()              — resume movement\\n'\n"
+    "                '  mud.remote.loop(\"name\")        — start loop\\n'\n"
+    "                '  mud.remote.goto(\"room\")        — go to room\\n'\n"
+    "                '  mud.remote.roam(True/False)    — auto-roam on/off\\n'\n"
+    "                '  mud.remote.reset()             — reset flags/stats')\n"
+    "\n"
     "mud = _MudAPI()\n"
+    "mud.remote = _Remote()\n"
     "\n"
     "# Track loaded scripts for unloading\n"
     "_loaded_scripts = {}\n"
@@ -2404,6 +2450,7 @@ static void mmudpy_on_round(int round_num)
 static int mmudpy_init(const slop_api_t *a)
 {
     api = a;
+    menu_base = a->menu_base_id;
     InitializeCriticalSection(&py_lock);
     InitializeCriticalSection(&line_lock);
 
@@ -2734,7 +2781,7 @@ static int mmudpy_on_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
         /* Show/Hide Console — IDM_PLUGIN_BASE + plugin_idx*10 + 0
          * We respond to any ID in our plugin range for show/hide */
-        if (id == 41000) {
+        if (id == menu_base) {
             if (con_hwnd) {
                 if (IsWindowVisible(con_hwnd)) {
                     ShowWindow(con_hwnd, SW_HIDE);
@@ -2748,7 +2795,7 @@ static int mmudpy_on_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
         }
 
         /* Script Manager — IDM_PLUGIN_BASE + plugin_idx*10 + 1 */
-        if (id == 41001) {
+        if (id == menu_base + 1) {
             show_script_manager(hwnd);
             return 1;
         }
