@@ -44,8 +44,8 @@
 #define IDM_VKT_FONT_BASE 51040  /* 51040..51059 for fonts */
 #define IDM_VKT_FONT_BITMAP 51039  /* special: original 8x16 bitmap */
 
-/* Max quads: 60*132 bg + 60*132 text + input bar ≈ 16000 */
-#define MAX_QUADS       17000
+/* Max quads: terminal ~16k + menus ~500 + windows ~8k */
+#define MAX_QUADS       25000
 #define VERTS_PER_QUAD  4
 #define IDXS_PER_QUAD   6
 
@@ -62,8 +62,8 @@ typedef struct {
 
 typedef struct { float r, g, b; } rgb_t;
 
+/* Classic VGA ANSI palette — always used for terminal text rendering */
 static rgb_t pal_classic[16] = {
-    /* ANSI order: SGR 30-37 maps directly to indices 0-7 */
     {0.00f,0.00f,0.00f},  /*  0 black   */
     {0.67f,0.00f,0.00f},  /*  1 red     */
     {0.00f,0.67f,0.00f},  /*  2 green   */
@@ -81,37 +81,40 @@ static rgb_t pal_classic[16] = {
     {0.33f,1.00f,1.00f},  /* 14 light cyan */
     {1.00f,1.00f,1.00f},  /* 15 bright white */
 };
-static rgb_t pal_dracula[16] = {
-    {0.16f,0.16f,0.21f}, {0.38f,0.45f,0.94f}, {0.31f,0.98f,0.48f}, {0.55f,0.91f,0.99f},
-    {1.00f,0.33f,0.40f}, {0.74f,0.47f,0.95f}, {0.95f,0.71f,0.24f}, {0.73f,0.75f,0.82f},
-    {0.38f,0.40f,0.50f}, {0.51f,0.59f,0.97f}, {0.44f,0.99f,0.58f}, {0.65f,0.94f,0.99f},
-    {1.00f,0.47f,0.53f}, {0.84f,0.60f,0.98f}, {0.98f,0.80f,0.40f}, {0.97f,0.97f,0.95f},
-};
-static rgb_t pal_solarized[16] = {
-    {0.00f,0.17f,0.21f}, {0.15f,0.55f,0.82f}, {0.52f,0.60f,0.00f}, {0.16f,0.63f,0.60f},
-    {0.86f,0.20f,0.18f}, {0.83f,0.21f,0.51f}, {0.71f,0.54f,0.00f}, {0.58f,0.63f,0.63f},
-    {0.40f,0.48f,0.51f}, {0.26f,0.65f,0.90f}, {0.63f,0.72f,0.14f}, {0.29f,0.74f,0.73f},
-    {0.93f,0.33f,0.31f}, {0.91f,0.34f,0.60f}, {0.80f,0.67f,0.14f}, {0.93f,0.91f,0.84f},
-};
-static rgb_t pal_amber[16] = {
-    {0.05f,0.03f,0.00f}, {0.40f,0.25f,0.00f}, {0.60f,0.40f,0.00f}, {0.50f,0.35f,0.00f},
-    {0.70f,0.30f,0.00f}, {0.55f,0.25f,0.00f}, {0.80f,0.55f,0.00f}, {0.85f,0.60f,0.00f},
-    {0.45f,0.30f,0.00f}, {0.50f,0.35f,0.00f}, {0.75f,0.55f,0.00f}, {0.65f,0.48f,0.00f},
-    {0.90f,0.45f,0.00f}, {0.70f,0.40f,0.00f}, {1.00f,0.75f,0.00f}, {1.00f,0.80f,0.10f},
-};
-static rgb_t pal_green[16] = {
-    {0.00f,0.04f,0.00f}, {0.00f,0.25f,0.00f}, {0.00f,0.50f,0.00f}, {0.00f,0.40f,0.10f},
-    {0.10f,0.30f,0.00f}, {0.05f,0.25f,0.05f}, {0.00f,0.55f,0.00f}, {0.00f,0.65f,0.00f},
-    {0.00f,0.30f,0.00f}, {0.00f,0.35f,0.05f}, {0.00f,0.75f,0.00f}, {0.00f,0.60f,0.10f},
-    {0.10f,0.45f,0.00f}, {0.05f,0.40f,0.05f}, {0.10f,0.85f,0.00f}, {0.15f,1.00f,0.10f},
-};
 
-#define NUM_THEMES 5
-static const char *theme_names[NUM_THEMES] = {
-    "Classic VGA", "Dracula", "Solarized Dark", "Amber CRT", "Green Phosphor"
-};
-static rgb_t *theme_palettes[NUM_THEMES] = {
-    pal_classic, pal_dracula, pal_solarized, pal_amber, pal_green
+/* ---- UI Themes — matches MajorSLOP web UI themes ---- */
+/* Each theme provides colors for menu/chrome rendering.
+ * bg=menu background, text=primary text, dim=secondary text, accent=highlight */
+typedef struct {
+    const char *name;
+    float bg[3];
+    float text[3];
+    float dim[3];
+    float accent[3];
+} ui_theme_t;
+
+/* Hex-to-float helper: RGB(0xCC, 0xAA, 0x44) */
+#define F3(r,g,b) {(r)/255.0f, (g)/255.0f, (b)/255.0f}
+
+#define NUM_THEMES 17
+static const ui_theme_t ui_themes[NUM_THEMES] = {
+    {"Grey Lord",      F3(12,12,28),   F3(200,200,224), F3(102,102,170), F3(68,68,204)},
+    {"Black Fort",     F3(4,4,10),     F3(153,154,176), F3(68,68,102),   F3(51,51,102)},
+    {"Khazarad",       F3(18,14,8),    F3(212,196,160), F3(138,122,86),  F3(170,136,68)},
+    {"Silvermere",     F3(22,22,30),   F3(216,216,232), F3(136,136,170), F3(119,136,187)},
+    {"Annora",         F3(30,30,40),   F3(238,238,244), F3(170,170,204), F3(153,170,221)},
+    {"Jorah",          F3(8,12,28),    F3(176,192,232), F3(85,102,170),  F3(51,102,204)},
+    {"Putakwa",        F3(6,16,14),    F3(160,216,200), F3(68,136,102),  F3(34,170,136)},
+    {"Void",           F3(14,6,24),    F3(208,176,232), F3(119,68,170),  F3(136,68,204)},
+    {"Ozzrinom",       F3(16,6,8),     F3(224,176,176), F3(136,68,68),   F3(204,51,68)},
+    {"Phoenix",        F3(16,8,4),     F3(232,208,168), F3(136,102,64),  F3(221,102,34)},
+    {"Mad Wizard",     F3(10,6,20),    F3(224,240,255), F3(102,170,204), F3(0,238,255)},
+    {"Tasloi",         F3(10,16,8),    F3(192,216,160), F3(102,136,68),  F3(68,170,34)},
+    {"Frostborn",      F3(8,14,22),    F3(200,224,240), F3(85,136,170),  F3(68,170,221)},
+    {"Sandstorm",      F3(16,12,8),    F3(224,212,184), F3(138,122,86),  F3(204,170,68)},
+    {"Crystal Cavern", F3(12,8,20),    F3(208,192,232), F3(119,102,170), F3(153,102,238)},
+    {"Afroman",        F3(8,8,18),     F3(232,224,240), F3(136,119,170), F3(204,34,68)},
+    {"Bog Lord",       F3(10,14,8),    F3(176,184,144), F3(96,104,64),   F3(119,136,51)},
 };
 
 /* ---- Resolution presets ---- */
@@ -144,8 +147,8 @@ static volatile int vkt_screenshot_pending = 0;
 static uint32_t vkt_screenshot_img_idx = 0;
 
 /* Settings */
-static int current_theme = 0;
-static rgb_t *palette = NULL;
+static int current_theme = 0;          /* index into ui_themes[] */
+static rgb_t *palette = pal_classic;   /* ANSI palette — always Classic VGA */
 static int fs_res_idx = 0;     /* fullscreen resolution index */
 static int fs_width = 1920;
 static int fs_height = 1080;
@@ -160,11 +163,13 @@ static int pending_font_idx = -1;
 #define VKM_ROOT       1
 
 /* Root menu item indices */
-#define VKM_ITEM_THEME  0
-#define VKM_ITEM_FONT   1
-#define VKM_ITEM_SEP    2
-#define VKM_ITEM_CLOSE  3
-#define VKM_ROOT_COUNT  4
+#define VKM_ITEM_THEME   0
+#define VKM_ITEM_FONT    1
+#define VKM_ITEM_SEP     2
+#define VKM_ITEM_CONSOLE 3
+#define VKM_ITEM_SEP2    4
+#define VKM_ITEM_CLOSE   5
+#define VKM_ROOT_COUNT   6
 
 /* Submenu types */
 #define VKM_SUB_NONE   0
@@ -179,13 +184,612 @@ static int vkm_sub_hover = -1;    /* hovered submenu item */
 static int vkm_mouse_x = 0, vkm_mouse_y = 0;
 
 /* Menu rendering constants */
-#define VKM_ITEM_H   26
-#define VKM_PAD      8
-#define VKM_ROOT_W   180
-#define VKM_SUB_W    300
-#define VKM_SEP_H    10
-#define VKM_CHAR_W   8    /* approximate char width in menu */
-#define VKM_CHAR_H   16   /* approximate char height in menu */
+#define VKM_ITEM_H   32
+#define VKM_PAD      10
+#define VKM_ROOT_W   210
+#define VKM_SUB_W    280
+#define VKM_SEP_H    12
+#define VKM_CHAR_W   10   /* menu text character width */
+#define VKM_CHAR_H   20   /* menu text character height */
+#define VKM_SHADOW   6    /* drop shadow offset */
+
+/* Forward declarations for rendering helpers (defined after Vulkan init) */
+static void push_solid(float x0, float y0, float x1, float y1,
+                       float r, float g, float b, float a, int vp_w, int vp_h);
+static void push_text(int px, int py, const char *str,
+                      float r, float g, float b, int vp_w, int vp_h, int char_w, int char_h);
+
+/* ---- Vulkan Window System (vkw_) ---- */
+/* Floating windows rendered as quads inside the same Vulkan surface.
+ * No OS windows — zero alt-tab entries, zero focus issues. */
+
+#define VKW_MAX_WINDOWS  8
+#define VKW_MAX_LINES    200
+#define VKW_LINE_LEN     128
+#define VKW_TITLEBAR_H   24
+#define VKW_BORDER_W     1
+#define VKW_SHADOW_OFF   6
+#define VKW_CHAR_W       8
+#define VKW_CHAR_H       16
+#define VKW_PAD          4
+#define VKW_CLOSE_W      20     /* close button width */
+#define VKW_RESIZE_ZONE  8      /* pixels from edge = resize grab */
+#define VKW_INPUT_H      20     /* input line height */
+#define VKW_MIN_W        160
+#define VKW_MIN_H        100
+
+typedef void (*vkw_input_cb_t)(int wnd_id, const char *text);
+
+typedef struct {
+    int active;
+    int id;
+    char title[64];
+    float x, y, w, h;          /* position and size in pixels */
+    float opacity;              /* 0.0–1.0, default 0.92 */
+
+    /* Text content (circular buffer) */
+    char lines[VKW_MAX_LINES][VKW_LINE_LEN];
+    int line_head;              /* next write slot */
+    int line_count;             /* total lines stored (max VKW_MAX_LINES) */
+    int scroll;                 /* lines scrolled up from bottom */
+
+    /* Input line */
+    int has_input;
+    char input[VKW_LINE_LEN];
+    int input_len;
+    int input_cursor;
+
+    /* Command history (per-window) */
+    #define VKW_MAX_HISTORY 64
+    char *cmd_hist[VKW_MAX_HISTORY];
+    int hist_count;
+    int hist_idx;
+
+    /* Interaction state */
+    int dragging;
+    float drag_ox, drag_oy;
+    int resizing;
+    float resize_ox, resize_oy, resize_sw, resize_sh;
+} vkw_window_t;
+
+static vkw_window_t vkw_windows[VKW_MAX_WINDOWS];
+static int vkw_order[VKW_MAX_WINDOWS];  /* z-order: order[0]=back, order[n-1]=front */
+static int vkw_count = 0;
+static int vkw_next_id = 1;
+static int vkw_focus = -1;             /* index into vkw_windows[], -1 = terminal has focus */
+static vkw_input_cb_t vkw_input_callback = NULL;
+
+/* Console window shortcut */
+static int vkw_console_idx = -1;
+
+/* Forward decl for window printing */
+static void vkw_print(int idx, const char *text);
+
+/* MMUDPy eval bridge — resolved lazily from mmudpy.dll */
+typedef void (*mmudpy_queue_eval_fn)(const char *code, int target);
+static mmudpy_queue_eval_fn pQueueEval = NULL;
+static int eval_resolved = 0;
+
+static mmudpy_queue_eval_fn vkt_resolve_eval(void)
+{
+    if (!eval_resolved) {
+        HMODULE h = GetModuleHandleA("mmudpy.dll");
+        if (!h) h = GetModuleHandleA("MMUDPy.dll");
+        if (h) pQueueEval = (mmudpy_queue_eval_fn)GetProcAddress(h, "mmudpy_queue_eval");
+        eval_resolved = 1;
+    }
+    return pQueueEval;
+}
+
+static void vkt_eval_python(const char *code, int target_wnd_id)
+{
+    mmudpy_queue_eval_fn fn = vkt_resolve_eval();
+    if (fn) {
+        fn(code, target_wnd_id);
+    } else if (vkw_console_idx >= 0) {
+        vkw_print(vkw_console_idx, "[error] MMUDPy not loaded — cannot eval Python");
+    }
+}
+
+static int vkw_create(const char *title, int x, int y, int w, int h, int has_input)
+{
+    if (vkw_count >= VKW_MAX_WINDOWS) return -1;
+    int idx = -1;
+    for (int i = 0; i < VKW_MAX_WINDOWS; i++) {
+        if (!vkw_windows[i].active) { idx = i; break; }
+    }
+    if (idx < 0) return -1;
+
+    vkw_window_t *win = &vkw_windows[idx];
+    memset(win, 0, sizeof(*win));
+    win->active = 1;
+    win->id = vkw_next_id++;
+    if (title) { strncpy(win->title, title, 63); win->title[63] = 0; }
+    win->x = (float)x; win->y = (float)y;
+    win->w = (float)w; win->h = (float)h;
+    win->opacity = 0.92f;
+    win->has_input = has_input;
+
+    /* Add to z-order (top) */
+    vkw_order[vkw_count] = idx;
+    vkw_count++;
+    return idx;
+}
+
+static void vkw_close(int idx)
+{
+    if (idx < 0 || idx >= VKW_MAX_WINDOWS || !vkw_windows[idx].active) return;
+    vkw_windows[idx].active = 0;
+    if (vkw_focus == idx) vkw_focus = -1;
+    if (vkw_console_idx == idx) vkw_console_idx = -1;
+
+    /* Remove from z-order */
+    int found = 0;
+    for (int i = 0; i < vkw_count; i++) {
+        if (vkw_order[i] == idx) found = 1;
+        if (found && i + 1 < vkw_count) vkw_order[i] = vkw_order[i + 1];
+    }
+    if (found) vkw_count--;
+}
+
+static void vkw_bring_to_front(int idx)
+{
+    /* Move idx to top of z-order */
+    int pos = -1;
+    for (int i = 0; i < vkw_count; i++) {
+        if (vkw_order[i] == idx) { pos = i; break; }
+    }
+    if (pos < 0 || pos == vkw_count - 1) return;
+    for (int i = pos; i < vkw_count - 1; i++)
+        vkw_order[i] = vkw_order[i + 1];
+    vkw_order[vkw_count - 1] = idx;
+}
+
+static void vkw_print(int idx, const char *text)
+{
+    if (idx < 0 || idx >= VKW_MAX_WINDOWS || !vkw_windows[idx].active) return;
+    vkw_window_t *w = &vkw_windows[idx];
+
+    /* Split text on newlines, write each as a line */
+    const char *p = text;
+    while (*p) {
+        const char *nl = strchr(p, '\n');
+        int len = nl ? (int)(nl - p) : (int)strlen(p);
+        if (len >= VKW_LINE_LEN) len = VKW_LINE_LEN - 1;
+        memcpy(w->lines[w->line_head], p, len);
+        w->lines[w->line_head][len] = 0;
+        w->line_head = (w->line_head + 1) % VKW_MAX_LINES;
+        if (w->line_count < VKW_MAX_LINES) w->line_count++;
+        p += len + (nl ? 1 : len); /* advance past newline or to end */
+        if (!nl) break;
+    }
+    w->scroll = 0; /* auto-scroll to bottom */
+}
+
+static void vkw_clear(int idx)
+{
+    if (idx < 0 || idx >= VKW_MAX_WINDOWS || !vkw_windows[idx].active) return;
+    vkw_windows[idx].line_head = 0;
+    vkw_windows[idx].line_count = 0;
+    vkw_windows[idx].scroll = 0;
+}
+
+/* ---- Window rendering ---- */
+
+static void vkw_draw_one(vkw_window_t *w, int is_focused, int vp_w, int vp_h)
+{
+    const ui_theme_t *t = &ui_themes[current_theme];
+    float op = w->opacity;
+    int ix = (int)w->x, iy = (int)w->y;
+    int iw = (int)w->w, ih = (int)w->h;
+
+    /* Drop shadow */
+    push_solid(ix + VKW_SHADOW_OFF, iy + VKW_SHADOW_OFF,
+               ix + iw + VKW_SHADOW_OFF, iy + ih + VKW_SHADOW_OFF,
+               0.0f, 0.0f, 0.0f, 0.5f * op, vp_w, vp_h);
+
+    /* Window background */
+    push_solid(ix, iy, ix + iw, iy + ih,
+               t->bg[0], t->bg[1], t->bg[2], op, vp_w, vp_h);
+
+    /* Title bar */
+    float tb_r = t->bg[0] + 0.06f, tb_g = t->bg[1] + 0.06f, tb_b = t->bg[2] + 0.06f;
+    if (is_focused) {
+        tb_r = t->bg[0] * 0.5f + t->accent[0] * 0.3f + 0.05f;
+        tb_g = t->bg[1] * 0.5f + t->accent[1] * 0.3f + 0.05f;
+        tb_b = t->bg[2] * 0.5f + t->accent[2] * 0.3f + 0.05f;
+    }
+    push_solid(ix, iy, ix + iw, iy + VKW_TITLEBAR_H,
+               tb_r, tb_g, tb_b, op, vp_w, vp_h);
+
+    /* Title text */
+    push_text(ix + VKW_PAD, iy + (VKW_TITLEBAR_H - VKW_CHAR_H) / 2,
+              w->title, t->text[0], t->text[1], t->text[2],
+              vp_w, vp_h, VKW_CHAR_W, VKW_CHAR_H);
+
+    /* Close button [X] */
+    int cx = ix + iw - VKW_CLOSE_W - 2;
+    int cy = iy + 2;
+    push_solid(cx, cy, cx + VKW_CLOSE_W, cy + VKW_TITLEBAR_H - 4,
+               0.6f, 0.15f, 0.15f, op, vp_w, vp_h);
+    push_text(cx + (VKW_CLOSE_W - VKW_CHAR_W) / 2,
+              cy + (VKW_TITLEBAR_H - 4 - VKW_CHAR_H) / 2,
+              "X", 1.0f, 0.8f, 0.8f, vp_w, vp_h, VKW_CHAR_W, VKW_CHAR_H);
+
+    /* Border */
+    float br = t->accent[0] * 0.5f, bg = t->accent[1] * 0.5f, bb = t->accent[2] * 0.5f;
+    if (is_focused) { br = t->accent[0] * 0.8f; bg = t->accent[1] * 0.8f; bb = t->accent[2] * 0.8f; }
+    push_solid(ix, iy, ix + iw, iy + 1, br, bg, bb, op, vp_w, vp_h);
+    push_solid(ix, iy + ih - 1, ix + iw, iy + ih, br, bg, bb, op, vp_w, vp_h);
+    push_solid(ix, iy, ix + 1, iy + ih, br, bg, bb, op, vp_w, vp_h);
+    push_solid(ix + iw - 1, iy, ix + iw, iy + ih, br, bg, bb, op, vp_w, vp_h);
+
+    /* Content area */
+    int content_y = iy + VKW_TITLEBAR_H + 1;
+    int content_h = ih - VKW_TITLEBAR_H - 1;
+    if (w->has_input) content_h -= VKW_INPUT_H;
+    int visible_lines = content_h / VKW_CHAR_H;
+    int max_chars = (iw - VKW_PAD * 2) / VKW_CHAR_W;
+
+    /* Draw text lines (bottom-up from most recent) */
+    for (int i = 0; i < visible_lines && i < w->line_count; i++) {
+        int line_idx = w->line_head - 1 - i - w->scroll;
+        while (line_idx < 0) line_idx += VKW_MAX_LINES;
+        line_idx %= VKW_MAX_LINES;
+        if (i + w->scroll >= w->line_count) break;
+
+        int ly = content_y + content_h - (i + 1) * VKW_CHAR_H;
+        if (ly < content_y) break;
+
+        /* Truncate display to window width */
+        char tmp[VKW_LINE_LEN];
+        strncpy(tmp, w->lines[line_idx], max_chars);
+        tmp[max_chars] = 0;
+        push_text(ix + VKW_PAD, ly, tmp,
+                  t->text[0] * 0.9f, t->text[1] * 0.9f, t->text[2] * 0.9f,
+                  vp_w, vp_h, VKW_CHAR_W, VKW_CHAR_H);
+    }
+
+    /* Input line */
+    if (w->has_input) {
+        int iy2 = iy + ih - VKW_INPUT_H;
+        /* Input bg */
+        push_solid(ix + 1, iy2, ix + iw - 1, iy + ih - 1,
+                   t->bg[0] + 0.03f, t->bg[1] + 0.03f, t->bg[2] + 0.03f, op, vp_w, vp_h);
+        /* Separator */
+        push_solid(ix + 1, iy2, ix + iw - 1, iy2 + 1,
+                   br * 0.5f, bg * 0.5f, bb * 0.5f, op, vp_w, vp_h);
+        /* Prompt */
+        push_text(ix + VKW_PAD, iy2 + (VKW_INPUT_H - VKW_CHAR_H) / 2,
+                  ">>>", t->accent[0], t->accent[1], t->accent[2],
+                  vp_w, vp_h, VKW_CHAR_W, VKW_CHAR_H);
+        /* Input text */
+        if (w->input_len > 0) {
+            push_text(ix + VKW_PAD + VKW_CHAR_W * 4,
+                      iy2 + (VKW_INPUT_H - VKW_CHAR_H) / 2,
+                      w->input, t->text[0], t->text[1], t->text[2],
+                      vp_w, vp_h, VKW_CHAR_W, VKW_CHAR_H);
+        }
+        /* Cursor */
+        if (is_focused) {
+            int cur_x = ix + VKW_PAD + VKW_CHAR_W * (4 + w->input_cursor);
+            push_solid(cur_x, iy2 + 2, cur_x + VKW_CHAR_W, iy2 + VKW_INPUT_H - 2,
+                       t->accent[0], t->accent[1], t->accent[2], 0.5f, vp_w, vp_h);
+        }
+    }
+}
+
+static void vkw_draw_all(int vp_w, int vp_h)
+{
+    /* Draw back-to-front in z-order */
+    for (int i = 0; i < vkw_count; i++) {
+        int idx = vkw_order[i];
+        if (vkw_windows[idx].active) {
+            vkw_draw_one(&vkw_windows[idx], (idx == vkw_focus), vp_w, vp_h);
+        }
+    }
+}
+
+/* ---- Window mouse handling ---- */
+
+/* Returns window index at (mx, my), front-to-back. -1 = none */
+static int vkw_hit_test(int mx, int my)
+{
+    for (int i = vkw_count - 1; i >= 0; i--) {
+        int idx = vkw_order[i];
+        vkw_window_t *w = &vkw_windows[idx];
+        if (!w->active) continue;
+        if (mx >= (int)w->x && mx < (int)(w->x + w->w) &&
+            my >= (int)w->y && my < (int)(w->y + w->h))
+            return idx;
+    }
+    return -1;
+}
+
+static int vkw_hit_close(vkw_window_t *w, int mx, int my)
+{
+    int cx = (int)w->x + (int)w->w - VKW_CLOSE_W - 2;
+    int cy = (int)w->y + 2;
+    return (mx >= cx && mx < cx + VKW_CLOSE_W &&
+            my >= cy && my < cy + VKW_TITLEBAR_H - 4);
+}
+
+static int vkw_hit_titlebar(vkw_window_t *w, int mx, int my)
+{
+    return (mx >= (int)w->x && mx < (int)(w->x + w->w - VKW_CLOSE_W - 4) &&
+            my >= (int)w->y && my < (int)(w->y + VKW_TITLEBAR_H));
+}
+
+static int vkw_hit_resize(vkw_window_t *w, int mx, int my)
+{
+    int rx = (int)(w->x + w->w) - VKW_RESIZE_ZONE;
+    int ry = (int)(w->y + w->h) - VKW_RESIZE_ZONE;
+    return (mx >= rx && my >= ry);
+}
+
+/* Handle mouse button down on window. Returns 1 if handled. */
+static int vkw_mouse_down(int mx, int my)
+{
+    int idx = vkw_hit_test(mx, my);
+    if (idx < 0) {
+        vkw_focus = -1;  /* click on terminal = terminal gets focus */
+        return 0;
+    }
+
+    vkw_window_t *w = &vkw_windows[idx];
+    vkw_focus = idx;
+    vkw_bring_to_front(idx);
+
+    if (vkw_hit_close(w, mx, my)) {
+        vkw_close(idx);
+        return 1;
+    }
+    if (vkw_hit_resize(w, mx, my)) {
+        w->resizing = 1;
+        w->resize_ox = (float)mx;
+        w->resize_oy = (float)my;
+        w->resize_sw = w->w;
+        w->resize_sh = w->h;
+        return 1;
+    }
+    if (vkw_hit_titlebar(w, mx, my)) {
+        w->dragging = 1;
+        w->drag_ox = (float)mx - w->x;
+        w->drag_oy = (float)my - w->y;
+        return 1;
+    }
+    return 1; /* clicked on window content */
+}
+
+static int vkw_mouse_move(int mx, int my)
+{
+    for (int i = 0; i < VKW_MAX_WINDOWS; i++) {
+        vkw_window_t *w = &vkw_windows[i];
+        if (!w->active) continue;
+        if (w->dragging) {
+            w->x = (float)mx - w->drag_ox;
+            w->y = (float)my - w->drag_oy;
+            return 1;
+        }
+        if (w->resizing) {
+            w->w = w->resize_sw + ((float)mx - w->resize_ox);
+            w->h = w->resize_sh + ((float)my - w->resize_oy);
+            if (w->w < VKW_MIN_W) w->w = VKW_MIN_W;
+            if (w->h < VKW_MIN_H) w->h = VKW_MIN_H;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void vkw_mouse_up(void)
+{
+    for (int i = 0; i < VKW_MAX_WINDOWS; i++) {
+        vkw_windows[i].dragging = 0;
+        vkw_windows[i].resizing = 0;
+    }
+}
+
+/* Handle keyboard input for focused window. Returns 1 if consumed. */
+static int vkw_key_char(unsigned int ch)
+{
+    if (vkw_focus < 0) return 0;
+    vkw_window_t *w = &vkw_windows[vkw_focus];
+    if (!w->active || !w->has_input) return 0;
+
+    if (ch == '\r' || ch == '\n') {
+        /* Submit input */
+        w->input[w->input_len] = 0;
+        /* Echo input as a line */
+        char echo[VKW_LINE_LEN + 8];
+        wsprintfA(echo, ">>> %s", w->input);
+        vkw_print(vkw_focus, echo);
+        /* Add to per-window history */
+        if (w->input[0]) {
+            if (w->hist_count < VKW_MAX_HISTORY) {
+                w->cmd_hist[w->hist_count++] = _strdup(w->input);
+            } else {
+                free(w->cmd_hist[0]);
+                memmove(w->cmd_hist, w->cmd_hist + 1, (VKW_MAX_HISTORY - 1) * sizeof(char *));
+                w->cmd_hist[VKW_MAX_HISTORY - 1] = _strdup(w->input);
+            }
+            w->hist_idx = w->hist_count;
+        }
+        /* Console window → Python eval; other windows → callback */
+        if (vkw_focus == vkw_console_idx && w->input[0]) {
+            vkt_eval_python(w->input, w->id);
+        } else if (vkw_input_callback) {
+            vkw_input_callback(w->id, w->input);
+        }
+        w->input_len = 0;
+        w->input_cursor = 0;
+        w->input[0] = 0;
+        return 1;
+    }
+    if (ch == '\b' || ch == 127) {
+        if (w->input_cursor > 0) {
+            memmove(&w->input[w->input_cursor - 1],
+                    &w->input[w->input_cursor],
+                    w->input_len - w->input_cursor + 1);
+            w->input_cursor--;
+            w->input_len--;
+        }
+        return 1;
+    }
+    if (ch >= 32 && ch < 127 && w->input_len < VKW_LINE_LEN - 1) {
+        memmove(&w->input[w->input_cursor + 1],
+                &w->input[w->input_cursor],
+                w->input_len - w->input_cursor + 1);
+        w->input[w->input_cursor] = (char)ch;
+        w->input_cursor++;
+        w->input_len++;
+        w->input[w->input_len] = 0;
+        return 1;
+    }
+    return 1;
+}
+
+static int vkw_key_down(unsigned int vk)
+{
+    if (vkw_focus < 0) return 0;
+    vkw_window_t *w = &vkw_windows[vkw_focus];
+    if (!w->active) return 0;
+
+    /* Scroll with PageUp/PageDown */
+    if (vk == VK_PRIOR) { /* PageUp */
+        int content_h = (int)w->h - VKW_TITLEBAR_H - 1 - (w->has_input ? VKW_INPUT_H : 0);
+        int page = content_h / VKW_CHAR_H;
+        w->scroll += page;
+        if (w->scroll > w->line_count - 1) w->scroll = w->line_count - 1;
+        return 1;
+    }
+    if (vk == VK_NEXT) { /* PageDown */
+        int content_h = (int)w->h - VKW_TITLEBAR_H - 1 - (w->has_input ? VKW_INPUT_H : 0);
+        int page = content_h / VKW_CHAR_H;
+        w->scroll -= page;
+        if (w->scroll < 0) w->scroll = 0;
+        return 1;
+    }
+
+    if (!w->has_input) return 0;
+
+    /* Up/Down arrow = command history */
+    if (vk == VK_UP) {
+        if (w->hist_idx > 0) {
+            w->hist_idx--;
+            strncpy(w->input, w->cmd_hist[w->hist_idx], VKW_LINE_LEN - 1);
+            w->input[VKW_LINE_LEN - 1] = 0;
+            w->input_len = (int)strlen(w->input);
+            w->input_cursor = w->input_len;
+        }
+        return 1;
+    }
+    if (vk == VK_DOWN) {
+        if (w->hist_idx < w->hist_count - 1) {
+            w->hist_idx++;
+            strncpy(w->input, w->cmd_hist[w->hist_idx], VKW_LINE_LEN - 1);
+            w->input[VKW_LINE_LEN - 1] = 0;
+            w->input_len = (int)strlen(w->input);
+            w->input_cursor = w->input_len;
+        } else {
+            w->hist_idx = w->hist_count;
+            w->input[0] = 0;
+            w->input_len = 0;
+            w->input_cursor = 0;
+        }
+        return 1;
+    }
+
+    if (vk == VK_LEFT && w->input_cursor > 0) { w->input_cursor--; return 1; }
+    if (vk == VK_RIGHT && w->input_cursor < w->input_len) { w->input_cursor++; return 1; }
+    if (vk == VK_HOME) { w->input_cursor = 0; return 1; }
+    if (vk == VK_END) { w->input_cursor = w->input_len; return 1; }
+    return 0;
+}
+
+/* Toggle the built-in console window */
+static void vkw_toggle_console(int vp_w, int vp_h)
+{
+    if (vkw_console_idx >= 0 && vkw_windows[vkw_console_idx].active) {
+        vkw_close(vkw_console_idx);
+        vkw_console_idx = -1;
+        return;
+    }
+    int cw = 640, ch = 400;
+    int cx = (vp_w - cw) / 2, cy = (vp_h - ch) / 2;
+    vkw_console_idx = vkw_create("MMUDPy Console", cx, cy, cw, ch, 1);
+    if (vkw_console_idx >= 0) {
+        vkw_focus = vkw_console_idx;
+        vkw_print(vkw_console_idx, "MMUDPy Python Console");
+        vkw_print(vkw_console_idx, "Type Python expressions. help() for commands.");
+        vkw_print(vkw_console_idx, "");
+    }
+}
+
+/* ---- Exported functions for Python API ---- */
+
+__declspec(dllexport) int vkt_wnd_create(const char *title, int x, int y, int w, int h, int has_input)
+{
+    int idx = vkw_create(title, x, y, w, h, has_input);
+    return (idx >= 0) ? vkw_windows[idx].id : -1;
+}
+
+__declspec(dllexport) void vkt_wnd_print(int wnd_id, const char *text)
+{
+    for (int i = 0; i < VKW_MAX_WINDOWS; i++) {
+        if (vkw_windows[i].active && vkw_windows[i].id == wnd_id) {
+            vkw_print(i, text);
+            return;
+        }
+    }
+}
+
+__declspec(dllexport) void vkt_wnd_close(int wnd_id)
+{
+    for (int i = 0; i < VKW_MAX_WINDOWS; i++) {
+        if (vkw_windows[i].active && vkw_windows[i].id == wnd_id) {
+            vkw_close(i);
+            return;
+        }
+    }
+}
+
+__declspec(dllexport) void vkt_wnd_clear(int wnd_id)
+{
+    for (int i = 0; i < VKW_MAX_WINDOWS; i++) {
+        if (vkw_windows[i].active && vkw_windows[i].id == wnd_id) {
+            vkw_clear(i);
+            return;
+        }
+    }
+}
+
+__declspec(dllexport) void vkt_wnd_set_opacity(int wnd_id, float opacity)
+{
+    for (int i = 0; i < VKW_MAX_WINDOWS; i++) {
+        if (vkw_windows[i].active && vkw_windows[i].id == wnd_id) {
+            vkw_windows[i].opacity = opacity;
+            return;
+        }
+    }
+}
+
+__declspec(dllexport) void vkt_wnd_set_input_cb(vkw_input_cb_t cb)
+{
+    vkw_input_callback = cb;
+}
+
+__declspec(dllexport) void vkt_console_print(const char *text)
+{
+    if (vkw_console_idx >= 0) vkw_print(vkw_console_idx, text);
+}
+
+__declspec(dllexport) void vkt_console_show(void)
+{
+    if (vkw_console_idx < 0 || !vkw_windows[vkw_console_idx].active) {
+        vkw_toggle_console(fs_width, fs_height);
+    }
+}
 
 /* Terminal buffer */
 /* ANSI terminal state machine — replaces old term_text/term_attr arrays */
@@ -343,21 +947,23 @@ static void push_text(int px, int py, const char *str,
 
 /* ---- Vulkan menu rendering ---- */
 
+static int vkm_is_sep(int idx) { return idx == VKM_ITEM_SEP || idx == VKM_ITEM_SEP2; }
+
 static void vkm_get_root_item_rect(int idx, int *iy, int *ih)
 {
     int y = vkm_y + VKM_PAD;
     for (int i = 0; i < idx; i++) {
-        y += (i == VKM_ITEM_SEP) ? VKM_SEP_H : VKM_ITEM_H;
+        y += vkm_is_sep(i) ? VKM_SEP_H : VKM_ITEM_H;
     }
     *iy = y;
-    *ih = (idx == VKM_ITEM_SEP) ? VKM_SEP_H : VKM_ITEM_H;
+    *ih = vkm_is_sep(idx) ? VKM_SEP_H : VKM_ITEM_H;
 }
 
 static int vkm_root_height(void)
 {
     int h = VKM_PAD * 2;
     for (int i = 0; i < VKM_ROOT_COUNT; i++)
-        h += (i == VKM_ITEM_SEP) ? VKM_SEP_H : VKM_ITEM_H;
+        h += vkm_is_sep(i) ? VKM_SEP_H : VKM_ITEM_H;
     return h;
 }
 
@@ -380,7 +986,7 @@ static int vkm_hit_root(int mx, int my)
     for (int i = 0; i < VKM_ROOT_COUNT; i++) {
         int iy, ih;
         vkm_get_root_item_rect(i, &iy, &ih);
-        if (my >= iy && my < iy + ih && i != VKM_ITEM_SEP) return i;
+        if (my >= iy && my < iy + ih && !vkm_is_sep(i)) return i;
     }
     return -1;
 }
@@ -406,53 +1012,81 @@ static int vkm_hit_sub(int mx, int my)
     return -1;
 }
 
+/* Draw a bordered panel with drop shadow */
+static void vkm_draw_panel(int x, int y, int w, int h,
+                           const ui_theme_t *t, int vp_w, int vp_h)
+{
+    /* Drop shadow */
+    push_solid(x + VKM_SHADOW, y + VKM_SHADOW,
+               x + w + VKM_SHADOW, y + h + VKM_SHADOW,
+               0.0f, 0.0f, 0.0f, 0.6f, vp_w, vp_h);
+    /* Background */
+    push_solid(x, y, x + w, y + h,
+               t->bg[0], t->bg[1], t->bg[2], 1.0f, vp_w, vp_h);
+    /* Border — derive from accent at ~35% blend with bg */
+    float br = t->bg[0] * 0.6f + t->accent[0] * 0.4f;
+    float bg = t->bg[1] * 0.6f + t->accent[1] * 0.4f;
+    float bb = t->bg[2] * 0.6f + t->accent[2] * 0.4f;
+    push_solid(x, y, x + w, y + 1, br, bg, bb, 1.0f, vp_w, vp_h);
+    push_solid(x, y + h - 1, x + w, y + h, br, bg, bb, 1.0f, vp_w, vp_h);
+    push_solid(x, y, x + 1, y + h, br, bg, bb, 1.0f, vp_w, vp_h);
+    push_solid(x + w - 1, y, x + w, y + h, br, bg, bb, 1.0f, vp_w, vp_h);
+    /* Top accent line — bright accent at top edge */
+    push_solid(x + 1, y + 1, x + w - 1, y + 2,
+               t->accent[0] * 0.7f, t->accent[1] * 0.7f, t->accent[2] * 0.7f,
+               0.5f, vp_w, vp_h);
+}
+
 static void vkm_draw(int vp_w, int vp_h)
 {
     if (!vkm_open) return;
 
+    const ui_theme_t *t = &ui_themes[current_theme];
     int cw = VKM_CHAR_W, ch = VKM_CHAR_H;
 
-    /* Root menu background */
+    /* Scrim: dim the entire screen behind menu */
+    push_solid(0, 0, vp_w, vp_h,
+               0.0f, 0.0f, 0.0f, 0.35f, vp_w, vp_h);
+
+    /* Root menu panel */
     int rh = vkm_root_height();
-    push_solid(vkm_x, vkm_y, vkm_x + VKM_ROOT_W, vkm_y + rh,
-               0.12f, 0.12f, 0.15f, 1.0f, vp_w, vp_h);
-    /* Border */
-    push_solid(vkm_x, vkm_y, vkm_x + VKM_ROOT_W, vkm_y + 1,
-               0.4f, 0.4f, 0.5f, 1.0f, vp_w, vp_h);
-    push_solid(vkm_x, vkm_y + rh - 1, vkm_x + VKM_ROOT_W, vkm_y + rh,
-               0.4f, 0.4f, 0.5f, 1.0f, vp_w, vp_h);
-    push_solid(vkm_x, vkm_y, vkm_x + 1, vkm_y + rh,
-               0.4f, 0.4f, 0.5f, 1.0f, vp_w, vp_h);
-    push_solid(vkm_x + VKM_ROOT_W - 1, vkm_y, vkm_x + VKM_ROOT_W, vkm_y + rh,
-               0.4f, 0.4f, 0.5f, 1.0f, vp_w, vp_h);
+    vkm_draw_panel(vkm_x, vkm_y, VKM_ROOT_W, rh, t, vp_w, vp_h);
 
     /* Root menu items */
     static const char *root_labels[VKM_ROOT_COUNT] = {
-        "Theme  >", "Font  >", "", "Close  (F11)"
+        "Theme  \x10", "Font  \x10", "", "Console", "", "Close  (F11)"
     };
+
+    /* Hover bg colors: accent-tinted lift */
+    float hvr = t->bg[0] + (t->accent[0] - t->bg[0]) * 0.25f + 0.06f;
+    float hvg = t->bg[1] + (t->accent[1] - t->bg[1]) * 0.25f + 0.06f;
+    float hvb = t->bg[2] + (t->accent[2] - t->bg[2]) * 0.25f + 0.06f;
 
     for (int i = 0; i < VKM_ROOT_COUNT; i++) {
         int iy, ih;
         vkm_get_root_item_rect(i, &iy, &ih);
 
-        if (i == VKM_ITEM_SEP) {
-            /* Separator line */
-            push_solid(vkm_x + 4, iy + ih/2, vkm_x + VKM_ROOT_W - 4, iy + ih/2 + 1,
-                       0.35f, 0.35f, 0.4f, 1.0f, vp_w, vp_h);
+        if (vkm_is_sep(i)) {
+            float sr = t->bg[0] * 0.6f + t->accent[0] * 0.4f;
+            float sg = t->bg[1] * 0.6f + t->accent[1] * 0.4f;
+            float sb = t->bg[2] * 0.6f + t->accent[2] * 0.4f;
+            push_solid(vkm_x + VKM_PAD, iy + ih/2,
+                       vkm_x + VKM_ROOT_W - VKM_PAD, iy + ih/2 + 1,
+                       sr, sg, sb, 0.5f, vp_w, vp_h);
             continue;
         }
 
         /* Hover highlight */
         if (i == vkm_hover) {
-            push_solid(vkm_x + 2, iy, vkm_x + VKM_ROOT_W - 2, iy + ih,
-                       0.25f, 0.25f, 0.35f, 1.0f, vp_w, vp_h);
+            push_solid(vkm_x + 2, iy + 1, vkm_x + VKM_ROOT_W - 2, iy + ih - 1,
+                       hvr, hvg, hvb, 1.0f, vp_w, vp_h);
         }
 
-        /* Check mark for expanded submenu */
-        float tr = 0.85f, tg = 0.85f, tb = 0.85f;
+        /* Text color: accent when expanded, normal otherwise */
+        float tr = t->text[0], tg = t->text[1], tb = t->text[2];
         if ((i == VKM_ITEM_THEME && vkm_sub == VKM_SUB_THEME) ||
             (i == VKM_ITEM_FONT && vkm_sub == VKM_SUB_FONT)) {
-            tr = 0.4f; tg = 0.9f; tb = 1.0f;
+            tr = t->accent[0]; tg = t->accent[1]; tb = t->accent[2];
         }
         push_text(vkm_x + VKM_PAD, iy + (ih - ch) / 2,
                   root_labels[i], tr, tg, tb, vp_w, vp_h, cw, ch);
@@ -464,45 +1098,33 @@ static void vkm_draw(int vp_w, int vp_h)
         int parent_y, parent_h;
         vkm_get_root_item_rect(parent, &parent_y, &parent_h);
 
-        int sx = vkm_x + VKM_ROOT_W;
+        int sx = vkm_x + VKM_ROOT_W - 1; /* overlap border by 1px */
         int sy = parent_y;
         int count = vkm_sub_count();
         int sh = vkm_sub_height();
 
         /* Clamp submenu to screen */
         if (sy + sh > vp_h) sy = vp_h - sh;
-        if (sx + VKM_SUB_W > vp_w) sx = vkm_x - VKM_SUB_W;
+        if (sx + VKM_SUB_W > vp_w) sx = vkm_x - VKM_SUB_W + 1;
 
-        /* Background */
-        push_solid(sx, sy, sx + VKM_SUB_W, sy + sh,
-                   0.10f, 0.10f, 0.13f, 1.0f, vp_w, vp_h);
-        /* Border */
-        push_solid(sx, sy, sx + VKM_SUB_W, sy + 1,
-                   0.4f, 0.4f, 0.5f, 1.0f, vp_w, vp_h);
-        push_solid(sx, sy + sh - 1, sx + VKM_SUB_W, sy + sh,
-                   0.4f, 0.4f, 0.5f, 1.0f, vp_w, vp_h);
-        push_solid(sx, sy, sx + 1, sy + sh,
-                   0.4f, 0.4f, 0.5f, 1.0f, vp_w, vp_h);
-        push_solid(sx + VKM_SUB_W - 1, sy, sx + VKM_SUB_W, sy + sh,
-                   0.4f, 0.4f, 0.5f, 1.0f, vp_w, vp_h);
+        vkm_draw_panel(sx, sy, VKM_SUB_W, sh, t, vp_w, vp_h);
 
         for (int i = 0; i < count; i++) {
             int iy2 = sy + VKM_PAD + i * VKM_ITEM_H;
 
             /* Hover highlight */
             if (i == vkm_sub_hover) {
-                push_solid(sx + 2, iy2, sx + VKM_SUB_W - 2, iy2 + VKM_ITEM_H,
-                           0.25f, 0.25f, 0.35f, 1.0f, vp_w, vp_h);
+                push_solid(sx + 2, iy2 + 1, sx + VKM_SUB_W - 2, iy2 + VKM_ITEM_H - 1,
+                           hvr, hvg, hvb, 1.0f, vp_w, vp_h);
             }
 
             const char *label = NULL;
             int is_active = 0;
 
             if (vkm_sub == VKM_SUB_THEME) {
-                label = theme_names[i];
+                label = ui_themes[i].name;
                 is_active = (i == current_theme);
             } else {
-                /* Font submenu: item 0 = bitmap, 1..N = TTF fonts */
                 if (i == 0) {
                     label = "CP437 Bitmap (Original)";
                     is_active = (current_font < 0);
@@ -512,10 +1134,20 @@ static void vkm_draw(int vp_w, int vp_h)
                 }
             }
 
-            float tr = 0.8f, tg = 0.8f, tb = 0.8f;
-            if (is_active) { tr = 0.3f; tg = 1.0f; tb = 0.5f; }
+            float tr, tg, tb;
+            if (is_active) {
+                tr = t->accent[0]; tg = t->accent[1]; tb = t->accent[2];
+            } else {
+                tr = t->text[0]; tg = t->text[1]; tb = t->text[2];
+            }
+
             if (label) {
-                push_text(sx + VKM_PAD, iy2 + (VKM_ITEM_H - ch) / 2,
+                /* Active marker: small filled square before active item */
+                if (is_active) {
+                    push_text(sx + 3, iy2 + (VKM_ITEM_H - ch) / 2,
+                              "\x04", tr, tg, tb, vp_w, vp_h, cw, ch);
+                }
+                push_text(sx + VKM_PAD + cw + 2, iy2 + (VKM_ITEM_H - ch) / 2,
                           label, tr, tg, tb, vp_w, vp_h, cw, ch);
             }
         }
@@ -623,12 +1255,13 @@ static void vkt_build_vertices(void)
         }
     }
 
-    /* Pass 3: input bar background */
+    /* Pass 3: input bar background — tinted with UI theme */
     {
+        const ui_theme_t *t = &ui_themes[current_theme];
         float bar_y0 = (float)(top_pad + term_h + bot_pad);
         push_quad(PX2NDC_X(0), PX2NDC_Y(bar_y0), PX2NDC_X(vp_w), PX2NDC_Y(vp_h),
                   bg_u0, bg_v0, bg_u1, bg_v1,
-                  0.12f, 0.12f, 0.14f, 1.0f);
+                  t->bg[0] + 0.04f, t->bg[1] + 0.04f, t->bg[2] + 0.04f, 1.0f);
     }
 
     /* Pass 4: input bar text */
@@ -667,6 +1300,9 @@ static void vkt_build_vertices(void)
 
     /* Draw Vulkan menu on top of everything */
     vkm_draw(vp_w, vp_h);
+
+    /* Draw floating windows on top of everything */
+    vkw_draw_all(vp_w, vp_h);
 }
 
 /* ---- Input handling ---- */
@@ -690,6 +1326,19 @@ static void input_send(void)
         cmd_history[MAX_HISTORY - 1] = _strdup(input_buf);
     }
     history_idx = history_count;
+
+    /* `` prefix = Python eval via MMUDPy — output goes to terminal (not console) */
+    if (input_buf[0] == '`' && input_buf[1] == '`') {
+        const char *code = input_buf + 2;
+        while (*code == ' ') code++;  /* skip leading spaces */
+        if (*code) {
+            vkt_eval_python(code, 0);  /* target 0 = terminal */
+        }
+        input_buf[0] = '\0';
+        input_len = 0;
+        input_cursor = 0;
+        return;
+    }
 
     /* Send to MMANSI */
     for (int i = 0; input_buf[i]; i++)
@@ -1232,107 +1881,14 @@ static void vkt_switch_font(int font_idx)
     current_font = font_idx;
     if (!vk_dev) return;
 
-    /* Previous frame is done (fence was waited on by caller).
-     * Safe to destroy and recreate font texture. */
+    /* Use the same proven upload path as initial load:
+     * vkDeviceWaitIdle + tmp command buffer + tmp fence.
+     * MUST NOT touch vk_cmd_buf or vk_fence — that corrupts
+     * the render loop's synchronization state. */
     uint32_t aw, ah;
     uint8_t *pixels = vkt_build_font_pixels(current_font, &aw, &ah);
-
-    /* Destroy old font texture — no DeviceWaitIdle needed, fence guarantees idle */
-    if (vk_font_sampler) { vkDestroySampler(vk_dev, vk_font_sampler, NULL); vk_font_sampler = VK_NULL_HANDLE; }
-    if (vk_font_view) { vkDestroyImageView(vk_dev, vk_font_view, NULL); vk_font_view = VK_NULL_HANDLE; }
-    if (vk_font_img) { vkDestroyImage(vk_dev, vk_font_img, NULL); vk_font_img = VK_NULL_HANDLE; }
-    if (vk_font_mem) { vkFreeMemory(vk_dev, vk_font_mem, NULL); vk_font_mem = VK_NULL_HANDLE; }
-
-    /* Create new image */
-    VkImageCreateInfo ici = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
-    ici.imageType = VK_IMAGE_TYPE_2D;
-    ici.format = VK_FORMAT_R8G8B8A8_UNORM;
-    ici.extent = (VkExtent3D){ aw, ah, 1 };
-    ici.mipLevels = 1;
-    ici.arrayLayers = 1;
-    ici.samples = VK_SAMPLE_COUNT_1_BIT;
-    ici.tiling = VK_IMAGE_TILING_LINEAR;
-    ici.usage = VK_IMAGE_USAGE_SAMPLED_BIT;
-    ici.initialLayout = VK_IMAGE_LAYOUT_PREINITIALIZED;
-    vkCreateImage(vk_dev, &ici, NULL, &vk_font_img);
-
-    VkMemoryRequirements mr;
-    vkGetImageMemoryRequirements(vk_dev, vk_font_img, &mr);
-    VkMemoryAllocateInfo mai = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
-    mai.allocationSize = mr.size;
-    mai.memoryTypeIndex = vk_find_memory(vk_pdev, mr.memoryTypeBits,
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-    vkAllocateMemory(vk_dev, &mai, NULL, &vk_font_mem);
-    vkBindImageMemory(vk_dev, vk_font_img, vk_font_mem, 0);
-
-    /* Upload pixel data */
-    void *mapped;
-    vkMapMemory(vk_dev, vk_font_mem, 0, mr.size, 0, &mapped);
-    VkImageSubresource sub = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0 };
-    VkSubresourceLayout layout;
-    vkGetImageSubresourceLayout(vk_dev, vk_font_img, &sub, &layout);
-    for (uint32_t row = 0; row < ah; row++) {
-        memcpy((uint8_t *)mapped + layout.offset + row * layout.rowPitch,
-               pixels + row * aw * 4, aw * 4);
-    }
-    vkUnmapMemory(vk_dev, vk_font_mem);
+    vkt_upload_font_texture(pixels, aw, ah);
     free(pixels);
-
-    /* Transition image using the RENDER command buffer (safe — fence waited,
-     * we haven't begun recording yet). We'll use the render fence too. */
-    vkResetCommandBuffer(vk_cmd_buf, 0);
-    VkCommandBufferBeginInfo cbbi = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
-    cbbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    vkBeginCommandBuffer(vk_cmd_buf, &cbbi);
-    VkImageMemoryBarrier imb = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
-    imb.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT;
-    imb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-    imb.oldLayout = VK_IMAGE_LAYOUT_PREINITIALIZED;
-    imb.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    imb.image = vk_font_img;
-    imb.subresourceRange = (VkImageSubresourceRange){ VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
-    vkCmdPipelineBarrier(vk_cmd_buf, VK_PIPELINE_STAGE_HOST_BIT,
-                         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0,
-                         0, NULL, 0, NULL, 1, &imb);
-    vkEndCommandBuffer(vk_cmd_buf);
-
-    /* Submit transition — no semaphores, just fence */
-    vkResetFences(vk_dev, 1, &vk_fence);
-    VkSubmitInfo si = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
-    si.commandBufferCount = 1;
-    si.pCommandBuffers = &vk_cmd_buf;
-    vkQueueSubmit(vk_queue, 1, &si, vk_fence);
-    /* Wait for transition to complete */
-    vkWaitForFences(vk_dev, 1, &vk_fence, VK_TRUE, UINT64_MAX);
-
-    /* Image view */
-    VkImageViewCreateInfo ivci = { VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
-    ivci.image = vk_font_img;
-    ivci.viewType = VK_IMAGE_VIEW_TYPE_2D;
-    ivci.format = VK_FORMAT_R8G8B8A8_UNORM;
-    ivci.subresourceRange = (VkImageSubresourceRange){ VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
-    vkCreateImageView(vk_dev, &ivci, NULL, &vk_font_view);
-
-    /* Sampler */
-    VkSamplerCreateInfo saci = { VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
-    saci.magFilter = (current_font < 0) ? VK_FILTER_NEAREST : VK_FILTER_LINEAR;
-    saci.minFilter = (current_font < 0) ? VK_FILTER_NEAREST : VK_FILTER_LINEAR;
-    saci.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    saci.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    vkCreateSampler(vk_dev, &saci, NULL, &vk_font_sampler);
-
-    /* Update descriptor */
-    VkDescriptorImageInfo dii = {0};
-    dii.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    dii.imageView = vk_font_view;
-    dii.sampler = vk_font_sampler;
-    VkWriteDescriptorSet wds = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
-    wds.dstSet = vk_desc_set;
-    wds.dstBinding = 0;
-    wds.descriptorCount = 1;
-    wds.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    wds.pImageInfo = &dii;
-    vkUpdateDescriptorSets(vk_dev, 1, &wds, 0, NULL);
 
     /* Clear terminal so old glyph shapes don't linger */
     EnterCriticalSection(&ansi_lock);
@@ -1751,26 +2307,42 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
 {
     switch (msg) {
     case WM_KEYDOWN:
-        if (wParam == VK_ESCAPE && vkm_open) {
-            vkm_open = 0;
-            vkm_sub = VKM_SUB_NONE;
+        if (wParam == VK_ESCAPE) {
+            if (vkm_open) { vkm_open = 0; vkm_sub = VKM_SUB_NONE; return 0; }
+            if (vkw_focus >= 0) { vkw_focus = -1; return 0; } /* Esc = back to terminal */
+        }
+        /* Tab cycles focus: terminal → windows → terminal */
+        if (wParam == VK_TAB) {
+            if (vkw_count > 0) {
+                if (vkw_focus < 0) {
+                    vkw_focus = vkw_order[vkw_count - 1]; /* focus top window */
+                } else {
+                    vkw_focus = -1; /* back to terminal */
+                }
+            }
             return 0;
         }
+        /* Route to focused window first */
+        if (vkw_key_down((unsigned int)wParam)) return 0;
         input_handle_key(wParam, 0);
         return 0;
     case WM_CHAR:
+        /* Route to focused window first */
+        if (vkw_key_char((unsigned int)wParam)) return 0;
         input_handle_key(wParam, 1);
         return 0;
     case WM_MOUSEMOVE: {
-        vkm_mouse_x = (short)LOWORD(lParam);
-        vkm_mouse_y = (short)HIWORD(lParam);
+        int mx2 = (short)LOWORD(lParam);
+        int my2 = (short)HIWORD(lParam);
+        vkm_mouse_x = mx2;
+        vkm_mouse_y = my2;
+        /* Window drag/resize takes priority */
+        if (vkw_mouse_move(mx2, my2)) return 0;
         if (vkm_open) {
-            /* Update hover state */
-            int rh = vkm_hit_root(vkm_mouse_x, vkm_mouse_y);
-            int sh = vkm_hit_sub(vkm_mouse_x, vkm_mouse_y);
+            int rh = vkm_hit_root(mx2, my2);
+            int sh = vkm_hit_sub(mx2, my2);
             if (rh >= 0) {
                 vkm_hover = rh;
-                /* Auto-expand submenus on hover */
                 if (rh == VKM_ITEM_THEME) vkm_sub = VKM_SUB_THEME;
                 else if (rh == VKM_ITEM_FONT) vkm_sub = VKM_SUB_FONT;
                 else vkm_sub = VKM_SUB_NONE;
@@ -1778,6 +2350,65 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             }
             if (sh >= 0) vkm_sub_hover = sh;
         }
+        return 0;
+    }
+    case WM_LBUTTONDOWN: {
+        int mx = (short)LOWORD(lParam);
+        int my = (short)HIWORD(lParam);
+        if (!vkm_open) {
+            vkw_mouse_down(mx, my); /* start drag/resize or focus window */
+        }
+        return 0;
+    }
+    case WM_LBUTTONUP: {
+        int mx = (short)LOWORD(lParam);
+        int my = (short)HIWORD(lParam);
+        vkw_mouse_up(); /* end any drag/resize */
+
+        if (!vkm_open) return 0;
+
+        /* Check submenu click first */
+        int si = vkm_hit_sub(mx, my);
+        if (si >= 0 && vkm_sub == VKM_SUB_THEME) {
+            current_theme = si;
+            /* theme changed — palette stays Classic VGA */
+            vkm_open = 0;
+            vkm_sub = VKM_SUB_NONE;
+            return 0;
+        }
+        if (si >= 0 && vkm_sub == VKM_SUB_FONT) {
+            if (si == 0) {
+                pending_font_idx = -1;
+            } else {
+                pending_font_idx = si - 1;
+            }
+            font_change_pending = 1;
+            vkm_open = 0;
+            vkm_sub = VKM_SUB_NONE;
+            return 0;
+        }
+
+        /* Check root click */
+        int ri = vkm_hit_root(mx, my);
+        if (ri == VKM_ITEM_CONSOLE) {
+            vkm_open = 0;
+            vkm_sub = VKM_SUB_NONE;
+            vkw_toggle_console((int)vk_sc_extent.width, (int)vk_sc_extent.height);
+            return 0;
+        }
+        if (ri == VKM_ITEM_CLOSE) {
+            vkm_open = 0;
+            vkm_sub = VKM_SUB_NONE;
+            vkt_hide();
+            return 0;
+        }
+        if (ri == VKM_ITEM_THEME || ri == VKM_ITEM_FONT) {
+            return 0;
+        }
+
+        /* Click outside menu = close */
+        vkm_open = 0;
+        vkm_sub = VKM_SUB_NONE;
         return 0;
     }
     case WM_RBUTTONUP: {
@@ -1795,48 +2426,17 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         }
         return 0;
     }
-    case WM_LBUTTONUP: {
-        if (!vkm_open) return 0;
-        int mx = (short)LOWORD(lParam);
-        int my = (short)HIWORD(lParam);
-
-        /* Check submenu click first */
-        int si = vkm_hit_sub(mx, my);
-        if (si >= 0 && vkm_sub == VKM_SUB_THEME) {
-            current_theme = si;
-            palette = theme_palettes[current_theme];
-            vkm_open = 0;
-            vkm_sub = VKM_SUB_NONE;
-            return 0;
-        }
-        if (si >= 0 && vkm_sub == VKM_SUB_FONT) {
-            if (si == 0) {
-                pending_font_idx = -1; /* bitmap */
-            } else {
-                pending_font_idx = si - 1; /* TTF font index */
+    case WM_MOUSEWHEEL: {
+        /* Scroll focused window */
+        if (vkw_focus >= 0) {
+            int delta = (short)HIWORD(wParam);
+            vkw_window_t *fw = &vkw_windows[vkw_focus];
+            if (fw->active) {
+                fw->scroll += (delta > 0) ? 3 : -3;
+                if (fw->scroll < 0) fw->scroll = 0;
+                if (fw->scroll > fw->line_count - 1) fw->scroll = fw->line_count - 1;
             }
-            font_change_pending = 1;
-            vkm_open = 0;
-            vkm_sub = VKM_SUB_NONE;
-            return 0;
         }
-
-        /* Check root click */
-        int ri = vkm_hit_root(mx, my);
-        if (ri == VKM_ITEM_CLOSE) {
-            vkm_open = 0;
-            vkm_sub = VKM_SUB_NONE;
-            vkt_hide();
-            return 0;
-        }
-        if (ri == VKM_ITEM_THEME || ri == VKM_ITEM_FONT) {
-            /* Clicking a submenu parent just expands it */
-            return 0;
-        }
-
-        /* Click outside menu = close */
-        vkm_open = 0;
-        vkm_sub = VKM_SUB_NONE;
         return 0;
     }
     case WM_CLOSE:
@@ -1881,7 +2481,7 @@ static DWORD WINAPI vkt_thread(LPVOID param)
     wc.hbrBackground = (HBRUSH)GetStockObject(BLACK_BRUSH);
     RegisterClassA(&wc);
 
-    palette = theme_palettes[current_theme];
+    palette = pal_classic;
     vkt_running = 1;
     api->log("[vk_terminal] Ready (F11 to toggle fullscreen)\n");
 
@@ -2066,6 +2666,13 @@ static slop_command_t vkt_commands[] = {
     { "vkt_hide",     "vkt_hide",     "",  "v", "Hide Vulkan terminal" },
     { "vkt_toggle",   "vkt_toggle",   "",  "v", "Toggle Vulkan terminal (F11)" },
     { "vkt_set_res",  "vkt_set_resolution", "i", "v", "Set resolution (0=1080p, 1=900, 2=768, 3=720, 4=1024x768)" },
+    { "wnd_create",   "vkt_wnd_create", "siiiiii", "i", "Create window(title,x,y,w,h,has_input) -> id" },
+    { "wnd_print",    "vkt_wnd_print",  "is", "v", "Print text to window(id, text)" },
+    { "wnd_close",    "vkt_wnd_close",  "i",  "v", "Close window(id)" },
+    { "wnd_clear",    "vkt_wnd_clear",  "i",  "v", "Clear window text(id)" },
+    { "wnd_opacity",  "vkt_wnd_set_opacity", "if", "v", "Set window opacity(id, 0.0-1.0)" },
+    { "console_show", "vkt_console_show", "", "v", "Show the Python console window" },
+    { "console_print","vkt_console_print","s", "v", "Print to console window" },
 };
 
 __declspec(dllexport) slop_command_t *slop_get_commands(int *count)
@@ -2101,7 +2708,7 @@ static int vkt_init(const slop_api_t *a)
     InitializeCriticalSection(&ansi_lock);
     ap_init(&ansi_term, TERM_ROWS, TERM_COLS);
 
-    palette = theme_palettes[current_theme];
+    palette = pal_classic;
     input_buf[0] = '\0';
 
     HINSTANCE hInst = GetModuleHandleA(NULL);

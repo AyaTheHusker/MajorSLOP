@@ -1122,6 +1122,25 @@ __declspec(dllexport) int mmudpy_fake_remote(const char *cmd)
     return api->fake_remote(cmd);
 }
 
+/* ---- Eval queue: vk_terminal submits Python code, Python thread processes ---- */
+#define EVAL_BUF_SZ 8192
+static CRITICAL_SECTION eval_lock;
+static char eval_code[EVAL_BUF_SZ];
+static int eval_target = 0;    /* 0=terminal, >0=vkw window id */
+static volatile int eval_pending = 0;
+static void eval_pump(void);  /* forward decl — processes queued eval from vk_terminal */
+
+__declspec(dllexport) void mmudpy_queue_eval(const char *code, int target)
+{
+    if (!code) return;
+    EnterCriticalSection(&eval_lock);
+    strncpy(eval_code, code, EVAL_BUF_SZ - 1);
+    eval_code[EVAL_BUF_SZ - 1] = 0;
+    eval_target = target;
+    eval_pending = 1;
+    LeaveCriticalSection(&eval_lock);
+}
+
 __declspec(dllexport) int mmudpy_line_register(void)
 {
     /* Allocate a reader slot, returns reader_id (0-7) or -1 */
@@ -1488,6 +1507,8 @@ static LRESULT CALLBACK con_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
     case WM_TIMER:
         if (wParam == CON_FLUSH_TIMER_ID) {
             con_flush();
+            /* Process any pending Python eval from Vulkan terminal */
+            eval_pump();
             /* Also drain pending float text requests */
             if (float_queue_lock_init) {
                 EnterCriticalSection(&float_queue_lock);
@@ -1993,6 +2014,51 @@ static const char *py_bootstrap =
     "        '''Current round number.'''\n"
     "        return _dll.mmudpy_get_round()\n"
     "\n"
+    "    # --- Automation Toggles ---\n"
+    "    # Each returns the new state (True/False). Call with no arg to toggle,\n"
+    "    # or pass True/False to set explicitly.\n"
+    "    def _toggle(self, off, val=None):\n"
+    "        if val is None:\n"
+    "            val = not bool(self.read_i32(off))\n"
+    "        self.write_i32(off, 1 if val else 0)\n"
+    "        return bool(val)\n"
+    "    def autocombat(self, on=None):\n"
+    "        '''Toggle or set auto-combat. mud.autocombat() / mud.autocombat(True)'''\n"
+    "        return self._toggle(0x4D00, on)\n"
+    "    def autonuke(self, on=None):\n"
+    "        '''Toggle or set auto-nuke (offensive spells).'''\n"
+    "        return self._toggle(0x4D04, on)\n"
+    "    def autoheal(self, on=None):\n"
+    "        '''Toggle or set auto-heal.'''\n"
+    "        return self._toggle(0x4D08, on)\n"
+    "    def autobless(self, on=None):\n"
+    "        '''Toggle or set auto-bless (buff spells).'''\n"
+    "        return self._toggle(0x4D0C, on)\n"
+    "    def autolight(self, on=None):\n"
+    "        '''Toggle or set auto-light in dark rooms.'''\n"
+    "        return self._toggle(0x4D10, on)\n"
+    "    def autocash(self, on=None):\n"
+    "        '''Toggle or set auto-pick up cash.'''\n"
+    "        return self._toggle(0x4D14, on)\n"
+    "    def autoget(self, on=None):\n"
+    "        '''Toggle or set auto-pick up items.'''\n"
+    "        return self._toggle(0x4D18, on)\n"
+    "    def autosearch(self, on=None):\n"
+    "        '''Toggle or set auto-search rooms.'''\n"
+    "        return self._toggle(0x4D1C, on)\n"
+    "    def autosneak(self, on=None):\n"
+    "        '''Toggle or set auto-sneak movement.'''\n"
+    "        return self._toggle(0x4D20, on)\n"
+    "    def autohide(self, on=None):\n"
+    "        '''Toggle or set auto-hide after combat.'''\n"
+    "        return self._toggle(0x4D24, on)\n"
+    "    def autotrack(self, on=None):\n"
+    "        '''Toggle or set auto-track monsters.'''\n"
+    "        return self._toggle(0x4D28, on)\n"
+    "    def autotrain(self, on=None):\n"
+    "        '''Toggle or set auto-train on level up.'''\n"
+    "        return self._toggle(0x3780, on)\n"
+    "\n"
     "    # --- Console ---\n"
     "    def console(self):\n"
     "        '''Toggle the MMUDPy console window show/hide.'''\n"
@@ -2184,6 +2250,20 @@ static const char *py_bootstrap =
     "        lines.append('  mud.edit(\"name\")           Print script contents')\n"
     "        lines.append('  mud.delete(\"name\")         Delete a script')\n"
     "        lines.append('')\n"
+    "        lines.append('--- Toggles (no arg=toggle, True/False=set) ---')\n"
+    "        lines.append('  mud.autocombat()   mud.autonuke()    mud.autoheal()')\n"
+    "        lines.append('  mud.autobless()    mud.autolight()   mud.autocash()')\n"
+    "        lines.append('  mud.autoget()      mud.autosearch()  mud.autosneak()')\n"
+    "        lines.append('  mud.autohide()     mud.autotrack()   mud.autotrain()')\n"
+    "        lines.append('')\n"
+    "        lines.append('--- Remote (@commands, no telepath) ---')\n"
+    "        lines.append('  mud.remote.stop()              Stop movement')\n"
+    "        lines.append('  mud.remote.rego()              Resume movement')\n"
+    "        lines.append('  mud.remote.loop(\"name\")        Start loop by name')\n"
+    "        lines.append('  mud.remote.goto(\"room\")        Go to room by name')\n"
+    "        lines.append('  mud.remote.roam(True/False)    Auto-roam on/off')\n"
+    "        lines.append('  mud.remote.reset()             Reset flags/stats')\n"
+    "        lines.append('')\n"
     "        lines.append('--- Offsets ---')\n"
     "        lines.append('  Type OFF to see all game struct offsets.')\n"
     "        return '\\n'.join(lines)\n"
@@ -2243,6 +2323,8 @@ static const char *py_bootstrap =
     "        'memory': 'mud.read_i32(OFF.X) / mud.write_i32(OFF.X, val)\\nmud.read_i16() / mud.write_i16()\\nmud.read_string(OFF.X, maxlen) / mud.write_string(OFF.X, text, maxlen)\\nAll offsets in OFF class, type OFF to see them.',\n"
     "        'scripts': 'mud.scripts() -> list all scripts\\nmud.load(\"name\") -> load and run\\nmud.stop(\"name\") -> stop a running script\\nmud.edit(\"name\") -> show script source\\nmud.save(\"name\", code) -> save new script\\nmud.delete(\"name\") -> remove script\\n\\nScripts have start()/stop() functions.\\nLoad from menu: Plugins > MMUDPy > script name',\n"
     "        'offsets': 'Type OFF to see all game struct offsets.\\nUse with mud.read_i32(OFF.X) / mud.write_i32(OFF.X, val).\\nAll offsets are read/write.',\n"
+    "        'remote': 'mud.remote — direct MegaMUD @commands (no telepath):\\n  mud.remote.stop()              — stop movement\\n  mud.remote.rego()              — resume movement\\n  mud.remote.loop(\"name\")        — start loop\\n  mud.remote.goto(\"room\")        — go to room\\n  mud.remote.roam(True/False)    — auto-roam on/off\\n  mud.remote.reset()             — reset flags/stats\\n\\nType mud.remote to see the list.',\n"
+    "        'toggles': 'Automation toggles — call with no arg to toggle, True/False to set:\\n  mud.autocombat()  mud.autonuke()   mud.autoheal()\\n  mud.autobless()   mud.autolight()  mud.autocash()\\n  mud.autoget()     mud.autosearch() mud.autosneak()\\n  mud.autohide()    mud.autotrack()  mud.autotrain()\\n\\nReturns the new state (True/False).\\nExample: mud.autocombat(False)  — turn off auto-combat',\n"
     "    }\n"
     "    # Plugins can register topics via: help.__wrapped_topics__['name'] = 'text'\n"
     "    if hasattr(help, '__wrapped_topics__'):\n"
@@ -2251,7 +2333,7 @@ static const char *py_bootstrap =
     "        print('=== MMUDPy Help ===')\n"
     "        print('Type help(\"topic\") for details on:')\n"
     "        # Show core topics first, then any plugin-registered ones\n"
-    "        core = ['hp', 'mana', 'combat', 'room', 'player', 'state', 'commands', 'memory', 'scripts', 'offsets']\n"
+    "        core = ['hp', 'mana', 'combat', 'room', 'player', 'state', 'commands', 'memory', 'scripts', 'offsets', 'toggles', 'remote']\n"
     "        plugin_topics = [k for k in sorted(topics.keys()) if k not in core]\n"
     "        print('  ' + ', '.join(core))\n"
     "        if plugin_topics:\n"
@@ -2559,6 +2641,85 @@ static DWORD WINAPI console_thread(LPVOID param)
     return 0;
 }
 
+/* ---- Eval pump — processes queued Python from vk_terminal ---- */
+/* Called from the console window's 50ms timer so it works even offline */
+
+static void eval_pump(void)
+{
+    if (!eval_pending || !py_ready || !pPyRun_SimpleString) return;
+
+    char code_copy[EVAL_BUF_SZ];
+    int target;
+    EnterCriticalSection(&eval_lock);
+    strncpy(code_copy, eval_code, EVAL_BUF_SZ);
+    target = eval_target;
+    eval_pending = 0;
+    LeaveCriticalSection(&eval_lock);
+
+    int gil = 0;
+    if (pPyGILState_Ensure) gil = pPyGILState_Ensure();
+    EnterCriticalSection(&py_lock);
+
+    /* Write code to temp file to avoid escaping hell */
+    {
+        FILE *fp = fopen("C:\\MegaMUD\\_vkt_eval.tmp", "w");
+        if (fp) { fputs(code_copy, fp); fclose(fp); }
+    }
+
+    /* Redirect stdout+stderr, eval/exec, capture all output including errors */
+    pPyRun_SimpleString(
+        "import io as _io, sys as _sys, traceback as _tb\n"
+        "_vkt_buf = _io.StringIO()\n"
+        "_vkt_oldout = _sys.stdout\n"
+        "_vkt_olderr = _sys.stderr\n"
+        "_sys.stdout = _vkt_buf\n"
+        "_sys.stderr = _vkt_buf\n"
+        "try:\n"
+        "    with open(r'C:\\MegaMUD\\_vkt_eval.tmp', 'r') as _f:\n"
+        "        _vkt_code = _f.read()\n"
+        "    try:\n"
+        "        _vkt_r = eval(compile(_vkt_code, '<console>', 'eval'))\n"
+        "        if _vkt_r is not None: print(repr(_vkt_r))\n"
+        "    except SyntaxError:\n"
+        "        exec(compile(_vkt_code, '<console>', 'exec'))\n"
+        "except Exception:\n"
+        "    _tb.print_exc()\n"
+        "_sys.stdout = _vkt_oldout\n"
+        "_sys.stderr = _vkt_olderr\n"
+        "_vkt_out = _vkt_buf.getvalue()\n"
+        "del _vkt_buf, _vkt_oldout, _vkt_olderr\n"
+    );
+
+    /* Route output to the right target */
+    if (target == 0) {
+        /* `` prefix in terminal: inject as server data (ASCII safe for CP437) */
+        pPyRun_SimpleString(
+            "if '_vkt_out' in dir() and _vkt_out:\n"
+            "    import ctypes as _ct\n"
+            "    _api = _ct.WinDLL('msimg32.dll')\n"
+            "    if hasattr(_api, 'slop_inject_server_data'):\n"
+            "        _d = ('\\r\\n' + _vkt_out).encode('latin-1', 'replace')\n"
+            "        _api.slop_inject_server_data(_d, len(_d))\n"
+            "if '_vkt_out' in dir(): del _vkt_out\n"
+        );
+    } else {
+        /* Console window: print each line to the Vulkan window (ASCII safe) */
+        char target_script[512];
+        wsprintfA(target_script,
+            "if '_vkt_out' in dir() and _vkt_out:\n"
+            "    import ctypes as _ct\n"
+            "    _vkt = _ct.WinDLL('vk_terminal.dll')\n"
+            "    for _ln in _vkt_out.rstrip('\\n').split('\\n'):\n"
+            "        _vkt.vkt_wnd_print(%d, _ln.encode('latin-1', 'replace'))\n"
+            "if '_vkt_out' in dir(): del _vkt_out\n",
+            target);
+        pPyRun_SimpleString(target_script);
+    }
+
+    LeaveCriticalSection(&py_lock);
+    if (pPyGILState_Release) pPyGILState_Release(gil);
+}
+
 /* ---- Plugin callbacks ---- */
 
 static void mmudpy_on_line(const char *line)
@@ -2602,6 +2763,7 @@ static int mmudpy_init(const slop_api_t *a)
     menu_base = a->menu_base_id;
     InitializeCriticalSection(&py_lock);
     InitializeCriticalSection(&line_lock);
+    InitializeCriticalSection(&eval_lock);
 
     /* Ensure scripts directory exists */
     char scripts_dir[MAX_PATH];
