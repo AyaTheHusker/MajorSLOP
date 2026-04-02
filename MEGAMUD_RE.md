@@ -313,7 +313,7 @@ Gated by AUTO_CASH (0x4D14) and AUTO_GET (0x4D18).
 | Offset | Size | Name | Description |
 |---|---|---|---|
 | 0x54B4 | i32 | ON_ENTRY_ACTION | 0=nothing, 1=resume loop, 2=auto-roam, 3=? |
-| 0x54BC | i32 | MODE | 11=idle, 14=walking/running, 15=looping, 17=lost (re-syncing) |
+| 0x54BC | i32 | MODE | 11=idle/manual, 14=walking/running, 15=looping, 16=auto-roaming, 17=lost (re-syncing). Missing "Obvious exits:" drops to 11 (not 17). |
 | 0x54D4 | i32 | MSG_CODE | Last WM_ message code received |
 | 0x54D8 | i32 | STEPS_REMAINING | Countdown of steps remaining in current path segment |
 | 0x54DC | i32 | UNK_54DC | Set to -1 before loop, cleared to 0 on loop start |
@@ -567,10 +567,92 @@ All char[21] string buffers unless noted.
 
 | Offset | Size | Name | INI Key | Description |
 |---|---|---|---|---|
-| 0x3274 | u16 | AUTO_MOVE | AutoMove | Direction bitmask (255=all) |
+| 0x3274 | u16 | AUTO_MOVE | AutoMove | Direction bitmask (bit0=N,1=S,2=E,3=W,4=NE,5=NW,6=SE,7=SW; 255=all) |
 | 0x3276 | u16 | AUTO_DOOR | AutoDoor | Auto-open doors |
 | 0x3278 | char[41]×10 | AUTO_ROOM_BASE | AutoRoom0-9 | Room name filters (stride 0x29) |
 | 0x3412 | char[31]×10 | AUTO_CMD_BASE | AutoCmd0-9 | Commands per room (stride 0x1F) |
+
+### Auto-roam Direction Picker (VA 0x423FE0)
+
+Function called on room entry during auto-roam. Takes struct base as arg1 (cdecl).
+Reads ROOM_EXITS[0..9] and tests each against AUTO_MOVE bitmask to pick next direction.
+
+```
+0x423FE0  push ebp; mov ebp,esp; sub esp,0x2c
+          esi = [ebp+8]              ; struct base
+          ecx = [esi+0x2E78]         ; ROOM_EXITS[0] (north)
+          test ecx,ecx → skip if 0
+          cmp [esi+0x566C], 0        ; AUTO_ROAMING
+          test [esi+0x3274], bit     ; AUTO_MOVE bitmask per direction
+          test [esi+0x3276], bit     ; AUTO_DOOR per direction
+```
+
+Iterates exits 0-9 (N,S,E,W,NE,NW,SE,SW,U,D), each at `esi+0x2E78 + i*4`.
+For each non-zero exit, checks if direction bit is set in AUTO_MOVE.
+If no matching exit found → sets flag at `esi+0x576C = 1` and stops auto-roam.
+
+### "Obvious exits:" Line Parser (VA 0x424BFB)
+
+Part of the main incoming-text parser. Searches received line for `"Obvious exits: "` (VA 0x503890)
+via string match function at VA 0x47C390.
+
+```
+0x424BFB  push 0x503890             ; "Obvious exits: "
+          push esi                   ; incoming line text
+          call 0x47C390             ; string search (returns index or -1)
+          mov ebx, eax              ; result
+          cmp ebx, -1 → no match
+```
+
+If matched: parses exit names (open/closed/locked) and populates ROOM_EXITS[0..9].
+If NOT matched: falls through — ROOM_EXITS stays stale from previous room.
+
+Related strings in binary:
+- `"Obvious exits: "` at VA 0x503890 — parser match target
+- `"You can't seem to move anywhere"` at VA 0x503870 — checked before exits
+- `"There is no exit in that"` at VA 0x5026F0 — movement failure
+- `"Unknown Room!"` at VA 0x503190 — room not in DB
+- `"Currently lost ... Looking for a known room"` — lost mode message
+
+### Comms / Data Pipeline (Ghidra RE)
+
+MegaMUD's incoming data pipeline (from Ghidra decompilation of FUN_0041CF40):
+
+```
+BBS Server → [ReadFile on ???] → Buffer at struct+0x863D
+                                  Length at struct+0x5A30
+                                  Event at struct+0x5A04 (signaled when data ready)
+                                        ↓
+                                  FUN_0041CF40 (data processor, waits on event)
+                                        ↓
+                                  FUN_0040FA30 → WriteFile to pipe at struct+0x59D0
+                                        ↓
+                                  MMANSI terminal (renders ANSI, displays text)
+                                        ↓
+                                  Line parser at VA 0x424AF0/0x424BFB
+                                  (parses "Obvious exits:", room names, etc.)
+```
+
+| Offset | Size | Name | Description |
+|---|---|---|---|
+| 0x59D0 | HANDLE | COMM_PIPE | Pipe handle to MMANSI terminal (WriteFile sends data, ReadFile reads back). 0xFFFFFFFF when no file transfer active. |
+| 0x5A04 | HANDLE | COMM_EVENT | Manual-reset event — signaled when data is in buffer, processor waits on it |
+| 0x5A30 | i32 | COMM_BUFLEN | Byte count of data in incoming buffer |
+| 0x863D | byte[] | COMM_BUFFER | Incoming data buffer (raw bytes from BBS, up to 0x400/1024 bytes) |
+| 0x9328 | HANDLE | DOWNLOAD_FILE | File handle for BBS file downloads (NOT the comm pipe!) — used by FUN_0048F3C0 ("Downloading...") |
+| 0x9434 | i32 | DOWNLOAD_POS | Current position in file download |
+| 0x9430 | i32 | DOWNLOAD_SIZE | Total size of file being downloaded |
+
+**Data injection:** To inject fake server data, write to COMM_BUFFER (0x863D), set COMM_BUFLEN (0x5A30), and call SetEvent on COMM_EVENT (0x5A04). The data processor wakes up and forwards it through the full pipeline.
+
+**Key functions (from Ghidra):**
+- `FUN_0041CF40` (VA 0x41CF40) — Data processor. Waits on event, reads buffer, forwards to MMANSI pipe. Thunk at VA 0x4908F0.
+- `FUN_0040FA30` (VA 0x40FA30) — WriteFile wrapper for MMANSI pipe (struct+0x59D0). Sends `<TX!>` on error.
+- `FUN_0040F9B0` (VA 0x40F9B0) — ReadFile wrapper for MMANSI pipe (struct+0x59D0). Sends `<RX!>` on error. Uses critical section at struct+0x12C.
+- `FUN_0048F3C0` (VA 0x48F3C0) — File download function ("Downloading..." / "Download complete."). Uses handle at struct+0x9328.
+- `FUN_00490900` (VA 0x490900) — File download ReadFile loop. Reads into struct+0x8F1C using handle at struct+0x9328.
+
+**PeekNamedPipe calls at 0x4C5D-0x4C62:** These are MSVCRT `_fstat` implementations (GetFileType + PeekNamedPipe for pipe size detection), NOT MegaMUD comm functions.
 
 ### Comms / Connection Settings
 

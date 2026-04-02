@@ -26,6 +26,7 @@
  *   ROUNDTICK <round_num>           → notify DLL of a combat round tick
  *   COMBATEND                       → notify DLL combat has ended
  *   ENUMWIN                         → dump all MMMAIN child windows (class, id, size, style)
+ *   INJECT <text>                   → feed raw text through MegaMUD as fake server data (\r\n for newlines)
  */
 
 #define WIN32_LEAN_AND_MEAN
@@ -104,7 +105,7 @@
 
 /* Menu & about window IDs */
 #define IDM_SLOP_ABOUT       40901
-#define SLOP_WINDOW_CLASS    "MajorSLOPAbout"
+#define SLOP_WINDOW_CLASS    "MegaMudPlusAbout"
 #define SLOP_TIMER_ID        1
 #define SLOP_TIMER_MS        33   /* ~30 fps */
 #define SLOP_WIN_W           420
@@ -299,7 +300,7 @@ static int web_port   = 8000;
 static int dll_port   = PLUGIN_PORT;  /* 9901 — DLL bridge / API port */
 
 /* ================================================================
- * MajorSLOP About Window — plasma fractal animation + status text
+ * MegaMud+ About Window — plasma fractal animation + status text
  * ================================================================ */
 
 static HWND slop_about_hwnd = NULL;
@@ -438,7 +439,7 @@ static LRESULT CALLBACK slop_about_proc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
 
         if (proxy_connected) {
             /* Connected state — bright white/cyan text */
-            slop_draw_text_shadow(hdc, slop_font_big, "MajorSLOP Proxy",
+            slop_draw_text_shadow(hdc, slop_font_big, "MegaMud+ Proxy",
                                   cx, 40 + bob, RGB(255, 255, 255), 3);
             slop_draw_text_shadow(hdc, slop_font_big, "Connected",
                                   cx, 72 + bob, RGB(100, 255, 200), 3);
@@ -466,7 +467,7 @@ static LRESULT CALLBACK slop_about_proc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
         }
 
         /* Version tag */
-        slop_draw_text_shadow(hdc, slop_font_small, "MajorSLOP v0.1.0 by Tripmunk",
+        slop_draw_text_shadow(hdc, slop_font_small, "MegaMud+ v0.1.0 by Tripmunk",
                               cx, SLOP_WIN_H - 30, RGB(180, 180, 220), 2);
 
         SelectObject(mem, old_bmp);
@@ -523,7 +524,7 @@ static void slop_show_about(HWND parent)
     slop_about_hwnd = CreateWindowExA(
         WS_EX_TOOLWINDOW,
         SLOP_WINDOW_CLASS,
-        "MajorSLOP Proxy by Tripmunk 2026",
+        "MegaMud+ Proxy by Tripmunk 2026",
         WS_POPUP | WS_VISIBLE | WS_CAPTION | WS_SYSMENU,
         px, py, SLOP_WIN_W, SLOP_WIN_H,
         parent, NULL, GetModuleHandle(NULL), NULL);
@@ -541,7 +542,7 @@ static void slop_show_about(HWND parent)
 
 #define RT_TIMER_ID        3
 #define RT_TIMER_MS        33      /* ~30 fps */
-#define RT_CLASS           "MajorSLOPRoundTimer"
+#define RT_CLASS           "MegaMudPlusRoundTimer"
 #define RT_WIN_W           190
 #define RT_WIN_H           220
 #define IDM_SLOP_ROUNDTIMER 40903
@@ -555,7 +556,7 @@ static void slop_show_about(HWND parent)
 #define IDM_RT_HIDE         40912
 
 /* Manual sync spell picker window */
-#define RT_SPELL_CLASS      "MajorSLOPSpellPicker"
+#define RT_SPELL_CLASS      "MegaMudPlusSpellPicker"
 #define IDC_SPELL_LIST      50001
 #define IDC_SPELL_EDIT      50002
 #define IDC_SPELL_OK        50003
@@ -671,7 +672,7 @@ static void cfg_save(void)
         logmsg("[mudplugin] Failed to save config to %s\n", path);
         return;
     }
-    fprintf(f, "# MajorSLOP Configuration\n");
+    fprintf(f, "# MegaMud+ Configuration\n");
     fprintf(f, "# Edit while MegaMUD is closed, or use the in-app menus.\n");
     fprintf(f, "#\n");
     fprintf(f, "# round_timer: shown or hidden\n");
@@ -1598,10 +1599,14 @@ static LRESULT CALLBACK slop_mmmain_proc(HWND hwnd, UINT msg, WPARAM wParam, LPA
             return 0;
         }
         /* Forward to plugin WndProc handlers */
-        if (id >= IDM_PLUGIN_BASE && id < IDM_PLUGIN_BASE + 100) {
-            plugins_on_wndproc(hwnd, msg, wParam, lParam);
-            return 0;
+        if (id >= IDM_PLUGIN_BASE) {
+            if (plugins_on_wndproc(hwnd, msg, wParam, lParam))
+                return 0;
         }
+    }
+    /* Forward WM_TIMER to plugins so they can use SetTimer */
+    if (msg == WM_TIMER) {
+        plugins_on_wndproc(hwnd, msg, wParam, lParam);
     }
     return CallWindowProcA(orig_mmmain_proc, hwnd, msg, wParam, lParam);
 }
@@ -1619,8 +1624,8 @@ static void inject_menu(HWND main_wnd)
     for (int i = 0; i < count; i++) {
         char buf[64] = {0};
         GetMenuStringA(menu_bar, i, buf, sizeof(buf), MF_BYPOSITION);
-        if (strcmp(buf, "MajorSLOP") == 0) {
-            logmsg("[mudplugin] MajorSLOP menu already present\n");
+        if (strcmp(buf, "MegaMud+") == 0) {
+            logmsg("[mudplugin] MegaMud+ menu already present\n");
             return;
         }
     }
@@ -1633,8 +1638,8 @@ static void inject_menu(HWND main_wnd)
     AppendMenuA(slop_menu, MF_SEPARATOR, 0, NULL);
     AppendMenuA(slop_menu, MF_STRING, IDM_SLOP_PRO_STEP,
                 pro_every_step ? "RM Every Step  [ON]" : "RM Every Step  [OFF]");
-    /* Append MajorSLOP to menu bar */
-    AppendMenuA(menu_bar, MF_POPUP, (UINT_PTR)slop_menu, "MajorSLOP");
+    /* Append MegaMud+ to menu bar */
+    AppendMenuA(menu_bar, MF_POPUP, (UINT_PTR)slop_menu, "MegaMud+");
 
     /* Subclass to catch our menu commands (before plugin load so callbacks work) */
     if (!orig_mmmain_proc) {
@@ -1644,7 +1649,7 @@ static void inject_menu(HWND main_wnd)
     slop_menu_owner = main_wnd;
     slop_update_menu_state();
 
-    logmsg("[mudplugin] MajorSLOP menu injected to menu bar\n");
+    logmsg("[mudplugin] MegaMud+ menu injected to menu bar\n");
 
     /* Start background threads */
     CreateThread(NULL, 0, pro_step_thread, NULL, 0, NULL);
@@ -1666,23 +1671,18 @@ static void inject_menu(HWND main_wnd)
                 slop_plugin_t *p = plugins[i].desc;
                 const char *pname = (p && p->name) ? p->name : "Unknown";
 
-                /* Each plugin gets a submenu with its items */
                 HMENU sub = CreatePopupMenu();
 
-                /* Let the plugin populate its submenu via on_wndproc
-                 * with a custom message. For now, add a generic info item. */
                 char info[128];
                 sprintf(info, "%s v%s", pname, (p && p->version) ? p->version : "?");
                 AppendMenuA(sub, MF_STRING | MF_GRAYED, 0, info);
                 AppendMenuA(sub, MF_SEPARATOR, 0, NULL);
 
-                /* Only add MMUDPy-specific items for MMUDPy plugin */
                 int base_id = IDM_PLUGIN_BASE + i * 10;
                 if (p && p->name && _stricmp(p->name, "MMUDPy") == 0) {
                     AppendMenuA(sub, MF_STRING, base_id + 0, "Show/Hide Console");
                     AppendMenuA(sub, MF_STRING, base_id + 1, "Script Manager...");
                 }
-                /* Other plugins register their own items via add_menu_item() */
 
                 AppendMenuA(plugins_menu, MF_POPUP, (UINT_PTR)sub, pname);
             }
@@ -2085,6 +2085,50 @@ static int hook_recv(void)
     return 0;
 }
 
+/* ================================================================
+ * Server data injection — call MegaMUD's incoming data processor
+ * ================================================================
+ *
+ * Ghidra RE of FUN_0041BAC0 (main comm thread) shows the pipeline:
+ *   BBS → ReadFile (FUN_0040F9B0) → buffer → FUN_0041C8D0(struct, data, len)
+ *
+ * FUN_0041C8D0 is the incoming data processor — it feeds raw bytes
+ * into MMANSI for display and through MegaMUD's line parser.
+ * We call it directly with our fake data.
+ *
+ * Note: FUN_0041CF40 is the OUTGOING processor (keyboard → BBS).
+ *       Buffer at +0x863D is OUTGOING. Don't write there for injection.
+ */
+
+#define COMM_BUFFER_SIZE  0x50   /* 80 bytes — matches MegaMUD's read cap */
+
+/* FUN_0041C8D0: process incoming server data
+ * Called by the comm thread after ReadFile from BBS.
+ * Args: (int struct_base, void *data, int len) — cdecl */
+typedef void (__cdecl *process_incoming_fn)(int, void *, int);
+#define VA_PROCESS_INCOMING  0x0041C8D0
+
+/* Inject fake server data through MegaMUD's real incoming data processor.
+ * Data appears in MMANSI terminal and goes through the full line parser. */
+static void inject_server_data_impl(const char *data, int len)
+{
+    if (!struct_base || len <= 0) return;
+
+    process_incoming_fn process_incoming = (process_incoming_fn)VA_PROCESS_INCOMING;
+
+    /* Feed data in chunks matching MegaMUD's normal read size (80 bytes) */
+    int offset = 0;
+    while (offset < len) {
+        int chunk = len - offset;
+        if (chunk > COMM_BUFFER_SIZE) chunk = COMM_BUFFER_SIZE;
+
+        process_incoming((int)struct_base, (void *)(data + offset), chunk);
+        offset += chunk;
+    }
+
+    logmsg("[inject] Injected %d bytes via FUN_0041C8D0\n", len);
+}
+
 /* ---- Client handler ---- */
 
 static void handle_client(SOCKET client)
@@ -2323,6 +2367,42 @@ static void handle_client(SOCKET client)
                     }
                 }
 
+            } else if (strncmp(line_start, "TERMROW ", 8) == 0) {
+                /* TERMROW <row>
+                 * Read MMANSI terminal row text + attribute bytes.
+                 * Returns: TEXT<tab>ATTRHEX\n */
+                int row = atoi(line_start + 8);
+                HWND mw = FindWindowA("MMMAIN", NULL);
+                HWND ansi = mw ? FindWindowExA(mw, NULL, "MMANSI", NULL) : NULL;
+                if (!ansi) {
+                    strcpy(resp, "ERR no MMANSI\n");
+                } else {
+                    LONG wdata = GetWindowLongA(ansi, 4);
+                    if (!wdata || row < 0 || row >= MMANSI_MAX_ROWS) {
+                        strcpy(resp, "ERR invalid\n");
+                    } else {
+                        /* Read text */
+                        const char *txt = (const char *)(wdata + MMANSI_TEXT_OFF + row * MMANSI_ROW_STRIDE);
+                        /* Read attrs */
+                        const unsigned char *attr = (const unsigned char *)(wdata + MMANSI_ATTR_OFF + row * MMANSI_ROW_STRIDE);
+                        /* Find trimmed length */
+                        int len = MMANSI_ROW_STRIDE;
+                        while (len > 0 && txt[len-1] == ' ') len--;
+                        if (len == 0) {
+                            strcpy(resp, "\n");
+                        } else {
+                            char *rp = resp;
+                            memcpy(rp, txt, len); rp += len;
+                            *rp++ = '\t';
+                            for (int i = 0; i < len; i++) {
+                                sprintf(rp, "%02X", attr[i]);
+                                rp += 2;
+                            }
+                            *rp++ = '\n'; *rp = '\0';
+                        }
+                    }
+                }
+
             } else if (strncmp(line_start, "DLGTEXT ", 8) == 0) {
                 /* Read text from a control in a dialog/window.
                  * DLGTEXT <parent_class_or_title> <ctrl_id>
@@ -2503,6 +2583,38 @@ static void handle_client(SOCKET client)
             } else if (strncmp(line_start, "COMBATEND", 9) == 0) {
                 rt_on_combat_end();
                 strcpy(resp, "OK\n");
+
+            } else if (strncmp(line_start, "INJECT ", 7) == 0) {
+                /* INJECT <text>
+                 * Feeds raw text through MegaMUD's ReadFile hook as fake server data.
+                 * Use \\r\\n for line breaks. Shows in MMANSI and goes through parser.
+                 * Example: INJECT \r\nObvious exits: NONE\r\n */
+                const char *text = line_start + 7;
+                /* Unescape \r and \n sequences */
+                char inject_decoded[COMM_BUFFER_SIZE];
+                int dlen = 0;
+                for (int i = 0; text[i] && dlen < COMM_BUFFER_SIZE - 1; i++) {
+                    if (text[i] == '\\' && text[i+1] == 'r') {
+                        inject_decoded[dlen++] = '\r';
+                        i++;
+                    } else if (text[i] == '\\' && text[i+1] == 'n') {
+                        inject_decoded[dlen++] = '\n';
+                        i++;
+                    } else if (text[i] == '\\' && text[i+1] == '\\') {
+                        inject_decoded[dlen++] = '\\';
+                        i++;
+                    } else {
+                        inject_decoded[dlen++] = text[i];
+                    }
+                }
+                if (struct_base && dlen > 0) {
+                    inject_server_data_impl(inject_decoded, dlen);
+                    sprintf(resp, "OK injected %d bytes\n", dlen);
+                } else if (!struct_base) {
+                    strcpy(resp, "ERR no struct base\n");
+                } else {
+                    strcpy(resp, "ERR empty inject data\n");
+                }
 
             } else {
                 strcpy(resp, "ERR unknown command\n");
@@ -2819,6 +2931,9 @@ static DWORD WINAPI payload_main(LPVOID param)
         logmsg("[mudplugin] recv() hook FAILED — round detection will need proxy\n");
     }
 
+    /* Server data injection uses direct buffer write (no hooks needed) */
+    logmsg("[mudplugin] Server injection ready (direct buffer at +0x863D)\n");
+
     /* Inject menu into MegaMUD */
     HWND main_wnd = FindWindowA("MMMAIN", NULL);
     if (main_wnd) {
@@ -2987,6 +3102,12 @@ static void api_on_terminal_line(void (*callback)(const char *line))
     }
 }
 
+/* Server data injection API — writes directly to MegaMUD's data buffer */
+static void api_inject_server_data(const char *data, int len)
+{
+    inject_server_data_impl(data, len);
+}
+
 /* The API struct that gets passed to every plugin */
 static slop_api_t slop_api = {0};
 
@@ -3008,6 +3129,7 @@ static void slop_api_init(void)
     slop_api.add_menu_separator = api_add_menu_separator;
     slop_api.on_round_tick     = api_on_round_tick;
     slop_api.on_terminal_line  = api_on_terminal_line;
+    slop_api.inject_server_data = api_inject_server_data;
 }
 
 /* Notify all plugins + registered callbacks of a terminal line */
@@ -3104,7 +3226,7 @@ static void load_plugins(void)
         /* Look for the required export */
         slop_get_plugin_fn get_plugin = (slop_get_plugin_fn)GetProcAddress(dll, "slop_get_plugin");
         if (!get_plugin) {
-            logmsg("[plugins] %s has no slop_get_plugin export — not a MajorSLOP plugin\n", fd.cFileName);
+            logmsg("[plugins] %s has no slop_get_plugin export — not a MegaMud+ plugin\n", fd.cFileName);
             FreeLibrary(dll);
             continue;
         }
@@ -3118,7 +3240,7 @@ static void load_plugins(void)
 
         /* Validate magic */
         if (desc->magic != SLOP_PLUGIN_MAGIC) {
-            logmsg("[plugins] %s: bad magic 0x%08X (expected 0x%08X) — not a MajorSLOP plugin\n",
+            logmsg("[plugins] %s: bad magic 0x%08X (expected 0x%08X) — not a MegaMud+ plugin\n",
                    fd.cFileName, desc->magic, SLOP_PLUGIN_MAGIC);
             FreeLibrary(dll);
             continue;
@@ -3223,7 +3345,7 @@ static void show_plugins_dialog(HWND parent)
     strcat(plugins_dir, "plugins\\");
     pos += sprintf(msg + pos, "Plugin directory:\n%s", plugins_dir);
 
-    MessageBoxA(parent, msg, "MajorSLOP Plugins", MB_OK | MB_ICONINFORMATION);
+    MessageBoxA(parent, msg, "MegaMud+ Plugins", MB_OK | MB_ICONINFORMATION);
 }
 
 /* ---- DllMain ---- */

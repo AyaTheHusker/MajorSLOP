@@ -1086,6 +1086,35 @@ __declspec(dllexport) int mmudpy_read_terminal_row(int row, char *out, int out_s
     return api->read_terminal_row(row, out, out_sz);
 }
 
+/* MMANSI terminal layout (mirrors msimg32_proxy.c defines) */
+#define MMANSI_TEXT_OFF    0x62
+#define MMANSI_ATTR_OFF    0x1F52
+#define MMANSI_ROW_STRIDE  0x84
+#define MMANSI_MAX_ROWS    60
+
+__declspec(dllexport) int mmudpy_read_terminal_attrs(int row, char *out, int out_sz)
+{
+    /* Read MMANSI attribute bytes for a terminal row.
+     * Returns raw DOS color attribute bytes (1 byte per column). */
+    if (!out || out_sz <= 0 || row < 0 || row >= MMANSI_MAX_ROWS) return 0;
+    HWND mw = FindWindowA("MMMAIN", NULL);
+    if (!mw) return 0;
+    HWND ansi = FindWindowExA(mw, NULL, "MMANSI", NULL);
+    if (!ansi) return 0;
+    LONG wdata = GetWindowLongA(ansi, 4);
+    if (!wdata) return 0;
+    const unsigned char *attr = (const unsigned char *)(wdata + MMANSI_ATTR_OFF + row * MMANSI_ROW_STRIDE);
+    int max = (out_sz < MMANSI_ROW_STRIDE) ? out_sz : MMANSI_ROW_STRIDE;
+    memcpy(out, attr, max);
+    return max;
+}
+
+__declspec(dllexport) void mmudpy_inject_server(const char *data, int len)
+{
+    if (api && api->inject_server_data && data && len > 0)
+        api->inject_server_data(data, len);
+}
+
 __declspec(dllexport) int mmudpy_line_register(void)
 {
     /* Allocate a reader slot, returns reader_id (0-7) or -1 */
@@ -1147,6 +1176,33 @@ __declspec(dllexport) void mmudpy_debug_counts(int *on_line, int *got, int *empt
     if (on_line) *on_line = dbg_on_line_count;
     if (got) *got = dbg_get_line_count;
     if (empty) *empty = dbg_get_line_empty;
+}
+
+/*
+ * mmudpy_exec — Run arbitrary Python code in the MMUDPy interpreter.
+ * Other plugin DLLs can call this to inject Python objects, help topics,
+ * commands, or anything else into the console environment.
+ *
+ * Usage from another plugin:
+ *   HMODULE m = GetModuleHandleA("mmudpy.dll");
+ *   typedef int (*exec_fn)(const char *);
+ *   exec_fn py = (exec_fn)GetProcAddress(m, "mmudpy_exec");
+ *   if (py) py("my_var = 42\nprint('injected!')");
+ *
+ * Returns 0 on success, -1 if Python not ready.
+ */
+__declspec(dllexport) int mmudpy_exec(const char *code)
+{
+    if (!py_ready || !pPyRun_SimpleString) return -1;
+    EnterCriticalSection(&py_lock);
+    int gil = 0;
+    if (pPyGILState_Ensure)
+        gil = pPyGILState_Ensure();
+    int rc = pPyRun_SimpleString(code);
+    if (pPyGILState_Release)
+        pPyGILState_Release(gil);
+    LeaveCriticalSection(&py_lock);
+    return rc;
 }
 
 __declspec(dllexport) void mmudpy_toggle_console(void)
@@ -1653,6 +1709,10 @@ static const char *py_bootstrap =
     "    _dll.mmudpy_get_struct_base.argtypes = []\n"
     "    _dll.mmudpy_read_terminal_row.restype = ctypes.c_int\n"
     "    _dll.mmudpy_read_terminal_row.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int]\n"
+    "    _dll.mmudpy_read_terminal_attrs.restype = ctypes.c_int\n"
+    "    _dll.mmudpy_read_terminal_attrs.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int]\n"
+    "    _dll.mmudpy_inject_server.restype = None\n"
+    "    _dll.mmudpy_inject_server.argtypes = [ctypes.c_char_p, ctypes.c_int]\n"
     "    _dll.mmudpy_line_register.restype = ctypes.c_int\n"
     "    _dll.mmudpy_line_register.argtypes = []\n"
     "    _dll.mmudpy_line_unregister.restype = None\n"
@@ -1773,7 +1833,7 @@ static const char *py_bootstrap =
     "\n"
     "# Convenience API object\n"
     "class _MudAPI:\n"
-    "    '''MegaMUD Game API — type `mud` to see all commands.'''\n"
+    "    '''MegaMUD Game API - type `mud` to see all commands.'''\n"
     "\n"
     "    # --- Low-level memory access ---\n"
     "    def read_i32(self, offset):\n"
@@ -1810,10 +1870,38 @@ static const char *py_bootstrap =
     "        '''Get base address of game struct (0 = not found).'''\n"
     "        return _dll.mmudpy_get_struct_base()\n"
     "    def terminal_row(self, row):\n"
-    "        '''Read terminal row (0-59).'''\n"
+    "        '''Read terminal row text (0-59).'''\n"
     "        buf = ctypes.create_string_buffer(140)\n"
     "        _dll.mmudpy_read_terminal_row(row, buf, 140)\n"
     "        return buf.value.decode('utf-8', errors='replace')\n"
+    "    def terminal_attrs(self, row):\n"
+    "        '''Read terminal row color attributes (0-59). Returns list of DOS color bytes.'''\n"
+    "        buf = ctypes.create_string_buffer(140)\n"
+    "        n = _dll.mmudpy_read_terminal_attrs(row, buf, 140)\n"
+    "        return list(buf.raw[:n])\n"
+    "    def terminal_row_full(self, row):\n"
+    "        '''Read terminal row text + attrs. Returns (text, attrs) tuple.\n"
+    "        attrs is a list of DOS color bytes, one per character.\n"
+    "        Color mapping: 0x02=green, 0x06=cyan, 0x07=gray, 0x09=blue, 0x0E=bold yellow.'''\n"
+    "        return (self.terminal_row(row), self.terminal_attrs(row))\n"
+    "    def terminal_dump(self, start=0, end=60):\n"
+    "        '''Dump terminal rows with color info. Prints non-empty rows.'''\n"
+    "        for r in range(start, end):\n"
+    "            text = self.terminal_row(r)\n"
+    "            if text.strip():\n"
+    "                attrs = self.terminal_attrs(r)\n"
+    "                # Show unique colors in this row\n"
+    "                colors = set(attrs[:len(text)])\n"
+    "                color_str = ','.join(f'0x{c:02X}' for c in sorted(colors))\n"
+    "                print(f'[{r:2d}] {text}  ({color_str})')\n"
+    "    def inject_server(self, data):\n"
+    "        '''Inject fake server data through MegaMUD\\'s real pipeline.\n"
+    "        Data appears in MMANSI terminal and goes through the line parser.\n"
+    "        Use ANSI escape codes for colors, \\\\r\\\\n for newlines.\n"
+    "        Example: mud.inject_server(\\\"\\\\r\\\\n\\\\033[1;33mRoom Name\\\\033[0m\\\\r\\\\n\\\")'''\n"
+    "        if isinstance(data, str):\n"
+    "            data = data.encode('utf-8')\n"
+    "        _dll.mmudpy_inject_server(data, len(data))\n"
     "\n"
     "    # --- Player ---\n"
     "    def player_name(self):\n"
@@ -2108,11 +2196,18 @@ static const char *py_bootstrap =
     "        'scripts': 'mud.scripts() -> list all scripts\\nmud.load(\"name\") -> load and run\\nmud.stop(\"name\") -> stop a running script\\nmud.edit(\"name\") -> show script source\\nmud.save(\"name\", code) -> save new script\\nmud.delete(\"name\") -> remove script\\n\\nScripts have start()/stop() functions.\\nLoad from menu: Plugins > MMUDPy > script name',\n"
     "        'offsets': 'Type OFF to see all game struct offsets.\\nUse with mud.read_i32(OFF.X) / mud.write_i32(OFF.X, val).\\nAll offsets are read/write.',\n"
     "    }\n"
+    "    # Plugins can register topics via: help.__wrapped_topics__['name'] = 'text'\n"
+    "    if hasattr(help, '__wrapped_topics__'):\n"
+    "        topics.update(help.__wrapped_topics__)\n"
     "    if topic is None:\n"
     "        print('=== MMUDPy Help ===')\n"
     "        print('Type help(\"topic\") for details on:')\n"
-    "        print('  hp, mana, combat, room, player, state,')\n"
-    "        print('  commands, memory, scripts, offsets')\n"
+    "        # Show core topics first, then any plugin-registered ones\n"
+    "        core = ['hp', 'mana', 'combat', 'room', 'player', 'state', 'commands', 'memory', 'scripts', 'offsets']\n"
+    "        plugin_topics = [k for k in sorted(topics.keys()) if k not in core]\n"
+    "        print('  ' + ', '.join(core))\n"
+    "        if plugin_topics:\n"
+    "            print('  Plugins: ' + ', '.join(plugin_topics))\n"
     "        print()\n"
     "        print('Type `mud` to see all API methods.')\n"
     "        print('Type `OFF` to see all struct offsets.')\n"
@@ -2123,6 +2218,10 @@ static const char *py_bootstrap =
     "    else:\n"
     "        print(f'Unknown topic: {topic}')\n"
     "        print('Available: ' + ', '.join(sorted(topics.keys())))\n"
+    "\n"
+    "# Plugin topic registry - plugins inject via mmudpy_exec:\n"
+    "#   help.__wrapped_topics__['name'] = 'help text'\n"
+    "help.__wrapped_topics__ = {}\n"
     "\n"
     "print('MMUDPy Console ready. Type `mud` for API, `help()` for help.')\n"
     "print()\n"
@@ -2663,7 +2762,7 @@ static slop_plugin_t plugin = {
     .magic       = SLOP_PLUGIN_MAGIC,
     .api_version = SLOP_API_VERSION,
     .name        = "MMUDPy",
-    .author      = "MajorSLOP",
+    .author      = "Tripmunk",
     .description = "Embedded Python console with direct game API access",
     .version     = "1.0.0",
     .init        = mmudpy_init,

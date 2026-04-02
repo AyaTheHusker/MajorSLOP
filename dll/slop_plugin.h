@@ -72,8 +72,14 @@ typedef struct slop_api {
     void          (*on_round_tick)(void (*callback)(int round_num));
     void          (*on_terminal_line)(void (*callback)(const char *line));
 
+    /* Server data injection — feeds raw bytes through MegaMUD's real pipeline
+     * (ReadFile hook). Data appears in MMANSI terminal and goes through the
+     * full line parser, exit detection, etc. Use ANSI/telnet format.
+     * Example: inject_server_data("\r\nObvious exits: NONE\r\n", 23) */
+    void          (*inject_server_data)(const char *data, int len);
+
     /* Reserved for future expansion */
-    void          *_reserved[8];
+    void          *_reserved[7];
 } slop_api_t;
 
 
