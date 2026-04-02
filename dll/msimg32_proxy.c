@@ -1734,17 +1734,103 @@ static void inject_menu(HWND main_wnd)
  * into the round detection state machine.
  */
 
-/* Original recv function pointer */
+/* Forward declarations for functions defined later */
+static void strip_ansi(char *line);
+static void rd_process_line(const char *line);
+
+/* FUN_0041C8D0: process incoming server data (also used by inject) */
+typedef void (__cdecl *process_incoming_fn)(int, void *, int);
+#define VA_PROCESS_INCOMING  0x0041C8D0
+
+/* ---- Inline hook for FUN_0041C8D0 (incoming data processor) ----
+ * Ghidra RE: void __cdecl FUN_0041C8D0(int struct, void *data, int len)
+ * This is where ALL incoming BBS data flows before reaching MMANSI.
+ * Data contains raw ANSI escape codes — perfect for color parsing.
+ * We patch the first 5 bytes with a JMP to our hook, then call original. */
+
+static unsigned char orig_bytes_0041C8D0[5];  /* saved original bytes */
+static int hook_0041C8D0_installed = 0;
+
+/* Line buffer for accumulating incoming data into lines */
+#define RECV_LINE_BUF 4096
+static char recv_line_buf[RECV_LINE_BUF];
+static int recv_line_pos = 0;
+
+/* Feed raw incoming data (with ANSI) into line buffer, dispatch complete lines */
+static void incoming_feed_data(const char *data, int len)
+{
+    for (int i = 0; i < len; i++) {
+        char c = data[i];
+        if (c == '\n') {
+            recv_line_buf[recv_line_pos] = '\0';
+            if (recv_line_pos > 0 && recv_line_buf[recv_line_pos - 1] == '\r')
+                recv_line_buf[recv_line_pos - 1] = '\0';
+            /* Pass raw ANSI line to plugins */
+            plugins_on_line(recv_line_buf);
+            /* Strip ANSI for round detection */
+            strip_ansi(recv_line_buf);
+            rd_process_line(recv_line_buf);
+            recv_line_pos = 0;
+        } else if (recv_line_pos < RECV_LINE_BUF - 1) {
+            recv_line_buf[recv_line_pos++] = c;
+        }
+    }
+}
+
+/* Our hook — called instead of FUN_0041C8D0 */
+static void __cdecl hooked_process_incoming(int sbase, void *data, int len)
+{
+    /* Tap the raw ANSI data for plugins */
+    if (len > 0 && data) {
+        incoming_feed_data((const char *)data, len);
+    }
+
+    /* Restore original bytes, call real function, re-patch */
+    unsigned char *target = (unsigned char *)VA_PROCESS_INCOMING;
+    DWORD old_protect;
+    VirtualProtect(target, 5, PAGE_EXECUTE_READWRITE, &old_protect);
+    memcpy(target, orig_bytes_0041C8D0, 5);
+    VirtualProtect(target, 5, old_protect, &old_protect);
+
+    /* Call original */
+    process_incoming_fn real_fn = (process_incoming_fn)VA_PROCESS_INCOMING;
+    real_fn(sbase, data, len);
+
+    /* Re-install hook */
+    VirtualProtect(target, 5, PAGE_EXECUTE_READWRITE, &old_protect);
+    target[0] = 0xE9;  /* JMP rel32 */
+    *(int *)(target + 1) = (int)((unsigned char *)hooked_process_incoming - target - 5);
+    VirtualProtect(target, 5, old_protect, &old_protect);
+}
+
+static int hook_process_incoming(void)
+{
+    unsigned char *target = (unsigned char *)VA_PROCESS_INCOMING;
+
+    /* Save original 5 bytes */
+    DWORD old_protect;
+    if (!VirtualProtect(target, 5, PAGE_EXECUTE_READWRITE, &old_protect)) {
+        logmsg("[comhook] VirtualProtect failed on 0x%08X\n", VA_PROCESS_INCOMING);
+        return 0;
+    }
+    memcpy(orig_bytes_0041C8D0, target, 5);
+
+    /* Write JMP to our hook */
+    target[0] = 0xE9;
+    *(int *)(target + 1) = (int)((unsigned char *)hooked_process_incoming - target - 5);
+
+    VirtualProtect(target, 5, old_protect, &old_protect);
+    hook_0041C8D0_installed = 1;
+    logmsg("[comhook] FUN_0041C8D0 hooked — raw ANSI interception active\n");
+    return 1;
+}
+
+/* Original recv function pointer (legacy — recv hook never worked, kept for reference) */
 typedef int (WSAAPI *recv_fn)(SOCKET s, char *buf, int len, int flags);
 static recv_fn real_recv = NULL;
 
 /* Track which socket is the MUD connection (first large recv) */
 static SOCKET mud_socket = INVALID_SOCKET;
-
-/* Line buffer for accumulating partial recv data */
-#define RECV_LINE_BUF 4096
-static char recv_line_buf[RECV_LINE_BUF];
-static int recv_line_pos = 0;
 
 /* Round detection state — passive swing-based detection.
  * Every round, swings happen (hits/misses/damage/glances) right at onset.
@@ -2102,12 +2188,6 @@ static int hook_recv(void)
  */
 
 #define COMM_BUFFER_SIZE  0x50   /* 80 bytes — matches MegaMUD's read cap */
-
-/* FUN_0041C8D0: process incoming server data
- * Called by the comm thread after ReadFile from BBS.
- * Args: (int struct_base, void *data, int len) — cdecl */
-typedef void (__cdecl *process_incoming_fn)(int, void *, int);
-#define VA_PROCESS_INCOMING  0x0041C8D0
 
 /* Inject fake server data through MegaMUD's real incoming data processor.
  * Data appears in MMANSI terminal and goes through the full line parser. */
@@ -3046,7 +3126,10 @@ static DWORD WINAPI mmansi_scanner_thread(LPVOID param)
                 if (was_seen(h)) continue;
             }
             mark_seen(h);
-            plugins_on_line(rows[r]);
+            /* Only send via MMANSI poll if inline hook isn't active
+             * (hook sends raw ANSI; MMANSI rows are stripped text) */
+            if (!hook_0041C8D0_installed)
+                plugins_on_line(rows[r]);
             rd_process_line(rows[r]);
         }
 
@@ -3240,11 +3323,21 @@ static DWORD WINAPI payload_main(LPVOID param)
         return 1;
     }
 
-    /* Hook winsock recv() for MUD traffic parsing (round detection) */
+    /* Hook FUN_0041C8D0 (incoming data processor) for raw ANSI interception.
+     * MegaMUD uses ReadFile/WriteFile on pipes, NOT winsock recv().
+     * This inline hook taps data before it reaches MMANSI. */
+    if (hook_process_incoming()) {
+        logmsg("[mudplugin] Incoming data hook installed — raw ANSI active\n");
+    } else {
+        logmsg("[mudplugin] Incoming data hook FAILED — falling back to MMANSI polling\n");
+    }
+
+    /* Legacy recv hook — MegaMUD doesn't use winsock recv, so this always fails.
+     * Kept for reference only. */
     if (hook_recv()) {
         logmsg("[mudplugin] recv() hook installed — round detection active\n");
     } else {
-        logmsg("[mudplugin] recv() hook FAILED — round detection will need proxy\n");
+        logmsg("[mudplugin] recv() hook FAILED (expected — MegaMUD uses ReadFile)\n");
     }
 
     /* Server data injection uses direct buffer write (no hooks needed) */
