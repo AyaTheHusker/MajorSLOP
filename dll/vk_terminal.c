@@ -15,7 +15,8 @@
 #define VK_USE_PLATFORM_WIN32_KHR
 #include "vulkan_headers/vulkan.h"
 #include "slop_plugin.h"
-#include "cp437_hd.h"
+#include "cp437.h"          /* original 8x16 bitmap (fallback) */
+#include "cp437_fonts.h"    /* 14 pre-rendered TTF font atlases */
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -40,6 +41,8 @@
 #define IDM_VKT_RES_BASE 51010  /* 51010..51019 for resolutions */
 #define IDM_VKT_THEME_BASE 51020
 #define IDM_VKT_SETTINGS 51030
+#define IDM_VKT_FONT_BASE 51040  /* 51040..51059 for fonts */
+#define IDM_VKT_FONT_BITMAP 51039  /* special: original 8x16 bitmap */
 
 /* Max quads: 60*132 bg + 60*132 text + input bar ≈ 16000 */
 #define MAX_QUADS       17000
@@ -146,6 +149,43 @@ static rgb_t *palette = NULL;
 static int fs_res_idx = 0;     /* fullscreen resolution index */
 static int fs_width = 1920;
 static int fs_height = 1080;
+
+/* Font selection: -1 = original bitmap, 0..NUM_FONTS-1 = TTF atlas */
+static int current_font = -1;
+static volatile int font_change_pending = 0;
+static int pending_font_idx = -1;
+
+/* ---- Vulkan-rendered context menu ---- */
+#define VKM_CLOSED     0
+#define VKM_ROOT       1
+
+/* Root menu item indices */
+#define VKM_ITEM_THEME  0
+#define VKM_ITEM_FONT   1
+#define VKM_ITEM_SEP    2
+#define VKM_ITEM_CLOSE  3
+#define VKM_ROOT_COUNT  4
+
+/* Submenu types */
+#define VKM_SUB_NONE   0
+#define VKM_SUB_THEME  1
+#define VKM_SUB_FONT   2
+
+static int vkm_open = 0;          /* VKM_CLOSED or VKM_ROOT */
+static int vkm_x = 0, vkm_y = 0; /* root menu top-left in pixels */
+static int vkm_hover = -1;        /* hovered root item */
+static int vkm_sub = VKM_SUB_NONE;/* which submenu is expanded */
+static int vkm_sub_hover = -1;    /* hovered submenu item */
+static int vkm_mouse_x = 0, vkm_mouse_y = 0;
+
+/* Menu rendering constants */
+#define VKM_ITEM_H   26
+#define VKM_PAD      8
+#define VKM_ROOT_W   180
+#define VKM_SUB_W    300
+#define VKM_SEP_H    10
+#define VKM_CHAR_W   8    /* approximate char width in menu */
+#define VKM_CHAR_H   16   /* approximate char height in menu */
 
 /* Terminal buffer */
 /* ANSI terminal state machine — replaces old term_text/term_attr arrays */
@@ -263,6 +303,223 @@ static void push_quad(float x0, float y0, float x1, float y1,
     vk_vdata[vi+2] = (vertex_t){ x1, y1, u1, v1, r, g, b, a };
     vk_vdata[vi+3] = (vertex_t){ x0, y1, u0, v1, r, g, b, a };
     quad_count++;
+}
+
+/* Push a solid filled rect (uses glyph 219 █ for solid pixels) */
+static void push_solid(float x0, float y0, float x1, float y1,
+                       float r, float g, float b, float a,
+                       int vp_w, int vp_h)
+{
+    float tex_cw = 1.0f / 16.0f, tex_ch = 1.0f / 16.0f;
+    float su0 = (219 % 16) * tex_cw, sv0 = (219 / 16) * tex_ch;
+    float su1 = su0 + tex_cw, sv1 = sv0 + tex_ch;
+    #define S2X(px) (((float)(px) / (float)vp_w) * 2.0f - 1.0f)
+    #define S2Y(py) (((float)(py) / (float)vp_h) * 2.0f - 1.0f)
+    push_quad(S2X(x0), S2Y(y0), S2X(x1), S2Y(y1),
+              su0, sv0, su1, sv1, r, g, b, a);
+    #undef S2X
+    #undef S2Y
+}
+
+/* Push a text string at pixel position */
+static void push_text(int px, int py, const char *str,
+                      float r, float g, float b,
+                      int vp_w, int vp_h, int char_w, int char_h)
+{
+    float tex_cw = 1.0f / 16.0f, tex_ch = 1.0f / 16.0f;
+    #define T2X(p) (((float)(p) / (float)vp_w) * 2.0f - 1.0f)
+    #define T2Y(p) (((float)(p) / (float)vp_h) * 2.0f - 1.0f)
+    for (int i = 0; str[i]; i++) {
+        unsigned char ch = (unsigned char)str[i];
+        if (ch <= 32) { px += char_w; continue; }
+        float u0 = (ch % 16) * tex_cw, v0 = (ch / 16) * tex_ch;
+        push_quad(T2X(px), T2Y(py), T2X(px + char_w), T2Y(py + char_h),
+                  u0, v0, u0 + tex_cw, v0 + tex_ch, r, g, b, 1.0f);
+        px += char_w;
+    }
+    #undef T2X
+    #undef T2Y
+}
+
+/* ---- Vulkan menu rendering ---- */
+
+static void vkm_get_root_item_rect(int idx, int *iy, int *ih)
+{
+    int y = vkm_y + VKM_PAD;
+    for (int i = 0; i < idx; i++) {
+        y += (i == VKM_ITEM_SEP) ? VKM_SEP_H : VKM_ITEM_H;
+    }
+    *iy = y;
+    *ih = (idx == VKM_ITEM_SEP) ? VKM_SEP_H : VKM_ITEM_H;
+}
+
+static int vkm_root_height(void)
+{
+    int h = VKM_PAD * 2;
+    for (int i = 0; i < VKM_ROOT_COUNT; i++)
+        h += (i == VKM_ITEM_SEP) ? VKM_SEP_H : VKM_ITEM_H;
+    return h;
+}
+
+static int vkm_sub_count(void)
+{
+    if (vkm_sub == VKM_SUB_THEME) return NUM_THEMES;
+    if (vkm_sub == VKM_SUB_FONT) return NUM_FONTS + 1; /* +1 for bitmap */
+    return 0;
+}
+
+static int vkm_sub_height(void)
+{
+    return VKM_PAD * 2 + vkm_sub_count() * VKM_ITEM_H;
+}
+
+/* Hit test: returns root item index or -1 */
+static int vkm_hit_root(int mx, int my)
+{
+    if (mx < vkm_x || mx >= vkm_x + VKM_ROOT_W) return -1;
+    for (int i = 0; i < VKM_ROOT_COUNT; i++) {
+        int iy, ih;
+        vkm_get_root_item_rect(i, &iy, &ih);
+        if (my >= iy && my < iy + ih && i != VKM_ITEM_SEP) return i;
+    }
+    return -1;
+}
+
+/* Hit test submenu: returns item index or -1 */
+static int vkm_hit_sub(int mx, int my)
+{
+    if (vkm_sub == VKM_SUB_NONE) return -1;
+    int sx = vkm_x + VKM_ROOT_W;
+    int sy_item;
+    /* submenu y = aligned to the parent item */
+    int parent = (vkm_sub == VKM_SUB_THEME) ? VKM_ITEM_THEME : VKM_ITEM_FONT;
+    int parent_y, parent_h;
+    vkm_get_root_item_rect(parent, &parent_y, &parent_h);
+    int sy = parent_y;
+
+    if (mx < sx || mx >= sx + VKM_SUB_W) return -1;
+    int count = vkm_sub_count();
+    for (int i = 0; i < count; i++) {
+        sy_item = sy + VKM_PAD + i * VKM_ITEM_H;
+        if (my >= sy_item && my < sy_item + VKM_ITEM_H) return i;
+    }
+    return -1;
+}
+
+static void vkm_draw(int vp_w, int vp_h)
+{
+    if (!vkm_open) return;
+
+    int cw = VKM_CHAR_W, ch = VKM_CHAR_H;
+
+    /* Root menu background */
+    int rh = vkm_root_height();
+    push_solid(vkm_x, vkm_y, vkm_x + VKM_ROOT_W, vkm_y + rh,
+               0.12f, 0.12f, 0.15f, 1.0f, vp_w, vp_h);
+    /* Border */
+    push_solid(vkm_x, vkm_y, vkm_x + VKM_ROOT_W, vkm_y + 1,
+               0.4f, 0.4f, 0.5f, 1.0f, vp_w, vp_h);
+    push_solid(vkm_x, vkm_y + rh - 1, vkm_x + VKM_ROOT_W, vkm_y + rh,
+               0.4f, 0.4f, 0.5f, 1.0f, vp_w, vp_h);
+    push_solid(vkm_x, vkm_y, vkm_x + 1, vkm_y + rh,
+               0.4f, 0.4f, 0.5f, 1.0f, vp_w, vp_h);
+    push_solid(vkm_x + VKM_ROOT_W - 1, vkm_y, vkm_x + VKM_ROOT_W, vkm_y + rh,
+               0.4f, 0.4f, 0.5f, 1.0f, vp_w, vp_h);
+
+    /* Root menu items */
+    static const char *root_labels[VKM_ROOT_COUNT] = {
+        "Theme  >", "Font  >", "", "Close  (F11)"
+    };
+
+    for (int i = 0; i < VKM_ROOT_COUNT; i++) {
+        int iy, ih;
+        vkm_get_root_item_rect(i, &iy, &ih);
+
+        if (i == VKM_ITEM_SEP) {
+            /* Separator line */
+            push_solid(vkm_x + 4, iy + ih/2, vkm_x + VKM_ROOT_W - 4, iy + ih/2 + 1,
+                       0.35f, 0.35f, 0.4f, 1.0f, vp_w, vp_h);
+            continue;
+        }
+
+        /* Hover highlight */
+        if (i == vkm_hover) {
+            push_solid(vkm_x + 2, iy, vkm_x + VKM_ROOT_W - 2, iy + ih,
+                       0.25f, 0.25f, 0.35f, 1.0f, vp_w, vp_h);
+        }
+
+        /* Check mark for expanded submenu */
+        float tr = 0.85f, tg = 0.85f, tb = 0.85f;
+        if ((i == VKM_ITEM_THEME && vkm_sub == VKM_SUB_THEME) ||
+            (i == VKM_ITEM_FONT && vkm_sub == VKM_SUB_FONT)) {
+            tr = 0.4f; tg = 0.9f; tb = 1.0f;
+        }
+        push_text(vkm_x + VKM_PAD, iy + (ih - ch) / 2,
+                  root_labels[i], tr, tg, tb, vp_w, vp_h, cw, ch);
+    }
+
+    /* Submenu */
+    if (vkm_sub != VKM_SUB_NONE) {
+        int parent = (vkm_sub == VKM_SUB_THEME) ? VKM_ITEM_THEME : VKM_ITEM_FONT;
+        int parent_y, parent_h;
+        vkm_get_root_item_rect(parent, &parent_y, &parent_h);
+
+        int sx = vkm_x + VKM_ROOT_W;
+        int sy = parent_y;
+        int count = vkm_sub_count();
+        int sh = vkm_sub_height();
+
+        /* Clamp submenu to screen */
+        if (sy + sh > vp_h) sy = vp_h - sh;
+        if (sx + VKM_SUB_W > vp_w) sx = vkm_x - VKM_SUB_W;
+
+        /* Background */
+        push_solid(sx, sy, sx + VKM_SUB_W, sy + sh,
+                   0.10f, 0.10f, 0.13f, 1.0f, vp_w, vp_h);
+        /* Border */
+        push_solid(sx, sy, sx + VKM_SUB_W, sy + 1,
+                   0.4f, 0.4f, 0.5f, 1.0f, vp_w, vp_h);
+        push_solid(sx, sy + sh - 1, sx + VKM_SUB_W, sy + sh,
+                   0.4f, 0.4f, 0.5f, 1.0f, vp_w, vp_h);
+        push_solid(sx, sy, sx + 1, sy + sh,
+                   0.4f, 0.4f, 0.5f, 1.0f, vp_w, vp_h);
+        push_solid(sx + VKM_SUB_W - 1, sy, sx + VKM_SUB_W, sy + sh,
+                   0.4f, 0.4f, 0.5f, 1.0f, vp_w, vp_h);
+
+        for (int i = 0; i < count; i++) {
+            int iy2 = sy + VKM_PAD + i * VKM_ITEM_H;
+
+            /* Hover highlight */
+            if (i == vkm_sub_hover) {
+                push_solid(sx + 2, iy2, sx + VKM_SUB_W - 2, iy2 + VKM_ITEM_H,
+                           0.25f, 0.25f, 0.35f, 1.0f, vp_w, vp_h);
+            }
+
+            const char *label = NULL;
+            int is_active = 0;
+
+            if (vkm_sub == VKM_SUB_THEME) {
+                label = theme_names[i];
+                is_active = (i == current_theme);
+            } else {
+                /* Font submenu: item 0 = bitmap, 1..N = TTF fonts */
+                if (i == 0) {
+                    label = "CP437 Bitmap (Original)";
+                    is_active = (current_font < 0);
+                } else {
+                    label = font_table[i - 1].name;
+                    is_active = (current_font == i - 1);
+                }
+            }
+
+            float tr = 0.8f, tg = 0.8f, tb = 0.8f;
+            if (is_active) { tr = 0.3f; tg = 1.0f; tb = 0.5f; }
+            if (label) {
+                push_text(sx + VKM_PAD, iy2 + (VKM_ITEM_H - ch) / 2,
+                          label, tr, tg, tb, vp_w, vp_h, cw, ch);
+            }
+        }
+    }
 }
 
 static void vkt_build_vertices(void)
@@ -407,13 +664,22 @@ static void vkt_build_vertices(void)
 
     #undef PX2NDC_X
     #undef PX2NDC_Y
+
+    /* Draw Vulkan menu on top of everything */
+    vkm_draw(vp_w, vp_h);
 }
 
 /* ---- Input handling ---- */
 
 static void input_send(void)
 {
-    if (!input_buf[0] || !mmansi_hwnd) return;
+    if (!mmansi_hwnd) return;
+
+    /* Empty enter = just send CR (MajorMUD uses this for continue/refresh) */
+    if (!input_buf[0]) {
+        PostMessageA(mmansi_hwnd, WM_CHAR, (WPARAM)'\r', 0);
+        return;
+    }
 
     /* Add to history */
     if (history_count < MAX_HISTORY) {
@@ -777,23 +1043,67 @@ static int vkt_init_vulkan(void)
 
 /* ---- Font texture ---- */
 
-static int vkt_create_font_texture(void)
+/* Build RGBA pixels from either the original bitmap or a TTF atlas.
+ * font_idx: -1 = original cp437 bitmap (4x upscale), 0..NUM_FONTS-1 = TTF atlas.
+ * Caller must free() the returned buffer. Sets *out_w, *out_h. */
+static uint8_t *vkt_build_font_pixels(int font_idx, uint32_t *out_w, uint32_t *out_h)
 {
-    /* Build RGBA pixel data from HD CP437 atlas (Px437 IBM VGA 32x64) */
-    uint32_t atlas_w = CP437_HD_ATLAS_W, atlas_h = CP437_HD_ATLAS_H;
-    uint32_t tex_sz = atlas_w * atlas_h * 4;
-    uint8_t *pixels = (uint8_t *)calloc(tex_sz, 1);
-
-    for (uint32_t y = 0; y < atlas_h; y++) {
-        for (uint32_t x = 0; x < atlas_w; x++) {
-            uint8_t alpha = cp437_hd_atlas[y * atlas_w + x];
-            int idx = (y * atlas_w + x) * 4;
-            pixels[idx+0] = 255;
-            pixels[idx+1] = 255;
-            pixels[idx+2] = 255;
-            pixels[idx+3] = alpha;
+    if (font_idx < 0 || font_idx >= NUM_FONTS) {
+        /* Original 8x16 bitmap, 4x nearest-neighbor upscale */
+        #define FONT_SCALE 4
+        uint32_t aw = 128 * FONT_SCALE, ah = 256 * FONT_SCALE;
+        uint8_t *pixels = (uint8_t *)calloc(aw * ah * 4, 1);
+        for (int g = 0; g < 256; g++) {
+            int gx = (g % 16) * 8, gy = (g / 16) * 16;
+            for (int row = 0; row < 16; row++) {
+                uint8_t bits = cp437_bitmap[g][row];
+                for (int col = 0; col < 8; col++) {
+                    if (bits & (0x80 >> col)) {
+                        for (int sy = 0; sy < FONT_SCALE; sy++)
+                            for (int sx = 0; sx < FONT_SCALE; sx++) {
+                                int px = (gx + col) * FONT_SCALE + sx;
+                                int py = (gy + row) * FONT_SCALE + sy;
+                                int idx = (py * (int)aw + px) * 4;
+                                pixels[idx] = pixels[idx+1] = pixels[idx+2] = pixels[idx+3] = 255;
+                            }
+                    }
+                }
+            }
         }
+        *out_w = aw; *out_h = ah;
+        return pixels;
+        #undef FONT_SCALE
     }
+
+    /* TTF atlas: single-channel alpha → RGBA (white + alpha).
+     * Threshold low alpha values to prevent bleed between cells
+     * when bilinear filtering samples neighboring glyph edges. */
+    uint32_t aw = FONT_ATLAS_W, ah = FONT_ATLAS_H;
+    const unsigned char *src = font_table[font_idx].data;
+    uint8_t *pixels = (uint8_t *)calloc(aw * ah * 4, 1);
+    for (uint32_t i = 0; i < aw * ah; i++) {
+        uint8_t a = src[i];
+        if (a < 32) a = 0;          /* kill sub-pixel bleed */
+        else if (a > 224) a = 255;   /* sharpen near-solid */
+        pixels[i*4+0] = 255;
+        pixels[i*4+1] = 255;
+        pixels[i*4+2] = 255;
+        pixels[i*4+3] = a;
+    }
+    *out_w = aw; *out_h = ah;
+    return pixels;
+}
+
+/* Upload RGBA pixel data to a new Vulkan font texture.
+ * Destroys existing font texture resources first. */
+static int vkt_upload_font_texture(uint8_t *pixels, uint32_t atlas_w, uint32_t atlas_h)
+{
+    /* Tear down old texture */
+    if (vk_dev) vkDeviceWaitIdle(vk_dev);
+    if (vk_font_sampler) { vkDestroySampler(vk_dev, vk_font_sampler, NULL); vk_font_sampler = VK_NULL_HANDLE; }
+    if (vk_font_view) { vkDestroyImageView(vk_dev, vk_font_view, NULL); vk_font_view = VK_NULL_HANDLE; }
+    if (vk_font_img) { vkDestroyImage(vk_dev, vk_font_img, NULL); vk_font_img = VK_NULL_HANDLE; }
+    if (vk_font_mem) { vkFreeMemory(vk_dev, vk_font_mem, NULL); vk_font_mem = VK_NULL_HANDLE; }
 
     /* Create VkImage */
     VkImageCreateInfo ici = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
@@ -817,10 +1127,9 @@ static int vkt_create_font_texture(void)
     vkAllocateMemory(vk_dev, &mai, NULL, &vk_font_mem);
     vkBindImageMemory(vk_dev, vk_font_img, vk_font_mem, 0);
 
-    /* Copy pixel data */
+    /* Copy pixel data with proper row pitch */
     void *mapped;
     vkMapMemory(vk_dev, vk_font_mem, 0, mr.size, 0, &mapped);
-    /* Need to account for row pitch — get subresource layout */
     VkImageSubresource sub = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0 };
     VkSubresourceLayout layout;
     vkGetImageSubresourceLayout(vk_dev, vk_font_img, &sub, &layout);
@@ -829,12 +1138,151 @@ static int vkt_create_font_texture(void)
                pixels + row * atlas_w * 4, atlas_w * 4);
     }
     vkUnmapMemory(vk_dev, vk_font_mem);
-    free(pixels);
 
-    /* Transition to SHADER_READ_ONLY_OPTIMAL */
+    /* Transition to SHADER_READ_ONLY_OPTIMAL using a one-shot command buffer.
+     * We must NOT touch the render loop's vk_cmd_buf or vk_fence here,
+     * because that corrupts the render loop's sync state. */
+    VkCommandBuffer tmp_cmd;
+    VkCommandBufferAllocateInfo cbai = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+    cbai.commandPool = vk_cmd_pool;
+    cbai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    cbai.commandBufferCount = 1;
+    vkAllocateCommandBuffers(vk_dev, &cbai, &tmp_cmd);
+
     VkCommandBufferBeginInfo cbbi = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
     cbbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(tmp_cmd, &cbbi);
+    VkImageMemoryBarrier imb = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+    imb.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT;
+    imb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    imb.oldLayout = VK_IMAGE_LAYOUT_PREINITIALIZED;
+    imb.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    imb.image = vk_font_img;
+    imb.subresourceRange = (VkImageSubresourceRange){ VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+    vkCmdPipelineBarrier(tmp_cmd, VK_PIPELINE_STAGE_HOST_BIT,
+                         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0,
+                         0, NULL, 0, NULL, 1, &imb);
+    vkEndCommandBuffer(tmp_cmd);
+
+    VkFence tmp_fence;
+    VkFenceCreateInfo fci = { VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
+    vkCreateFence(vk_dev, &fci, NULL, &tmp_fence);
+
+    VkSubmitInfo si = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
+    si.commandBufferCount = 1;
+    si.pCommandBuffers = &tmp_cmd;
+    vkQueueSubmit(vk_queue, 1, &si, tmp_fence);
+    vkWaitForFences(vk_dev, 1, &tmp_fence, VK_TRUE, UINT64_MAX);
+
+    vkDestroyFence(vk_dev, tmp_fence, NULL);
+    vkFreeCommandBuffers(vk_dev, vk_cmd_pool, 1, &tmp_cmd);
+
+    /* Image view */
+    VkImageViewCreateInfo ivci = { VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+    ivci.image = vk_font_img;
+    ivci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    ivci.format = VK_FORMAT_R8G8B8A8_UNORM;
+    ivci.subresourceRange = (VkImageSubresourceRange){ VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+    vkCreateImageView(vk_dev, &ivci, NULL, &vk_font_view);
+
+    /* Sampler — NEAREST for bitmap, LINEAR for TTF antialiased */
+    VkSamplerCreateInfo saci = { VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
+    saci.magFilter = (current_font < 0) ? VK_FILTER_NEAREST : VK_FILTER_LINEAR;
+    saci.minFilter = (current_font < 0) ? VK_FILTER_NEAREST : VK_FILTER_LINEAR;
+    saci.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    saci.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    vkCreateSampler(vk_dev, &saci, NULL, &vk_font_sampler);
+
+    /* Update descriptor set to point to new texture */
+    VkDescriptorImageInfo dii = {0};
+    dii.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    dii.imageView = vk_font_view;
+    dii.sampler = vk_font_sampler;
+    VkWriteDescriptorSet wds = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+    wds.dstSet = vk_desc_set;
+    wds.dstBinding = 0;
+    wds.descriptorCount = 1;
+    wds.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    wds.pImageInfo = &dii;
+    vkUpdateDescriptorSets(vk_dev, 1, &wds, 0, NULL);
+
+    return 0;
+}
+
+static int vkt_create_font_texture(void)
+{
+    uint32_t aw, ah;
+    uint8_t *pixels = vkt_build_font_pixels(current_font, &aw, &ah);
+    int ret = vkt_upload_font_texture(pixels, aw, ah);
+    free(pixels);
+
+    const char *fname = (current_font < 0) ? "CP437 Bitmap 4x"
+                       : font_table[current_font].name;
+    api->log("[vk_terminal] Font: %s (%dx%d)\n", fname, aw, ah);
+    return ret;
+}
+
+/* Switch font at runtime — called ONLY from inside vkt_render_frame
+ * after the fence wait, so previous frame is guaranteed complete.
+ * No vkDeviceWaitIdle needed (which can deadlock under Wine FIFO present
+ * when the message pump isn't running). */
+static void vkt_switch_font(int font_idx)
+{
+    if (font_idx == current_font) return;
+    current_font = font_idx;
+    if (!vk_dev) return;
+
+    /* Previous frame is done (fence was waited on by caller).
+     * Safe to destroy and recreate font texture. */
+    uint32_t aw, ah;
+    uint8_t *pixels = vkt_build_font_pixels(current_font, &aw, &ah);
+
+    /* Destroy old font texture — no DeviceWaitIdle needed, fence guarantees idle */
+    if (vk_font_sampler) { vkDestroySampler(vk_dev, vk_font_sampler, NULL); vk_font_sampler = VK_NULL_HANDLE; }
+    if (vk_font_view) { vkDestroyImageView(vk_dev, vk_font_view, NULL); vk_font_view = VK_NULL_HANDLE; }
+    if (vk_font_img) { vkDestroyImage(vk_dev, vk_font_img, NULL); vk_font_img = VK_NULL_HANDLE; }
+    if (vk_font_mem) { vkFreeMemory(vk_dev, vk_font_mem, NULL); vk_font_mem = VK_NULL_HANDLE; }
+
+    /* Create new image */
+    VkImageCreateInfo ici = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+    ici.imageType = VK_IMAGE_TYPE_2D;
+    ici.format = VK_FORMAT_R8G8B8A8_UNORM;
+    ici.extent = (VkExtent3D){ aw, ah, 1 };
+    ici.mipLevels = 1;
+    ici.arrayLayers = 1;
+    ici.samples = VK_SAMPLE_COUNT_1_BIT;
+    ici.tiling = VK_IMAGE_TILING_LINEAR;
+    ici.usage = VK_IMAGE_USAGE_SAMPLED_BIT;
+    ici.initialLayout = VK_IMAGE_LAYOUT_PREINITIALIZED;
+    vkCreateImage(vk_dev, &ici, NULL, &vk_font_img);
+
+    VkMemoryRequirements mr;
+    vkGetImageMemoryRequirements(vk_dev, vk_font_img, &mr);
+    VkMemoryAllocateInfo mai = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+    mai.allocationSize = mr.size;
+    mai.memoryTypeIndex = vk_find_memory(vk_pdev, mr.memoryTypeBits,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    vkAllocateMemory(vk_dev, &mai, NULL, &vk_font_mem);
+    vkBindImageMemory(vk_dev, vk_font_img, vk_font_mem, 0);
+
+    /* Upload pixel data */
+    void *mapped;
+    vkMapMemory(vk_dev, vk_font_mem, 0, mr.size, 0, &mapped);
+    VkImageSubresource sub = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0 };
+    VkSubresourceLayout layout;
+    vkGetImageSubresourceLayout(vk_dev, vk_font_img, &sub, &layout);
+    for (uint32_t row = 0; row < ah; row++) {
+        memcpy((uint8_t *)mapped + layout.offset + row * layout.rowPitch,
+               pixels + row * aw * 4, aw * 4);
+    }
+    vkUnmapMemory(vk_dev, vk_font_mem);
+    free(pixels);
+
+    /* Transition image using the RENDER command buffer (safe — fence waited,
+     * we haven't begun recording yet). We'll use the render fence too. */
     vkResetCommandBuffer(vk_cmd_buf, 0);
+    VkCommandBufferBeginInfo cbbi = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+    cbbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     vkBeginCommandBuffer(vk_cmd_buf, &cbbi);
     VkImageMemoryBarrier imb = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
     imb.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT;
@@ -847,11 +1295,14 @@ static int vkt_create_font_texture(void)
                          VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0,
                          0, NULL, 0, NULL, 1, &imb);
     vkEndCommandBuffer(vk_cmd_buf);
+
+    /* Submit transition — no semaphores, just fence */
+    vkResetFences(vk_dev, 1, &vk_fence);
     VkSubmitInfo si = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
     si.commandBufferCount = 1;
     si.pCommandBuffers = &vk_cmd_buf;
-    vkResetFences(vk_dev, 1, &vk_fence);
     vkQueueSubmit(vk_queue, 1, &si, vk_fence);
+    /* Wait for transition to complete */
     vkWaitForFences(vk_dev, 1, &vk_fence, VK_TRUE, UINT64_MAX);
 
     /* Image view */
@@ -862,16 +1313,35 @@ static int vkt_create_font_texture(void)
     ivci.subresourceRange = (VkImageSubresourceRange){ VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
     vkCreateImageView(vk_dev, &ivci, NULL, &vk_font_view);
 
-    /* Sampler — GL_NEAREST for crisp pixel font */
+    /* Sampler */
     VkSamplerCreateInfo saci = { VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
-    saci.magFilter = VK_FILTER_NEAREST;
-    saci.minFilter = VK_FILTER_NEAREST;
+    saci.magFilter = (current_font < 0) ? VK_FILTER_NEAREST : VK_FILTER_LINEAR;
+    saci.minFilter = (current_font < 0) ? VK_FILTER_NEAREST : VK_FILTER_LINEAR;
     saci.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     saci.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     vkCreateSampler(vk_dev, &saci, NULL, &vk_font_sampler);
 
-    api->log("[vk_terminal] Font texture OK (%dx%d Px437 IBM VGA HD)\n", atlas_w, atlas_h);
-    return 0;
+    /* Update descriptor */
+    VkDescriptorImageInfo dii = {0};
+    dii.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    dii.imageView = vk_font_view;
+    dii.sampler = vk_font_sampler;
+    VkWriteDescriptorSet wds = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+    wds.dstSet = vk_desc_set;
+    wds.dstBinding = 0;
+    wds.descriptorCount = 1;
+    wds.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    wds.pImageInfo = &dii;
+    vkUpdateDescriptorSets(vk_dev, 1, &wds, 0, NULL);
+
+    /* Clear terminal so old glyph shapes don't linger */
+    EnterCriticalSection(&ansi_lock);
+    ap_init(&ansi_term, TERM_ROWS, TERM_COLS);
+    LeaveCriticalSection(&ansi_lock);
+
+    const char *fname = (current_font < 0) ? "CP437 Bitmap 4x"
+                       : font_table[current_font].name;
+    if (api) api->log("[vk_terminal] Switched to font: %s\n", fname);
 }
 
 /* ---- Vertex/Index buffers ---- */
@@ -1196,6 +1666,15 @@ static void vkt_destroy_swapchain(void)
 static void vkt_render_frame(void)
 {
     vkWaitForFences(vk_dev, 1, &vk_fence, VK_TRUE, UINT64_MAX);
+
+    /* Font switch here — fence waited, previous frame fully complete.
+     * This is the ONLY safe place to do heavy Vulkan resource recreation
+     * because we know nothing is in flight. */
+    if (font_change_pending) {
+        font_change_pending = 0;
+        vkt_switch_font(pending_font_idx);
+    }
+
     vkResetFences(vk_dev, 1, &vk_fence);
 
     uint32_t img_idx;
@@ -1272,34 +1751,92 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
 {
     switch (msg) {
     case WM_KEYDOWN:
+        if (wParam == VK_ESCAPE && vkm_open) {
+            vkm_open = 0;
+            vkm_sub = VKM_SUB_NONE;
+            return 0;
+        }
         input_handle_key(wParam, 0);
         return 0;
     case WM_CHAR:
         input_handle_key(wParam, 1);
         return 0;
-    case WM_RBUTTONUP: {
-        POINT pt = { (short)LOWORD(lParam), (short)HIWORD(lParam) };
-        ClientToScreen(hwnd, &pt);
-        HMENU menu = CreatePopupMenu();
-        HMENU theme_sub = CreatePopupMenu();
-        for (int i = 0; i < NUM_THEMES; i++)
-            AppendMenuA(theme_sub, MF_STRING | (i == current_theme ? MF_CHECKED : 0),
-                        IDM_VKT_THEME_BASE + i, theme_names[i]);
-        AppendMenuA(menu, MF_POPUP, (UINT_PTR)theme_sub, "Theme");
-        AppendMenuA(menu, MF_SEPARATOR, 0, NULL);
-        AppendMenuA(menu, MF_STRING, IDM_VKT_TOGGLE, "Close (F11)");
-        TrackPopupMenu(menu, TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd, NULL);
-        DestroyMenu(menu);
+    case WM_MOUSEMOVE: {
+        vkm_mouse_x = (short)LOWORD(lParam);
+        vkm_mouse_y = (short)HIWORD(lParam);
+        if (vkm_open) {
+            /* Update hover state */
+            int rh = vkm_hit_root(vkm_mouse_x, vkm_mouse_y);
+            int sh = vkm_hit_sub(vkm_mouse_x, vkm_mouse_y);
+            if (rh >= 0) {
+                vkm_hover = rh;
+                /* Auto-expand submenus on hover */
+                if (rh == VKM_ITEM_THEME) vkm_sub = VKM_SUB_THEME;
+                else if (rh == VKM_ITEM_FONT) vkm_sub = VKM_SUB_FONT;
+                else vkm_sub = VKM_SUB_NONE;
+                vkm_sub_hover = -1;
+            }
+            if (sh >= 0) vkm_sub_hover = sh;
+        }
         return 0;
     }
-    case WM_COMMAND: {
-        int id = LOWORD(wParam);
-        if (id >= IDM_VKT_THEME_BASE && id < IDM_VKT_THEME_BASE + NUM_THEMES) {
-            current_theme = id - IDM_VKT_THEME_BASE;
+    case WM_RBUTTONUP: {
+        /* Toggle Vulkan-rendered context menu at mouse position */
+        if (vkm_open) {
+            vkm_open = 0;
+            vkm_sub = VKM_SUB_NONE;
+        } else {
+            vkm_x = (short)LOWORD(lParam);
+            vkm_y = (short)HIWORD(lParam);
+            vkm_open = 1;
+            vkm_hover = -1;
+            vkm_sub = VKM_SUB_NONE;
+            vkm_sub_hover = -1;
+        }
+        return 0;
+    }
+    case WM_LBUTTONUP: {
+        if (!vkm_open) return 0;
+        int mx = (short)LOWORD(lParam);
+        int my = (short)HIWORD(lParam);
+
+        /* Check submenu click first */
+        int si = vkm_hit_sub(mx, my);
+        if (si >= 0 && vkm_sub == VKM_SUB_THEME) {
+            current_theme = si;
             palette = theme_palettes[current_theme];
+            vkm_open = 0;
+            vkm_sub = VKM_SUB_NONE;
             return 0;
         }
-        if (id == IDM_VKT_TOGGLE) { vkt_hide(); return 0; }
+        if (si >= 0 && vkm_sub == VKM_SUB_FONT) {
+            if (si == 0) {
+                pending_font_idx = -1; /* bitmap */
+            } else {
+                pending_font_idx = si - 1; /* TTF font index */
+            }
+            font_change_pending = 1;
+            vkm_open = 0;
+            vkm_sub = VKM_SUB_NONE;
+            return 0;
+        }
+
+        /* Check root click */
+        int ri = vkm_hit_root(mx, my);
+        if (ri == VKM_ITEM_CLOSE) {
+            vkm_open = 0;
+            vkm_sub = VKM_SUB_NONE;
+            vkt_hide();
+            return 0;
+        }
+        if (ri == VKM_ITEM_THEME || ri == VKM_ITEM_FONT) {
+            /* Clicking a submenu parent just expands it */
+            return 0;
+        }
+
+        /* Click outside menu = close */
+        vkm_open = 0;
+        vkm_sub = VKM_SUB_NONE;
         return 0;
     }
     case WM_CLOSE:
@@ -1392,7 +1929,7 @@ static DWORD WINAPI vkt_thread(LPVOID param)
             api->log("[vk_terminal] Fullscreen target: %dx%d\n", fs_width, fs_height);
 
             vkt_hwnd = CreateWindowExA(
-                WS_EX_TOPMOST,
+                WS_EX_APPWINDOW,   /* normal alt-tab entry, not always-on-top */
                 "SlopVkTerminal", "MajorMUD Terminal",
                 WS_POPUP | WS_VISIBLE,
                 0, 0, fs_width, fs_height,
@@ -1437,6 +1974,7 @@ static DWORD WINAPI vkt_thread(LPVOID param)
             SetForegroundWindow(vkt_hwnd);
             SetFocus(vkt_hwnd);
             api->log("[vk_terminal] Fullscreen %dx%d\n", fs_width, fs_height);
+
         }
 
         /* Process messages */
@@ -1448,7 +1986,7 @@ static DWORD WINAPI vkt_thread(LPVOID param)
         }
         if (!vkt_running) break;
 
-        /* Render if visible */
+        /* Render if visible (font changes handled inside render_frame) */
         if (vkt_visible && vkt_hwnd && vk_swapchain) {
             vkt_render_frame();
         }
@@ -1542,6 +2080,11 @@ static int vkt_on_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
     (void)hwnd; (void)lParam;
     if (msg == WM_COMMAND && LOWORD(wParam) == IDM_VKT_TOGGLE) {
+        vkt_toggle();
+        return 1;
+    }
+    /* F11 from MegaMUD window opens the Vulkan terminal */
+    if (msg == WM_KEYDOWN && wParam == VK_F11) {
         vkt_toggle();
         return 1;
     }

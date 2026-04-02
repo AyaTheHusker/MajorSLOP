@@ -121,7 +121,7 @@ int main(int argc, char **argv)
             continue;
         }
 
-        if (FT_Load_Glyph(face, glyph_idx, FT_LOAD_RENDER | FT_LOAD_TARGET_MONO)) {
+        if (FT_Load_Glyph(face, glyph_idx, FT_LOAD_RENDER)) {
             missing++;
             continue;
         }
