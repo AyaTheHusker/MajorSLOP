@@ -1447,10 +1447,12 @@ static LRESULT CALLBACK con_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
     case WM_CTLCOLOREDIT: {
         HDC hdcEdit = (HDC)wParam;
         HWND hCtl = (HWND)lParam;
-        if (hCtl == con_output && pie_brush) {
+        if (hCtl == con_output) {
             SetTextColor(hdcEdit, RGB(200, 200, 200));
-            SetBkMode(hdcEdit, TRANSPARENT);
-            return (LRESULT)pie_brush;
+            SetBkColor(hdcEdit, RGB(26, 26, 28));
+            static HBRUSH output_bg = NULL;
+            if (!output_bg) output_bg = CreateSolidBrush(RGB(26, 26, 28));
+            return (LRESULT)output_bg;
         }
         if (hCtl == con_input) {
             SetTextColor(hdcEdit, RGB(220, 220, 220));
@@ -1543,14 +1545,14 @@ static void create_console_window(HINSTANCE hInst)
     con_hwnd = CreateWindowExA(
         WS_EX_TOOLWINDOW, "MMUDPyConsole", "MMUDPy Console",
         WS_OVERLAPPEDWINDOW,
-        CW_USEDEFAULT, CW_USEDEFAULT, 720, 500,
+        CW_USEDEFAULT, CW_USEDEFAULT, 900, 620,
         parent, NULL, hInst, NULL);
 
     /* Output — multiline read-only edit */
     con_output = CreateWindowExA(
         0, "EDIT", "",
         WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL,
-        4, 4, 708, 440,
+        4, 4, 888, 556,
         con_hwnd, NULL, hInst, NULL);
 
     /* Dark background for output */
@@ -1560,12 +1562,12 @@ static void create_console_window(HINSTANCE hInst)
     con_input = CreateWindowExA(
         0, "EDIT", "",
         WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
-        4, 448, 708, 24,
+        4, 564, 888, 26,
         con_hwnd, NULL, hInst, NULL);
 
     /* Set monospace font */
     HFONT mono = CreateFontA(
-        15, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+        18, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
         ANSI_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
         DEFAULT_QUALITY, FIXED_PITCH | FF_MODERN, "Consolas");
     SendMessageA(con_output, WM_SETFONT, (WPARAM)mono, TRUE);
@@ -2365,6 +2367,153 @@ static int load_python(void)
     int rc = pPyRun_SimpleString(py_bootstrap);
     if (rc != 0) {
         api->log("[mmudpy] Bootstrap failed (rc=%d)\n", rc);
+    }
+
+    /* ---- Scan for extension commands from other plugins ---- */
+    {
+        char plugins_dir[MAX_PATH];
+        GetModuleFileNameA(NULL, plugins_dir, MAX_PATH);
+        char *sl2 = strrchr(plugins_dir, '\\');
+        if (sl2) *sl2 = '\0';
+        strcat(plugins_dir, "\\plugins\\");
+
+        char search_pat[MAX_PATH];
+        sprintf(search_pat, "%s*.dll", plugins_dir);
+
+        WIN32_FIND_DATAA fd;
+        HANDLE hFind = FindFirstFileA(search_pat, &fd);
+        if (hFind != INVALID_HANDLE_VALUE) {
+            do {
+                /* Skip mmudpy.dll itself */
+                if (_stricmp(fd.cFileName, "mmudpy.dll") == 0) continue;
+
+                /* Use full path — GetModuleHandleA(filename) fails for
+                   DLLs loaded from subdirectories on Wine */
+                char full_dll[MAX_PATH];
+                sprintf(full_dll, "%s%s", plugins_dir, fd.cFileName);
+                HMODULE hMod = GetModuleHandleA(full_dll);
+                if (!hMod) {
+                    /* Try LoadLibrary — returns existing handle if already loaded */
+                    hMod = LoadLibraryA(full_dll);
+                }
+                if (!hMod) continue;
+
+                typedef slop_command_t *(*get_cmds_fn)(int *);
+                get_cmds_fn get_cmds = (get_cmds_fn)GetProcAddress(hMod, "slop_get_commands");
+                if (!get_cmds) continue;
+
+                int cmd_count = 0;
+                slop_command_t *cmds = get_cmds(&cmd_count);
+                if (!cmds || cmd_count <= 0) continue;
+
+                api->log("[mmudpy] Found %d ext commands in %s\n", cmd_count, fd.cFileName);
+
+                /* Generate Python wrapper: load DLL via ctypes, wrap each command */
+                char py_buf[4096];
+                int pos = 0;
+
+                /* Load the DLL in Python */
+                pos += sprintf(py_buf + pos,
+                    "_ext_%.*s = ctypes.CDLL(r'%s%s')\n",
+                    (int)(strchr(fd.cFileName, '.') ? strchr(fd.cFileName, '.') - fd.cFileName : strlen(fd.cFileName)),
+                    fd.cFileName,
+                    plugins_dir, fd.cFileName);
+
+                char dll_var[64];
+                int namelen = (int)(strchr(fd.cFileName, '.') ? strchr(fd.cFileName, '.') - fd.cFileName : strlen(fd.cFileName));
+                sprintf(dll_var, "_ext_%.*s", namelen, fd.cFileName);
+
+                for (int ci = 0; ci < cmd_count; ci++) {
+                    slop_command_t *c = &cmds[ci];
+
+                    /* Build argtypes list */
+                    char argtypes[256] = "[";
+                    int alen = 1;
+                    for (const char *a = c->arg_types; *a; a++) {
+                        if (alen > 1) { argtypes[alen++] = ','; argtypes[alen++] = ' '; }
+                        switch (*a) {
+                        case 'i': alen += sprintf(argtypes + alen, "ctypes.c_int"); break;
+                        case 's': alen += sprintf(argtypes + alen, "ctypes.c_char_p"); break;
+                        case 'f': alen += sprintf(argtypes + alen, "ctypes.c_float"); break;
+                        default:  alen += sprintf(argtypes + alen, "ctypes.c_int"); break;
+                        }
+                    }
+                    argtypes[alen++] = ']';
+                    argtypes[alen] = '\0';
+
+                    /* restype */
+                    const char *restype = "None";
+                    if (c->ret_type && c->ret_type[0] == 'i') restype = "ctypes.c_int";
+                    else if (c->ret_type && c->ret_type[0] == 's') restype = "ctypes.c_char_p";
+                    else if (c->ret_type && c->ret_type[0] == 'f') restype = "ctypes.c_float";
+
+                    pos += sprintf(py_buf + pos,
+                        "%s.%s.restype = %s\n"
+                        "%s.%s.argtypes = %s\n",
+                        dll_var, c->c_func, restype,
+                        dll_var, c->c_func, argtypes);
+
+                    /* Build lambda — handle string encoding for 's' args */
+                    int has_str = (strchr(c->arg_types, 's') != NULL);
+                    if (c->arg_types[0] == '\0') {
+                        /* No args */
+                        pos += sprintf(py_buf + pos,
+                            "mud.%s = lambda: %s.%s()\n",
+                            c->py_name, dll_var, c->c_func);
+                    } else if (!has_str) {
+                        /* All numeric — simple passthrough */
+                        char params[128] = "";
+                        int plen = 0;
+                        int argn = 0;
+                        for (const char *a = c->arg_types; *a; a++, argn++) {
+                            if (plen > 0) plen += sprintf(params + plen, ", ");
+                            plen += sprintf(params + plen, "a%d", argn);
+                        }
+                        pos += sprintf(py_buf + pos,
+                            "mud.%s = lambda %s: %s.%s(%s)\n",
+                            c->py_name, params, dll_var, c->c_func, params);
+                    } else {
+                        /* Has string args — need encoding */
+                        char params[128] = "";
+                        char call[256] = "";
+                        int plen = 0, clen = 0, argn = 0;
+                        for (const char *a = c->arg_types; *a; a++, argn++) {
+                            if (plen > 0) plen += sprintf(params + plen, ", ");
+                            plen += sprintf(params + plen, "a%d", argn);
+                            if (clen > 0) clen += sprintf(call + clen, ", ");
+                            if (*a == 's')
+                                clen += sprintf(call + clen, "a%d.encode('utf-8') if isinstance(a%d, str) else a%d", argn, argn, argn);
+                            else
+                                clen += sprintf(call + clen, "a%d", argn);
+                        }
+                        pos += sprintf(py_buf + pos,
+                            "mud.%s = lambda %s: %s.%s(%s)\n",
+                            c->py_name, params, dll_var, c->c_func, call);
+                    }
+
+                    /* Add docstring as attribute (escape quotes) */
+                    if (c->doc && c->doc[0]) {
+                        char edoc[256];
+                        int el = 0;
+                        for (const char *dp = c->doc; *dp && el < 250; dp++) {
+                            if (*dp == '\'') { edoc[el++] = '\\'; edoc[el++] = '\''; }
+                            else edoc[el++] = *dp;
+                        }
+                        edoc[el] = '\0';
+                        pos += sprintf(py_buf + pos,
+                            "mud.%s.__doc__ = '%s'\n",
+                            c->py_name, edoc);
+                    }
+
+                    if (pos > 3500) break;  /* safety */
+                }
+
+                api->log("[mmudpy] Running ext wrapper:\n%s\n", py_buf);
+                pPyRun_SimpleString(py_buf);
+
+            } while (FindNextFileA(hFind, &fd));
+            FindClose(hFind);
+        }
     }
 
     py_ready = 1;

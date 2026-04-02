@@ -124,6 +124,29 @@ typedef struct slop_plugin {
 } slop_plugin_t;
 
 
+/* ---- Extension command registration (for MMUDPy discovery) ---- */
+
+/*
+ * Plugins that want to expose functions to MMUDPy's Python `mud` object
+ * export slop_get_commands() returning a table of slop_command_t.
+ *
+ * MMUDPy scans loaded plugin DLLs for this export and auto-wraps each
+ * command as mud.{py_name}() using ctypes.
+ *
+ * arg_types chars: 'i' = int, 's' = c_char_p (string), 'f' = float
+ * ret_type  chars: 'v' = void, 'i' = int, 's' = c_char_p, 'f' = float
+ */
+typedef struct slop_command {
+    const char *py_name;     /* Python method name on mud, e.g. "rt_show" */
+    const char *c_func;      /* DLL export name, e.g. "gl_rt_show" */
+    const char *arg_types;   /* "" = none, "i" = int, "siii" = str+3 ints */
+    const char *ret_type;    /* "v" = void, "i" = int, "s" = string */
+    const char *doc;         /* docstring for mud.help() */
+} slop_command_t;
+
+/* Plugin exports this to advertise commands.  Returns count. */
+typedef slop_command_t *(*slop_get_commands_fn)(int *count);
+
 /* ---- Export macro ---- */
 
 /*
