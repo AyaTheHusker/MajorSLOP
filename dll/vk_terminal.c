@@ -15,7 +15,7 @@
 #define VK_USE_PLATFORM_WIN32_KHR
 #include "vulkan_headers/vulkan.h"
 #include "slop_plugin.h"
-#include "cp437.h"
+#include "cp437_hd.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -294,7 +294,7 @@ static void vkt_build_vertices(void)
     float grid_w = cw * TERM_COLS;
     float x_offset = ((float)vp_w - grid_w) / 2.0f; /* center horizontally */
 
-    /* UV constants for font atlas (128x256, 8x16 glyphs in 16x16 grid) */
+    /* UV constants for font atlas (512x1024, 32x64 glyphs in 16x16 grid) */
     float tex_cw = 1.0f / 16.0f;
     float tex_ch = 1.0f / 16.0f;
 
@@ -779,27 +779,19 @@ static int vkt_init_vulkan(void)
 
 static int vkt_create_font_texture(void)
 {
-    /* Build RGBA pixel data from CP437 bitmap */
-    uint32_t atlas_w = 128, atlas_h = 256;
+    /* Build RGBA pixel data from HD CP437 atlas (Px437 IBM VGA 32x64) */
+    uint32_t atlas_w = CP437_HD_ATLAS_W, atlas_h = CP437_HD_ATLAS_H;
     uint32_t tex_sz = atlas_w * atlas_h * 4;
     uint8_t *pixels = (uint8_t *)calloc(tex_sz, 1);
 
-    for (int g = 0; g < 256; g++) {
-        int gx = (g % 16) * 8;
-        int gy = (g / 16) * 16;
-        for (int row = 0; row < 16; row++) {
-            uint8_t bits = cp437_bitmap[g][row];
-            for (int col = 0; col < 8; col++) {
-                if (bits & (0x80 >> col)) {
-                    int px = gx + col;
-                    int py = gy + row;
-                    int idx = (py * atlas_w + px) * 4;
-                    pixels[idx+0] = 255;
-                    pixels[idx+1] = 255;
-                    pixels[idx+2] = 255;
-                    pixels[idx+3] = 255;
-                }
-            }
+    for (uint32_t y = 0; y < atlas_h; y++) {
+        for (uint32_t x = 0; x < atlas_w; x++) {
+            uint8_t alpha = cp437_hd_atlas[y * atlas_w + x];
+            int idx = (y * atlas_w + x) * 4;
+            pixels[idx+0] = 255;
+            pixels[idx+1] = 255;
+            pixels[idx+2] = 255;
+            pixels[idx+3] = alpha;
         }
     }
 
@@ -878,7 +870,7 @@ static int vkt_create_font_texture(void)
     saci.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     vkCreateSampler(vk_dev, &saci, NULL, &vk_font_sampler);
 
-    api->log("[vk_terminal] Font texture OK (128x256 CP437)\n");
+    api->log("[vk_terminal] Font texture OK (%dx%d Px437 IBM VGA HD)\n", atlas_w, atlas_h);
     return 0;
 }
 
