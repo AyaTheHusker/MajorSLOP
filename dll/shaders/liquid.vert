@@ -72,33 +72,48 @@ void main() {
         pos.y -= (pos.x - cx) * sin(angle);
     }
 
-    /* ---- FBM Noise Warp (organic currents) ---- */
+    /* ---- FBM Noise Warp (fluid currents flowing between letters) ---- */
     if (pc.fx_fbm > 0.5) {
-        /* Sample FBM at position, offset by time for animation.
-         * Two independent noise fields for X and Y displacement,
-         * using different seeds to avoid correlated motion. */
-        vec2 np = inPos * 3.0; /* scale controls eddy size */
-        float t = pc.time * 0.3; /* slow drift */
+        /* Large-scale fluid flow — low frequency for broad sweeping currents */
+        vec2 np = inPos * 1.5; /* large eddies */
+        float t = pc.time * 0.4;
 
-        /* Displacement field — two FBM samples with different offsets */
-        float dx = fbm(np + vec2(t * 0.7, t * 0.3)) - 0.5;
-        float dy = fbm(np + vec2(t * 0.2 + 17.0, t * 0.5 + 31.0)) - 0.5;
+        /* Multi-scale curl noise for divergence-free fluid motion */
+        float eps = 0.02;
 
-        /* Curl-like behavior: use gradient of noise field for divergence-free flow.
-         * This makes the currents feel like fluid, not random displacement. */
-        float curl_x = fbm(np + vec2(0.0, 0.01) + vec2(t * 0.5, t * 0.3))
-                      - fbm(np - vec2(0.0, 0.01) + vec2(t * 0.5, t * 0.3));
-        float curl_y = fbm(np + vec2(0.01, 0.0) + vec2(t * 0.5, t * 0.3))
-                      - fbm(np - vec2(0.01, 0.0) + vec2(t * 0.5, t * 0.3));
+        /* Large eddies — slow, sweeping */
+        float n0 = fbm(np + vec2(t * 0.3, t * 0.2));
+        float curl1_x = fbm(np + vec2(0, eps) + vec2(t * 0.3, t * 0.2)) - n0;
+        float curl1_y = -(fbm(np + vec2(eps, 0) + vec2(t * 0.3, t * 0.2)) - n0);
 
-        /* Blend direct FBM with curl for richness */
-        float warp_x = dx * 0.4 + curl_y * 0.6;
-        float warp_y = dy * 0.4 - curl_x * 0.6;
+        /* Medium eddies — faster, more detail */
+        vec2 mp = inPos * 4.0;
+        float m0 = fbm(mp + vec2(t * 0.7 + 7.3, t * 0.5 + 13.7));
+        float curl2_x = fbm(mp + vec2(0, eps) + vec2(t * 0.7 + 7.3, t * 0.5 + 13.7)) - m0;
+        float curl2_y = -(fbm(mp + vec2(eps, 0) + vec2(t * 0.7 + 7.3, t * 0.5 + 13.7)) - m0);
 
-        /* Apply displacement — amplitude controls warp strength */
-        float amp = 0.012;
-        pos.x += warp_x * amp;
-        pos.y += warp_y * amp;
+        /* Small turbulence — fast ripples */
+        vec2 sp = inPos * 8.0;
+        float s0 = fbm(sp + vec2(t * 1.2 + 23.1, t * 0.9 + 41.3));
+        float curl3_x = fbm(sp + vec2(0, eps) + vec2(t * 1.2 + 23.1, t * 0.9 + 41.3)) - s0;
+        float curl3_y = -(fbm(sp + vec2(eps, 0) + vec2(t * 1.2 + 23.1, t * 0.9 + 41.3)) - s0);
+
+        /* Blend scales: large dominant, medium adds detail, small adds turbulence */
+        float wx = curl1_x * 0.6 + curl2_x * 0.3 + curl3_x * 0.1;
+        float wy = curl1_y * 0.6 + curl2_y * 0.3 + curl3_y * 0.1;
+
+        /* Time-varying vortex centers for unpredictable swirling */
+        float vx = sin(t * 0.7) * 0.3;
+        float vy = cos(t * 0.5) * 0.3;
+        float dist = length(inPos - vec2(vx, vy));
+        float vortex = exp(-dist * 2.0) * 0.3;
+        wx += -sin(atan(inPos.y - vy, inPos.x - vx)) * vortex;
+        wy +=  cos(atan(inPos.y - vy, inPos.x - vx)) * vortex;
+
+        /* Strong amplitude for visible fluid motion */
+        float amp = 0.025;
+        pos.x += wx * amp;
+        pos.y += wy * amp;
     }
 
     gl_Position = pos;

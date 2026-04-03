@@ -419,16 +419,16 @@ static void apply_theme_palette(int theme_idx)
      {KF(0,270,0.08,0.75), KF(0.3,278,0.12,0.85), KF(0.7,285,0.08,0.88), KF(1,275,0.06,0.80), {0}},
     },
 
-    /* 15: Afroman / Giovanni — VIBRANT RAINBOW, full spectrum, maximum hue! */
+    /* 15: Afroman / Giovanni — RED WHITE BLUE patriot, always R-W-B with slight hue shifts */
     {
-     {KF(0,300,0.15,0.04), KF(1,320,0.2,0.06), {0},{0},{0}},
-     {KF(0,340,0.85,0.65), KF(0.2,0,0.9,0.78), KF(0.4,20,0.88,0.82), KF(0.6,40,0.85,0.78), KF(1,60,0.8,0.70)},
-     {KF(0,90,0.8,0.60), KF(0.2,110,0.85,0.72), KF(0.4,130,0.88,0.78), KF(0.7,150,0.85,0.75), KF(1,170,0.8,0.65)},
-     {KF(0,30,0.85,0.65), KF(0.2,50,0.9,0.78), KF(0.5,70,0.88,0.82), KF(0.8,55,0.85,0.75), KF(1,40,0.8,0.68)},
-     {KF(0,210,0.8,0.58), KF(0.2,230,0.85,0.72), KF(0.5,250,0.88,0.78), KF(0.8,240,0.82,0.72), KF(1,220,0.78,0.62)},
-     {KF(0,280,0.82,0.60), KF(0.2,300,0.88,0.75), KF(0.4,320,0.9,0.80), KF(0.7,340,0.85,0.75), KF(1,310,0.8,0.65)},
-     {KF(0,160,0.78,0.58), KF(0.2,180,0.85,0.72), KF(0.5,200,0.88,0.78), KF(0.8,190,0.82,0.72), KF(1,175,0.78,0.62)},
-     {KF(0,0,0.15,0.82), KF(0.2,45,0.2,0.88), KF(0.4,90,0.18,0.92), KF(0.7,180,0.15,0.90), KF(1,270,0.12,0.85)},
+     /*blk*/ {KF(0,230,0.2,0.05), KF(1,225,0.15,0.07), {0},{0},{0}},
+     /*red*/ {KF(0,0,0.90,0.72), KF(0.25,0,0.06,0.95), KF(0.5,220,0.85,0.68), KF(0.75,355,0.08,0.93), KF(1,5,0.88,0.70)},
+     /*grn*/ {KF(0,355,0.88,0.70), KF(0.25,355,0.07,0.93), KF(0.5,225,0.83,0.66), KF(0.75,0,0.06,0.94), KF(1,350,0.86,0.68)},
+     /*yel*/ {KF(0,5,0.86,0.74), KF(0.25,5,0.05,0.96), KF(0.5,215,0.82,0.65), KF(0.75,350,0.07,0.92), KF(1,0,0.90,0.72)},
+     /*blu*/ {KF(0,220,0.85,0.68), KF(0.25,0,0.06,0.94), KF(0.5,0,0.88,0.70), KF(0.75,355,0.06,0.95), KF(1,225,0.83,0.66)},
+     /*mag*/ {KF(0,350,0.87,0.71), KF(0.25,350,0.06,0.94), KF(0.5,230,0.84,0.67), KF(0.75,5,0.07,0.93), KF(1,355,0.89,0.72)},
+     /*cyn*/ {KF(0,225,0.83,0.66), KF(0.25,355,0.07,0.93), KF(0.5,5,0.87,0.71), KF(0.75,0,0.06,0.95), KF(1,220,0.84,0.68)},
+     /*wht*/ {KF(0,0,0.06,0.94), KF(0.25,0,0.85,0.70), KF(0.5,355,0.06,0.96), KF(0.75,225,0.82,0.66), KF(1,5,0.05,0.95)},
     },
 
     /* 16: Bog Lord — murky marsh, sickly green, swamp gas */
@@ -458,6 +458,9 @@ static void apply_theme_palette(int theme_idx)
         /* Build base ramp */
         build_ramp(&theme_ramps[ansi], nk, specs[theme_idx][ansi]);
 
+        /* Afroman override: each ANSI color gets its OWN unique R-W-B gradient.
+         * All start at a unique red, flow through a unique white, into a unique blue,
+         * back through white, and repeat. Same ANSI color = same gradient always. */
         /* Build bright variant (ansi + 8): boost value by ~30% */
         color_ramp_t bright;
         for (int s = 0; s < GRAD_STOPS; s++) {
@@ -470,6 +473,71 @@ static void apply_theme_palette(int theme_idx)
             if (bright.stops[s].b > 1.0f) bright.stops[s].b = 1.0f;
         }
         theme_ramps[ansi + 8] = bright;
+    }
+
+    /* Afroman override: ALL 16 ANSI colors get their own WILDLY distinct R-W-B gradient.
+     * Each entry: {red_rgb, white_rgb, blue_rgb} — must look completely different. */
+    if (theme_idx == 15) {
+        static const float afro[16][3][3] = {
+            /* 0  dark black:  dim brick,         grey-white,       dim slate */
+            {{0.40f,0.08f,0.08f}, {0.65f,0.65f,0.68f}, {0.15f,0.18f,0.40f}},
+            /* 1  red:         neon orange-red,    warm cream,       electric blue */
+            {{1.00f,0.35f,0.05f}, {1.00f,0.95f,0.82f}, {0.10f,0.40f,1.00f}},
+            /* 2  green:       hot magenta-pink,   icy blue-white,   deep indigo */
+            {{0.95f,0.10f,0.50f}, {0.85f,0.90f,1.00f}, {0.22f,0.08f,0.65f}},
+            /* 3  yellow:      bright scarlet,     golden white,     teal-blue */
+            {{0.95f,0.15f,0.05f}, {1.00f,0.96f,0.75f}, {0.05f,0.55f,0.72f}},
+            /* 4  blue:        deep maroon,        cool silver,      vivid cyan */
+            {{0.55f,0.02f,0.08f}, {0.85f,0.88f,0.92f}, {0.10f,0.72f,0.95f}},
+            /* 5  magenta:     coral/salmon,        pink-white,       dark navy */
+            {{1.00f,0.45f,0.30f}, {1.00f,0.88f,0.92f}, {0.08f,0.10f,0.50f}},
+            /* 6  cyan:        wine/burgundy,      mint-white,       bright azure */
+            {{0.62f,0.05f,0.22f}, {0.85f,1.00f,0.95f}, {0.15f,0.48f,0.95f}},
+            /* 7  white:       pale rose,          brilliant white,  pale periwinkle */
+            {{0.95f,0.68f,0.68f}, {1.00f,1.00f,1.00f}, {0.68f,0.68f,0.95f}},
+            /* 8  bright black: muted rust,        ash white,        slate blue */
+            {{0.50f,0.18f,0.10f}, {0.75f,0.75f,0.78f}, {0.25f,0.28f,0.52f}},
+            /* 9  bright red:  NEON orange,        hot white,        laser blue */
+            {{1.00f,0.50f,0.00f}, {1.00f,1.00f,0.90f}, {0.00f,0.35f,1.00f}},
+            /* 10 bright green: vivid fuchsia,     lilac white,      purple */
+            {{1.00f,0.20f,0.65f}, {0.92f,0.88f,1.00f}, {0.35f,0.12f,0.80f}},
+            /* 11 bright yellow: fire engine red,  lemon white,      ocean teal */
+            {{1.00f,0.22f,0.08f}, {1.00f,1.00f,0.80f}, {0.00f,0.62f,0.78f}},
+            /* 12 bright blue: oxblood,            ice blue white,   neon cyan */
+            {{0.65f,0.05f,0.12f}, {0.88f,0.95f,1.00f}, {0.00f,0.85f,1.00f}},
+            /* 13 bright mag:  peach/apricot,      blush white,      midnight blue */
+            {{1.00f,0.60f,0.45f}, {1.00f,0.93f,0.95f}, {0.05f,0.08f,0.55f}},
+            /* 14 bright cyan: raspberry,          seafoam white,    sky blue */
+            {{0.78f,0.08f,0.35f}, {0.88f,1.00f,0.98f}, {0.20f,0.60f,1.00f}},
+            /* 15 bright white: lightest blush,    pure white,       lightest lavender */
+            {{1.00f,0.85f,0.85f}, {1.00f,1.00f,1.00f}, {0.85f,0.85f,1.00f}},
+        };
+        for (int c = 0; c < 16; c++) {
+            const float *cr = afro[c][0];
+            const float *cw = afro[c][1];
+            const float *cb = afro[c][2];
+            float cy[10][3];
+            /* 0: dark red, 1: full red */
+            cy[0][0]=cr[0]*0.65f; cy[0][1]=cr[1]*0.65f; cy[0][2]=cr[2]*0.65f;
+            cy[1][0]=cr[0];       cy[1][1]=cr[1];       cy[1][2]=cr[2];
+            /* 2: red→white blend, 3: full white */
+            cy[2][0]=(cr[0]+cw[0])*0.5f; cy[2][1]=(cr[1]+cw[1])*0.5f; cy[2][2]=(cr[2]+cw[2])*0.5f;
+            cy[3][0]=cw[0];              cy[3][1]=cw[1];              cy[3][2]=cw[2];
+            /* 4: white→blue blend, 5: full blue */
+            cy[4][0]=(cw[0]+cb[0])*0.5f; cy[4][1]=(cw[1]+cb[1])*0.5f; cy[4][2]=(cw[2]+cb[2])*0.5f;
+            cy[5][0]=cb[0];              cy[5][1]=cb[1];              cy[5][2]=cb[2];
+            /* 6: dark blue, 7: full blue again */
+            cy[6][0]=cb[0]*0.65f; cy[6][1]=cb[1]*0.65f; cy[6][2]=cb[2]*0.65f;
+            cy[7][0]=cb[0];       cy[7][1]=cb[1];       cy[7][2]=cb[2];
+            /* 8: blue→white, 9: white→red */
+            cy[8][0]=(cb[0]+cw[0])*0.5f; cy[8][1]=(cb[1]+cw[1])*0.5f; cy[8][2]=(cb[2]+cw[2])*0.5f;
+            cy[9][0]=(cw[0]+cr[0])*0.5f; cy[9][1]=(cw[1]+cr[1])*0.5f; cy[9][2]=(cw[2]+cr[2])*0.5f;
+            for (int s = 0; s < GRAD_STOPS; s++) {
+                theme_ramps[c].stops[s].r = cy[s][0];
+                theme_ramps[c].stops[s].g = cy[s][1];
+                theme_ramps[c].stops[s].b = cy[s][2];
+            }
+        }
     }
 
     /* Set flat palette to first stop (for box-drawing, UI elements, bg fills) */
@@ -560,9 +628,10 @@ static int ttf_loaded[MAX_TTF_FONTS] = {0};
 #define VKM_ITEM_CONSOLE 3
 #define VKM_ITEM_PATHS   4   /* Paths & Loops — opens VKW window */
 #define VKM_ITEM_RECENT  5   /* Recent > last 10 goto destinations */
-#define VKM_ITEM_SEP2    6
-#define VKM_ITEM_CLOSE   7
-#define VKM_ROOT_COUNT   8
+#define VKM_ITEM_EXTRAS  6   /* Extras > (Hide/Show MegaMUD) */
+#define VKM_ITEM_SEP2    7
+#define VKM_ITEM_CLOSE   8
+#define VKM_ROOT_COUNT   9
 
 /* Submenu types */
 #define VKM_SUB_NONE     0
@@ -584,7 +653,8 @@ static int ttf_loaded[MAX_TTF_FONTS] = {0};
 #define VKM_WID_CONVO    1
 #define VKM_WID_STATUSBAR 2
 #define VKM_WID_EXPBAR   3
-#define VKM_WID_COUNT    4
+#define VKM_WID_PSTATS   4   /* Player Statistics */
+#define VKM_WID_COUNT    5
 
 /* FX submenu items */
 #define VKM_FX_LIQUID    0
@@ -592,7 +662,28 @@ static int ttf_loaded[MAX_TTF_FONTS] = {0};
 #define VKM_FX_FBM       2
 #define VKM_FX_SOBEL     3
 #define VKM_FX_SCANLINES 4
-#define VKM_FX_COUNT     5
+#define VKM_FX_WOBBLE    5
+#define VKM_FX_COUNT     6   /* wobble only shown when vk_experimental=True */
+
+/* Extras submenu items */
+#define VKM_SUB_EXTRAS   7
+#define VKM_EXT_HIDEMM   0   /* Hide/Show MegaMUD */
+#define VKM_EXT_SOUND    1   /* Sound Settings */
+#define VKM_EXT_COUNT    2
+
+static int megamud_hidden = 0; /* 1 = MegaMUD windows hidden, VK-only mode */
+static int snd_wnd_idx = -1;  /* Sound Settings window index (forward decl) */
+static void snd_open_window(void);
+static int  pst_visible = 0;
+static float pst_x = 100.0f, pst_y = 60.0f;
+static float pst_w = 340.0f, pst_h = 390.0f;
+static int  pst_dragging = 0;
+static float pst_drag_ox, pst_drag_oy;
+static void pst_draw(int vp_w, int vp_h);
+static void pst_toggle(void);
+static void pst_feed(const char *data, int len);
+static void pst_reset_exp(void);
+static void pst_reset_combat(void);
 
 static int vkm_open = 0;          /* VKM_CLOSED or VKM_ROOT */
 static int vkm_x = 0, vkm_y = 0; /* root menu top-left in pixels */
@@ -611,16 +702,25 @@ static int  vkm_goto_count = 0;
  * extent under Wine/XWayland with DPI scaling. All mouse coords must be
  * transformed from window-space to render-space. */
 static float mouse_scale_x = 1.0f, mouse_scale_y = 1.0f;
+static int mouse_off_x = 0, mouse_off_y = 0;  /* client area offset from window origin */
 static void mouse_update_scale(int surface_w, int surface_h) {
     if (!vkt_hwnd) return;
-    RECT rc;
+    RECT rc, wrc;
     GetClientRect(vkt_hwnd, &rc);
+    GetWindowRect(vkt_hwnd, &wrc);
+    /* Client area offset within the window (title bar, borders under Wine) */
+    POINT pt = {0, 0};
+    ClientToScreen(vkt_hwnd, &pt);
+    mouse_off_x = pt.x - wrc.left;
+    mouse_off_y = pt.y - wrc.top;
     int cw = rc.right - rc.left;
     int ch = rc.bottom - rc.top;
     if (cw > 0 && ch > 0) {
         mouse_scale_x = (float)surface_w / (float)cw;
         mouse_scale_y = (float)surface_h / (float)ch;
     }
+    if (api) api->log("[vk_terminal] mouse_scale=%.3f,%.3f off=%d,%d client=%dx%d surface=%dx%d\n",
+                      mouse_scale_x, mouse_scale_y, mouse_off_x, mouse_off_y, cw, ch, surface_w, surface_h);
 }
 static inline int mouse_tx(int wx) { return (int)(wx * mouse_scale_x); }
 static inline int mouse_ty(int wy) { return (int)(wy * mouse_scale_y); }
@@ -723,6 +823,197 @@ static int vkw_backscroll_idx = -1;
 /* Forward decl for convo input handler */
 static void convo_on_input(const char *text);
 
+/* ---- Experimental VK plugins ---- */
+static int vk_experimental = 0;
+
+/* ---- Compiz-style mass-spring wobble grid ---- */
+static int fx_wobble_mode = 0;
+
+/* Compiz wobbly windows: 8x8 grid, underdamped springs (bouncy!),
+ * 4 substeps per frame for stability at high stiffness.
+ * Anchor spring pulls each point to its rest position.
+ * Edge springs connect cardinal + diagonal neighbors for shear resistance.
+ * Damping ratio ζ ≈ 0.3 → ~2-3 visible bounces before settling. */
+#define WOB_GRID_W  8
+#define WOB_GRID_H  8
+#define WOB_GRID_N  (WOB_GRID_W * WOB_GRID_H)
+#define WOB_K       600.0f  /* anchor spring stiffness — high for snappy response */
+#define WOB_K_EDGE  400.0f  /* neighbor spring stiffness */
+#define WOB_K_DIAG  200.0f  /* diagonal spring stiffness (shear resistance) */
+#define WOB_DAMP    8.0f    /* velocity damping — low for bouncy underdamped feel */
+#define WOB_DT      0.004f  /* substep timestep (4 substeps × 0.004 ≈ 0.016s/frame) */
+#define WOB_SUBSTEPS 4
+
+typedef struct {
+    float px, py;   /* current position */
+    float vx, vy;   /* velocity */
+    float rx, ry;   /* rest position */
+    int pinned;     /* 1 = follows mouse exactly */
+} wob_point_t;
+
+typedef struct {
+    wob_point_t pts[WOB_GRID_N];
+    int active;
+    int grab_row;
+    float prev_x, prev_y;
+} wob_grid_t;
+
+static wob_grid_t wob_grids[VKW_MAX_WINDOWS];
+static wob_grid_t wob_grid_rt;
+
+static int wob_warp_active = 0;
+static wob_grid_t *wob_warp_grid = NULL;
+static float wob_warp_x, wob_warp_y, wob_warp_w, wob_warp_h;
+
+static void wob_init_grid(wob_grid_t *g, float x, float y, float w, float h)
+{
+    for (int r = 0; r < WOB_GRID_H; r++) {
+        for (int c = 0; c < WOB_GRID_W; c++) {
+            wob_point_t *p = &g->pts[r * WOB_GRID_W + c];
+            p->rx = x + w * (float)c / (float)(WOB_GRID_W - 1);
+            p->ry = y + h * (float)r / (float)(WOB_GRID_H - 1);
+            p->px = p->rx; p->py = p->ry;
+            p->vx = p->vy = 0;
+            p->pinned = 0;
+        }
+    }
+    g->active = 0;
+    g->grab_row = 0;
+    g->prev_x = x; g->prev_y = y;
+}
+
+static void wob_move_rest(wob_grid_t *g, float x, float y, float w, float h)
+{
+    for (int r = 0; r < WOB_GRID_H; r++)
+        for (int c = 0; c < WOB_GRID_W; c++) {
+            wob_point_t *p = &g->pts[r * WOB_GRID_W + c];
+            p->rx = x + w * (float)c / (float)(WOB_GRID_W - 1);
+            p->ry = y + h * (float)r / (float)(WOB_GRID_H - 1);
+        }
+}
+
+static void wob_pin_top(wob_grid_t *g)
+{
+    for (int c = 0; c < WOB_GRID_W; c++) {
+        wob_point_t *p = &g->pts[c];
+        p->pinned = 1;
+        p->px = p->rx; p->py = p->ry;
+        p->vx = p->vy = 0;
+    }
+}
+
+static void wob_unpin(wob_grid_t *g)
+{
+    for (int i = 0; i < WOB_GRID_N; i++)
+        g->pts[i].pinned = 0;
+}
+
+/* Add spring force between point i and neighbor at (nr,nc) */
+static void wob_spring(wob_grid_t *g, float forces[][2], int i, int nr, int nc, float k)
+{
+    if (nr < 0 || nr >= WOB_GRID_H || nc < 0 || nc >= WOB_GRID_W) return;
+    int j = nr * WOB_GRID_W + nc;
+    wob_point_t *a = &g->pts[i], *b = &g->pts[j];
+    /* Force = k * ((actual_offset) - (rest_offset)) */
+    float dx = (b->px - a->px) - (b->rx - a->rx);
+    float dy = (b->py - a->py) - (b->ry - a->ry);
+    forces[i][0] += k * dx;
+    forces[i][1] += k * dy;
+}
+
+static void wob_simulate(wob_grid_t *g)
+{
+    if (!g->active) return;
+
+    for (int sub = 0; sub < WOB_SUBSTEPS; sub++) {
+        float forces[WOB_GRID_N][2];
+        for (int i = 0; i < WOB_GRID_N; i++)
+            forces[i][0] = forces[i][1] = 0;
+
+        for (int r = 0; r < WOB_GRID_H; r++) {
+            for (int c = 0; c < WOB_GRID_W; c++) {
+                int i = r * WOB_GRID_W + c;
+                wob_point_t *p = &g->pts[i];
+                if (p->pinned) continue;
+
+                /* Anchor spring — pulls toward rest position */
+                forces[i][0] += WOB_K * (p->rx - p->px);
+                forces[i][1] += WOB_K * (p->ry - p->py);
+
+                /* Cardinal neighbor springs (structural) */
+                wob_spring(g, forces, i, r-1, c, WOB_K_EDGE);
+                wob_spring(g, forces, i, r+1, c, WOB_K_EDGE);
+                wob_spring(g, forces, i, r, c-1, WOB_K_EDGE);
+                wob_spring(g, forces, i, r, c+1, WOB_K_EDGE);
+
+                /* Diagonal springs (shear resistance — prevents parallelogram) */
+                wob_spring(g, forces, i, r-1, c-1, WOB_K_DIAG);
+                wob_spring(g, forces, i, r-1, c+1, WOB_K_DIAG);
+                wob_spring(g, forces, i, r+1, c-1, WOB_K_DIAG);
+                wob_spring(g, forces, i, r+1, c+1, WOB_K_DIAG);
+
+                /* Velocity damping */
+                forces[i][0] -= WOB_DAMP * p->vx;
+                forces[i][1] -= WOB_DAMP * p->vy;
+            }
+        }
+
+        /* Semi-implicit Euler (velocity first, then position — more stable) */
+        for (int i = 0; i < WOB_GRID_N; i++) {
+            wob_point_t *p = &g->pts[i];
+            if (p->pinned) { p->px = p->rx; p->py = p->ry; continue; }
+            p->vx += forces[i][0] * WOB_DT;
+            p->vy += forces[i][1] * WOB_DT;
+            p->px += p->vx * WOB_DT;
+            p->py += p->vy * WOB_DT;
+        }
+    }
+
+    /* Check if settled (all velocities and displacements small) */
+    int settled = 1;
+    for (int i = 0; i < WOB_GRID_N; i++) {
+        wob_point_t *p = &g->pts[i];
+        float dx = p->px - p->rx, dy = p->py - p->ry;
+        if (p->vx > 0.5f || p->vx < -0.5f || p->vy > 0.5f || p->vy < -0.5f ||
+            dx > 0.5f || dx < -0.5f || dy > 0.5f || dy < -0.5f)
+            settled = 0;
+    }
+    if (settled) {
+        for (int i = 0; i < WOB_GRID_N; i++) {
+            g->pts[i].px = g->pts[i].rx;
+            g->pts[i].py = g->pts[i].ry;
+            g->pts[i].vx = g->pts[i].vy = 0;
+        }
+        g->active = 0;
+    }
+}
+
+static void wob_transform(float in_x, float in_y, float *out_x, float *out_y)
+{
+    if (!wob_warp_grid || wob_warp_w < 1 || wob_warp_h < 1) {
+        *out_x = in_x; *out_y = in_y; return;
+    }
+    float u = (in_x - wob_warp_x) / wob_warp_w;
+    float v = (in_y - wob_warp_y) / wob_warp_h;
+    if (u < 0) u = 0; if (u > 1) u = 1;
+    if (v < 0) v = 0; if (v > 1) v = 1;
+
+    float gx = u * (WOB_GRID_W - 1);
+    float gy = v * (WOB_GRID_H - 1);
+    int cx = (int)gx; if (cx >= WOB_GRID_W - 1) cx = WOB_GRID_W - 2;
+    int cy = (int)gy; if (cy >= WOB_GRID_H - 1) cy = WOB_GRID_H - 2;
+    float fx = gx - cx;
+    float fy = gy - cy;
+
+    wob_point_t *tl = &wob_warp_grid->pts[cy * WOB_GRID_W + cx];
+    wob_point_t *tr = &wob_warp_grid->pts[cy * WOB_GRID_W + cx + 1];
+    wob_point_t *bl = &wob_warp_grid->pts[(cy+1) * WOB_GRID_W + cx];
+    wob_point_t *br = &wob_warp_grid->pts[(cy+1) * WOB_GRID_W + cx + 1];
+
+    *out_x = tl->px*(1-fx)*(1-fy) + tr->px*fx*(1-fy) + bl->px*(1-fx)*fy + br->px*fx*fy;
+    *out_y = tl->py*(1-fx)*(1-fy) + tr->py*fx*(1-fy) + bl->py*(1-fx)*fy + br->py*fx*fy;
+}
+
 /* Floating window right-click context menu */
 #define VKW_CTX_FONT_UP    0
 #define VKW_CTX_FONT_DN    1
@@ -823,6 +1114,9 @@ static int vkw_create(const char *title, int x, int y, int w, int h, int has_inp
     win->opacity = 0.96f;
     win->font_scale = 1.0f;
     win->has_input = has_input;
+
+    /* Initialize wobble grid */
+    wob_init_grid(&wob_grids[idx], (float)x, (float)y, (float)w, (float)h);
 
     /* Add to z-order (top) */
     vkw_order[vkw_count] = idx;
@@ -1076,11 +1370,41 @@ static void vkw_draw_one(vkw_window_t *w, int is_focused, int vp_w, int vp_h)
 
 static void vkw_draw_all(int vp_w, int vp_h)
 {
+    /* Simulate all active wobble grids */
+    if (fx_wobble_mode) {
+        for (int i = 0; i < VKW_MAX_WINDOWS; i++) {
+            if (!vkw_windows[i].active) continue;
+            wob_grid_t *g = &wob_grids[i];
+            /* Update rest positions to match current window rect */
+            wob_move_rest(g, vkw_windows[i].x, vkw_windows[i].y,
+                          vkw_windows[i].w, vkw_windows[i].h);
+            /* Pin top row while dragging */
+            if (vkw_windows[i].dragging) {
+                wob_pin_top(g);
+                g->active = 1;
+            } else {
+                wob_unpin(g);
+            }
+            wob_simulate(g);
+        }
+    }
+
     /* Draw back-to-front in z-order */
     for (int i = 0; i < vkw_count; i++) {
         int idx = vkw_order[i];
         if (vkw_windows[idx].active) {
+            /* Enable wobble warp for this window's draw calls */
+            if (fx_wobble_mode && wob_grids[idx].active) {
+                wob_warp_active = 1;
+                wob_warp_grid = &wob_grids[idx];
+                wob_warp_x = vkw_windows[idx].x;
+                wob_warp_y = vkw_windows[idx].y;
+                wob_warp_w = vkw_windows[idx].w;
+                wob_warp_h = vkw_windows[idx].h;
+            }
             vkw_draw_one(&vkw_windows[idx], (idx == vkw_focus), vp_w, vp_h);
+            wob_warp_active = 0;
+            wob_warp_grid = NULL;
         }
     }
 
@@ -1241,8 +1565,12 @@ static int vkw_mouse_move(int mx, int my)
         vkw_window_t *w = &vkw_windows[i];
         if (!w->active) continue;
         if (w->dragging) {
-            w->x = (float)mx - w->drag_ox;
-            w->y = (float)my - w->drag_oy;
+            float new_x = (float)mx - w->drag_ox;
+            float new_y = (float)my - w->drag_oy;
+            w->x = new_x;
+            w->y = new_y;
+            /* Wobble: grid is updated via wob_move_rest in draw */
+            if (fx_wobble_mode) wob_grids[i].active = 1;
             return 1;
         }
         if (w->resizing) {
@@ -2572,6 +2900,7 @@ static void vkt_on_data(const char *data, int len)
     ap_feed(&ansi_term, (const uint8_t *)data, len);
     LeaveCriticalSection(&ansi_lock);
     bs_append(data, len);
+    pst_feed(data, len);
 }
 
 /* Read buffer for renderer — snapshot under lock */
@@ -2618,6 +2947,31 @@ static void push_quad_free(float x0, float y0, float x1, float y1,
     quad_count++;
 }
 
+/* Helper: pixel to NDC with wobble warp */
+static inline float wob_px2ndc_x(float px, int vp_w) { return (px / (float)vp_w) * 2.0f - 1.0f; }
+static inline float wob_px2ndc_y(float py, int vp_h) { return (py / (float)vp_h) * 2.0f - 1.0f; }
+
+/* Push a warped quad — each corner independently transformed through wobble grid */
+static void push_quad_wobbled(float x0, float y0, float x1, float y1,
+                               float u0, float v0, float u1, float v1,
+                               float r, float g, float b, float a,
+                               int vp_w, int vp_h)
+{
+    float wx0, wy0, wx1, wy1, wx2, wy2, wx3, wy3;
+    wob_transform(x0, y0, &wx0, &wy0); /* top-left */
+    wob_transform(x1, y0, &wx1, &wy1); /* top-right */
+    wob_transform(x1, y1, &wx2, &wy2); /* bottom-right */
+    wob_transform(x0, y1, &wx3, &wy3); /* bottom-left */
+
+    if (quad_count >= MAX_QUADS) return;
+    int vi = quad_count * 4;
+    vk_vdata[vi+0] = (vertex_t){ wob_px2ndc_x(wx0,vp_w), wob_px2ndc_y(wy0,vp_h), u0, v0, r, g, b, a };
+    vk_vdata[vi+1] = (vertex_t){ wob_px2ndc_x(wx1,vp_w), wob_px2ndc_y(wy1,vp_h), u1, v0, r, g, b, a };
+    vk_vdata[vi+2] = (vertex_t){ wob_px2ndc_x(wx2,vp_w), wob_px2ndc_y(wy2,vp_h), u1, v1, r, g, b, a };
+    vk_vdata[vi+3] = (vertex_t){ wob_px2ndc_x(wx3,vp_w), wob_px2ndc_y(wy3,vp_h), u0, v1, r, g, b, a };
+    quad_count++;
+}
+
 /* Push a solid filled rect (uses glyph 219 █ for solid pixels) */
 static void push_solid(float x0, float y0, float x1, float y1,
                        float r, float g, float b, float a,
@@ -2627,6 +2981,10 @@ static void push_solid(float x0, float y0, float x1, float y1,
     float hp_u = 0.5f / (float)cur_atlas_w, hp_v = 0.5f / (float)cur_atlas_h;
     float su0 = (219 % 16) * tex_cw + hp_u, sv0 = (219 / 16) * tex_ch + hp_v;
     float su1 = su0 + tex_cw - 2*hp_u, sv1 = sv0 + tex_ch - 2*hp_v;
+    if (wob_warp_active) {
+        push_quad_wobbled(x0, y0, x1, y1, su0, sv0, su1, sv1, r, g, b, a, vp_w, vp_h);
+        return;
+    }
     #define S2X(px) (((float)(px) / (float)vp_w) * 2.0f - 1.0f)
     #define S2Y(py) (((float)(py) / (float)vp_h) * 2.0f - 1.0f)
     push_quad(S2X(x0), S2Y(y0), S2X(x1), S2Y(y1),
@@ -2648,8 +3006,14 @@ static void push_text(int px, int py, const char *str,
         unsigned char ch = (unsigned char)str[i];
         if (ch <= 32) { px += char_w; continue; }
         float u0 = (ch % 16) * tex_cw + hp_u, v0 = (ch / 16) * tex_ch + hp_v;
-        push_quad(T2X(px), T2Y(py), T2X(px + char_w), T2Y(py + char_h),
-                  u0, v0, u0 + tex_cw - 2*hp_u, v0 + tex_ch - 2*hp_v, r, g, b, 1.0f);
+        if (wob_warp_active) {
+            push_quad_wobbled((float)px, (float)py, (float)(px+char_w), (float)(py+char_h),
+                              u0, v0, u0 + tex_cw - 2*hp_u, v0 + tex_ch - 2*hp_v,
+                              r, g, b, 1.0f, vp_w, vp_h);
+        } else {
+            push_quad(T2X(px), T2Y(py), T2X(px + char_w), T2Y(py + char_h),
+                      u0, v0, u0 + tex_cw - 2*hp_u, v0 + tex_ch - 2*hp_v, r, g, b, 1.0f);
+        }
         px += char_w;
     }
     #undef T2X
@@ -2665,6 +3029,10 @@ static void push_solid_ui(float x0, float y0, float x1, float y1,
     float hp_u = 0.5f / (float)ui_atlas_w, hp_v = 0.5f / (float)ui_atlas_h;
     float su0 = (219 % 16) * tex_cw + hp_u, sv0 = (219 / 16) * tex_ch + hp_v;
     float su1 = su0 + tex_cw - 2*hp_u, sv1 = sv0 + tex_ch - 2*hp_v;
+    if (wob_warp_active) {
+        push_quad_wobbled(x0, y0, x1, y1, su0, sv0, su1, sv1, r, g, b, a, vp_w, vp_h);
+        return;
+    }
     #define US2X(px) (((float)(px) / (float)vp_w) * 2.0f - 1.0f)
     #define US2Y(py) (((float)(py) / (float)vp_h) * 2.0f - 1.0f)
     push_quad(US2X(x0), US2Y(y0), US2X(x1), US2Y(y1),
@@ -2685,8 +3053,14 @@ static void push_text_ui(int px, int py, const char *str,
         unsigned char ch = (unsigned char)str[i];
         if (ch <= 32) { px += char_w; continue; }
         float u0 = (ch % 16) * tex_cw + hp_u, v0 = (ch / 16) * tex_ch + hp_v;
-        push_quad(UT2X(px), UT2Y(py), UT2X(px + char_w), UT2Y(py + char_h),
-                  u0, v0, u0 + tex_cw - 2*hp_u, v0 + tex_ch - 2*hp_v, r, g, b, 1.0f);
+        if (wob_warp_active) {
+            push_quad_wobbled((float)px, (float)py, (float)(px+char_w), (float)(py+char_h),
+                              u0, v0, u0 + tex_cw - 2*hp_u, v0 + tex_ch - 2*hp_v,
+                              r, g, b, 1.0f, vp_w, vp_h);
+        } else {
+            push_quad(UT2X(px), UT2Y(py), UT2X(px + char_w), UT2Y(py + char_h),
+                      u0, v0, u0 + tex_cw - 2*hp_u, v0 + tex_ch - 2*hp_v, r, g, b, 1.0f);
+        }
         px += char_w;
     }
     #undef UT2X
@@ -2721,7 +3095,8 @@ static int vkm_sub_count(void)
     if (vkm_sub == VKM_SUB_RECENT) return vkm_goto_count > 0 ? vkm_goto_count : 1;
     if (vkm_sub == VKM_SUB_THEME) return NUM_THEMES;
     if (vkm_sub == VKM_SUB_FONT) return NUM_TTF_FONTS + 1; /* +1 for bitmap */
-    if (vkm_sub == VKM_SUB_FX) return VKM_FX_COUNT;
+    if (vkm_sub == VKM_SUB_FX) return vk_experimental ? VKM_FX_COUNT : (VKM_FX_COUNT - 1);
+    if (vkm_sub == VKM_SUB_EXTRAS) return VKM_EXT_COUNT;
     return 0;
 }
 
@@ -2743,12 +3118,8 @@ static int vkm_hit_root(int mx, int my)
 }
 
 /* Hit test submenu: returns item index or -1 */
-static int vkm_hit_sub(int mx, int my)
+static void vkm_get_sub_rect(int *out_sx, int *out_sy)
 {
-    if (vkm_sub == VKM_SUB_NONE) return -1;
-    int sx = vkm_x + VKM_ROOT_W;
-    int sy_item;
-    /* submenu y = aligned to the parent item */
     int parent;
     if (vkm_sub == VKM_SUB_VISUAL || vkm_sub == VKM_SUB_THEME ||
         vkm_sub == VKM_SUB_FONT || vkm_sub == VKM_SUB_FX)
@@ -2757,16 +3128,33 @@ static int vkm_hit_sub(int mx, int my)
         parent = VKM_ITEM_WIDGETS;
     else if (vkm_sub == VKM_SUB_RECENT)
         parent = VKM_ITEM_RECENT;
+    else if (vkm_sub == VKM_SUB_EXTRAS)
+        parent = VKM_ITEM_EXTRAS;
     else
         parent = VKM_ITEM_VISUAL;
     int parent_y, parent_h;
     vkm_get_root_item_rect(parent, &parent_y, &parent_h);
+    int sx = vkm_x + VKM_ROOT_W - 1;
     int sy = parent_y;
+    int sh = vkm_sub_height();
+    /* Clamp to screen — must match draw code exactly */
+    int vp_w = (int)vk_sc_extent.width, vp_h = (int)vk_sc_extent.height;
+    if (sy + sh > vp_h) sy = vp_h - sh;
+    if (sx + VKM_SUB_W > vp_w) sx = vkm_x - VKM_SUB_W + 1;
+    *out_sx = sx;
+    *out_sy = sy;
+}
+
+static int vkm_hit_sub(int mx, int my)
+{
+    if (vkm_sub == VKM_SUB_NONE) return -1;
+    int sx, sy;
+    vkm_get_sub_rect(&sx, &sy);
 
     if (mx < sx || mx >= sx + VKM_SUB_W) return -1;
     int count = vkm_sub_count();
     for (int i = 0; i < count; i++) {
-        sy_item = sy + VKM_PAD + i * VKM_ITEM_H;
+        int sy_item = sy + VKM_PAD + i * VKM_ITEM_H;
         if (my >= sy_item && my < sy_item + VKM_ITEM_H) return i;
     }
     return -1;
@@ -2908,7 +3296,7 @@ static void vrt_draw(int vp_w, int vp_h)
     float sz = vrt_size;
     float cx = vrt_x + sz / 2.0f;
     float cy = vrt_y + sz / 2.0f;
-    float R = sz / 2.0f;  /* outer radius */
+    float R = sz / 2.0f;
     DWORD now = GetTickCount();
     double now_d = (double)GetTickCount64();
 
@@ -3920,6 +4308,7 @@ static void vkm_draw(int vp_w, int vp_h)
     const char *root_labels[VKM_ROOT_COUNT] = {
         "Visual  \x10", "Widgets  \x10", "",
         "Console", "Paths & Loops", "Recent  \x10",
+        "Extras  \x10",
         "", "Close  (F11)"
     };
 
@@ -3944,7 +4333,8 @@ static void vkm_draw(int vp_w, int vp_h)
         float tr = t->text[0], tg = t->text[1], tb = t->text[2];
         if ((i == VKM_ITEM_VISUAL && (vkm_sub == VKM_SUB_VISUAL || vkm_sub == VKM_SUB_THEME || vkm_sub == VKM_SUB_FONT || vkm_sub == VKM_SUB_FX)) ||
             (i == VKM_ITEM_WIDGETS && vkm_sub == VKM_SUB_WIDGETS) ||
-            (i == VKM_ITEM_RECENT && vkm_sub == VKM_SUB_RECENT)) {
+            (i == VKM_ITEM_RECENT && vkm_sub == VKM_SUB_RECENT) ||
+            (i == VKM_ITEM_EXTRAS && vkm_sub == VKM_SUB_EXTRAS)) {
             tr = t->accent[0]; tg = t->accent[1]; tb = t->accent[2];
         }
         push_text(vkm_x + VKM_PAD, iy + (ih - ch) / 2,
@@ -3953,28 +4343,10 @@ static void vkm_draw(int vp_w, int vp_h)
 
     /* Submenu drawing */
     if (vkm_sub != VKM_SUB_NONE) {
-        /* Determine parent root item for positioning */
-        int draw_parent;
-        if (vkm_sub == VKM_SUB_VISUAL || vkm_sub == VKM_SUB_THEME ||
-            vkm_sub == VKM_SUB_FONT || vkm_sub == VKM_SUB_FX)
-            draw_parent = VKM_ITEM_VISUAL;
-        else if (vkm_sub == VKM_SUB_WIDGETS)
-            draw_parent = VKM_ITEM_WIDGETS;
-        else if (vkm_sub == VKM_SUB_RECENT)
-            draw_parent = VKM_ITEM_RECENT;
-        else
-            draw_parent = VKM_ITEM_VISUAL;
-
-        int parent_y, parent_h;
-        vkm_get_root_item_rect(draw_parent, &parent_y, &parent_h);
-
-        int sx = vkm_x + VKM_ROOT_W - 1;
-        int sy = parent_y;
+        int sx, sy;
+        vkm_get_sub_rect(&sx, &sy);
         int count = vkm_sub_count();
         int sh = vkm_sub_height();
-
-        if (sy + sh > vp_h) sy = vp_h - sh;
-        if (sx + VKM_SUB_W > vp_w) sx = vkm_x - VKM_SUB_W + 1;
 
         vkm_draw_panel(sx, sy, VKM_SUB_W, sh, t, vp_w, vp_h);
 
@@ -4009,6 +4381,9 @@ static void vkm_draw(int vp_w, int vp_h)
                 } else if (i == VKM_WID_EXPBAR) {
                     label = vxb_visible ? "\x04 Exp Bar" : "  Exp Bar";
                     is_active = vxb_visible;
+                } else if (i == VKM_WID_PSTATS) {
+                    label = pst_visible ? "\x04 Player Stats" : "  Player Stats";
+                    is_active = pst_visible;
                 }
             } else if (vkm_sub == VKM_SUB_RECENT) {
                 if (vkm_goto_count == 0) {
@@ -4033,6 +4408,15 @@ static void vkm_draw(int vp_w, int vp_h)
                 else if (i == VKM_FX_FBM) { label = "FBM Currents"; is_active = fx_fbm_mode; }
                 else if (i == VKM_FX_SOBEL) { label = "Sobel/Sharp"; is_active = fx_sobel_mode; }
                 else if (i == VKM_FX_SCANLINES) { label = "CRT Scanlines"; is_active = fx_scanline_mode; }
+                else if (i == VKM_FX_WOBBLE && vk_experimental) { label = "Wobbly Widgets \x1b[33m[EXP]"; is_active = fx_wobble_mode; }
+            } else if (vkm_sub == VKM_SUB_EXTRAS) {
+                if (i == VKM_EXT_HIDEMM) {
+                    label = megamud_hidden ? "Show MegaMUD" : "Hide MegaMUD";
+                    is_active = megamud_hidden;
+                } else if (i == VKM_EXT_SOUND) {
+                    label = "Sound Settings";
+                    is_active = (snd_wnd_idx >= 0 && vkw_windows[snd_wnd_idx].active);
+                }
             }
 
             float tr, tg, tb;
@@ -4862,14 +5246,35 @@ static void vkt_build_vertices(void)
     /* Draw floating windows */
     vkw_draw_all(vp_w, vp_h);
 
-    /* Draw round timer widget */
+    /* Draw round timer widget (with wobble) */
+    if (fx_wobble_mode && vrt_visible) {
+        wob_move_rest(&wob_grid_rt, vrt_x, vrt_y, vrt_size, vrt_size);
+        if (vrt_dragging) {
+            wob_pin_top(&wob_grid_rt);
+            wob_grid_rt.active = 1;
+        } else {
+            wob_unpin(&wob_grid_rt);
+        }
+        wob_simulate(&wob_grid_rt);
+        if (wob_grid_rt.active) {
+            wob_warp_active = 1;
+            wob_warp_grid = &wob_grid_rt;
+            wob_warp_x = vrt_x;
+            wob_warp_y = vrt_y;
+            wob_warp_w = vrt_size;
+            wob_warp_h = vrt_size;
+        }
+    }
     vrt_draw(vp_w, vp_h);
+    wob_warp_active = 0;
+    wob_warp_grid = NULL;
 
     /* Draw UI-font elements (status bar + P&L window) — tracked separately */
     pl_quad_start = quad_count;
     vsb_draw(vp_w, vp_h);
     vxb_draw(vp_w, vp_h);
     pl_draw(vp_w, vp_h);
+    pst_draw(vp_w, vp_h);
     pl_quad_end = quad_count;
 
     /* Draw context menu on top of EVERYTHING (last = topmost) */
@@ -6414,9 +6819,38 @@ static void vkt_render_frame(void)
 static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
     switch (msg) {
+    case WM_KEYUP:
+        /* F9 PTT release — call voice.dll directly */
+        if (wParam == VK_F9) {
+            typedef int (*voice_wndproc_fn)(HWND, UINT, WPARAM, LPARAM);
+            static voice_wndproc_fn vwp = NULL;
+            static int vwp_resolved = 0;
+            if (!vwp_resolved) {
+                HMODULE vm = GetModuleHandleA("voice.dll");
+                if (vm) vwp = (voice_wndproc_fn)GetProcAddress(vm, "voice_on_wndproc");
+                vwp_resolved = 1;
+            }
+            if (vwp) vwp(hwnd, WM_KEYUP, wParam, lParam);
+        }
+        return 0;
+
     case WM_KEYDOWN: {
         int ctrl = GetKeyState(VK_CONTROL) & 0x8000;
         int alt  = GetKeyState(VK_MENU) & 0x8000;
+
+        /* F9 PTT press — call voice.dll directly */
+        if (wParam == VK_F9) {
+            typedef int (*voice_wndproc_fn)(HWND, UINT, WPARAM, LPARAM);
+            static voice_wndproc_fn vwp = NULL;
+            static int vwp_resolved = 0;
+            if (!vwp_resolved) {
+                HMODULE vm = GetModuleHandleA("voice.dll");
+                if (vm) vwp = (voice_wndproc_fn)GetProcAddress(vm, "voice_on_wndproc");
+                vwp_resolved = 1;
+            }
+            if (vwp) vwp(hwnd, WM_KEYDOWN, wParam, lParam);
+            return 0;
+        }
 
         if (wParam == VK_ESCAPE) {
             if (vkm_open) { vkm_open = 0; vkm_sub = VKM_SUB_NONE; return 0; }
@@ -6601,10 +7035,17 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         } else {
             pl_hover_item = -1;
         }
+        /* Player Stats drag */
+        if (pst_dragging) {
+            pst_x = (float)mx2 - pst_drag_ox;
+            pst_y = (float)my2 - pst_drag_oy;
+            return 0;
+        }
         /* Round timer drag */
         if (vrt_dragging) {
             vrt_x = (float)mx2 - vrt_drag_ox;
             vrt_y = (float)my2 - vrt_drag_oy;
+            if (fx_wobble_mode) wob_grid_rt.active = 1;
             return 0;
         }
         /* Floating window context menu hover */
@@ -6636,6 +7077,7 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 if (rh == VKM_ITEM_VISUAL) vkm_sub = VKM_SUB_VISUAL;
                 else if (rh == VKM_ITEM_WIDGETS) vkm_sub = VKM_SUB_WIDGETS;
                 else if (rh == VKM_ITEM_RECENT) vkm_sub = VKM_SUB_RECENT;
+                else if (rh == VKM_ITEM_EXTRAS) vkm_sub = VKM_SUB_EXTRAS;
                 else vkm_sub = VKM_SUB_NONE;
                 vkm_sub_hover = -1;
             }
@@ -6768,6 +7210,39 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             }
             return 0;
         }
+        /* Player Stats panel click */
+        if (pst_visible && mx >= (int)pst_x && mx < (int)(pst_x + pst_w) &&
+            my >= (int)pst_y && my < (int)(pst_y + pst_h)) {
+            int cw = VSB_CHAR_W, ch = VSB_CHAR_H;
+            int titlebar_h = ch + 10;
+            int ly = my - (int)pst_y;
+            /* Close button (top-right corner, 20x titlebar_h area) */
+            if (ly < titlebar_h && mx >= (int)(pst_x + pst_w - 24)) {
+                pst_visible = 0;
+                return 0;
+            }
+            /* Title bar drag */
+            if (ly < titlebar_h) {
+                pst_dragging = 1;
+                pst_drag_ox = (float)mx - pst_x;
+                pst_drag_oy = (float)my - pst_y;
+                return 0;
+            }
+            /* Section header clicks for reset */
+            int section_h = ch + 6;
+            int row_h = ch + 4;
+            int exp_hdr_y = titlebar_h + 2;
+            int acc_hdr_y = exp_hdr_y + section_h + row_h * 4 + 4;
+            if (ly >= exp_hdr_y && ly < exp_hdr_y + section_h) {
+                pst_reset_exp();
+                return 0;
+            }
+            if (ly >= acc_hdr_y && ly < acc_hdr_y + section_h) {
+                pst_reset_combat();
+                return 0;
+            }
+            return 0;
+        }
         /* Round timer drag start */
         if (vrt_hit_circle(mx, my)) {
             vrt_dragging = 1;
@@ -6804,6 +7279,7 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         int mx = mouse_tx((short)LOWORD(lParam));
         int my = mouse_ty((short)HIWORD(lParam));
         if (pl_dragging) { pl_dragging = 0; return 0; }
+        if (pst_dragging) { pst_dragging = 0; return 0; }
         if (vrt_dragging) { vrt_dragging = 0; return 0; }
         vkw_mouse_up(); /* end any drag/resize */
 
@@ -6833,6 +7309,8 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 vsb_visible = !vsb_visible;
             } else if (si == VKM_WID_EXPBAR) {
                 vxb_visible = !vxb_visible;
+            } else if (si == VKM_WID_PSTATS) {
+                pst_toggle();
             }
             vkm_open = 0;
             vkm_sub = VKM_SUB_NONE;
@@ -6885,6 +7363,33 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 fx_scanline_mode = !fx_scanline_mode;
                 if (api) api->log("[vk_terminal] CRT Scanlines: %s\n",
                                   fx_scanline_mode ? "ON" : "OFF");
+            } else if (si == VKM_FX_WOBBLE && vk_experimental) {
+                fx_wobble_mode = !fx_wobble_mode;
+                if (api) api->log("[vk_terminal] Wobbly Widgets: %s\n",
+                                  fx_wobble_mode ? "ON" : "OFF");
+            }
+            vkm_open = 0;
+            vkm_sub = VKM_SUB_NONE;
+            return 0;
+        }
+
+        /* Extras submenu click */
+        if (si >= 0 && vkm_sub == VKM_SUB_EXTRAS) {
+            if (si == VKM_EXT_HIDEMM) {
+                megamud_hidden = !megamud_hidden;
+                if (mmmain_hwnd) {
+                    if (megamud_hidden) {
+                        ShowWindow(mmmain_hwnd, SW_HIDE);
+                        SetForegroundWindow(vkt_hwnd);
+                        SetFocus(vkt_hwnd);
+                    } else {
+                        ShowWindow(mmmain_hwnd, SW_SHOW);
+                    }
+                }
+                if (api) api->log("[vk_terminal] MegaMUD %s\n",
+                                  megamud_hidden ? "HIDDEN" : "SHOWN");
+            } else if (si == VKM_EXT_SOUND) {
+                snd_open_window();
             }
             vkm_open = 0;
             vkm_sub = VKM_SUB_NONE;
@@ -6913,7 +7418,7 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             vkt_hide();
             return 0;
         }
-        if (ri == VKM_ITEM_VISUAL || ri == VKM_ITEM_WIDGETS || ri == VKM_ITEM_RECENT) {
+        if (ri == VKM_ITEM_VISUAL || ri == VKM_ITEM_WIDGETS || ri == VKM_ITEM_RECENT || ri == VKM_ITEM_EXTRAS) {
             return 0;
         }
 
@@ -7241,6 +7746,685 @@ __declspec(dllexport) void vkt_set_resolution(int idx)
     }
 }
 
+/* ---- Player Statistics — Self-Contained Combat Parser ---- */
+
+/* Attack type stats: count, min damage, max damage, total damage */
+typedef struct { int n, min, max; __int64 total; } pst_atk_t;
+
+static struct {
+    /* Experience tracking */
+    DWORD   exp_start_tick;     /* GetTickCount at exp reset */
+    __int64 exp_gained;         /* accumulated from "You gain X experience" */
+
+    /* Combat accuracy */
+    int     miss;               /* player attack missed */
+    pst_atk_t hit;              /* normal hits */
+    pst_atk_t crit;             /* critical hits */
+    pst_atk_t extra;            /* extra attacks */
+    pst_atk_t spell;            /* spell/cast damage */
+
+    /* Defense */
+    int     dodge;              /* player dodged */
+    int     mon_miss;           /* monster missed (not dodge) */
+    int     mon_hit;            /* monster hit you (we detect " damage!" from monsters too) */
+
+    /* Round tracking */
+    pst_atk_t rnd;              /* per-round damage totals */
+    int     cur_round_dmg;      /* accumulating current round */
+
+    /* Misc */
+    int     kills;              /* monster kills */
+
+    /* Combat section start */
+    DWORD   combat_start_tick;
+} pst_s;
+
+/* ANSI line extraction buffer */
+static char pst_lbuf[1024];
+static int  pst_lpos = 0;
+static int  pst_esc  = 0;      /* inside ESC sequence */
+
+static DWORD pst_last_poll = 0;
+#define PST_POLL_MS 1000
+
+/* ---- helpers ---- */
+
+static int pst_contains(const char *hay, const char *needle) {
+    return strstr(hay, needle) != NULL;
+}
+
+/* Parse damage number from "for X damage!" — scan backwards from " damage!" */
+static int pst_parse_dmg(const char *line) {
+    const char *p = strstr(line, " damage!");
+    if (!p || p == line) return 0;
+    p--; /* char before ' damage!' */
+    while (p > line && *p >= '0' && *p <= '9') p--;
+    if (*p < '0' || *p > '9') p++;
+    return atoi(p);
+}
+
+/* Record a hit into an atk_t bucket */
+static void pst_record_hit(pst_atk_t *a, int dmg) {
+    a->n++;
+    a->total += dmg;
+    if (a->min < 0 || dmg < a->min) a->min = dmg;
+    if (dmg > a->max) a->max = dmg;
+}
+
+static void pst_atk_clear(pst_atk_t *a) { a->n = 0; a->min = -1; a->max = 0; a->total = 0; }
+
+/* ---- Combat line parser ---- */
+
+static void pst_parse_line(const char *line)
+{
+    /* --- Experience --- */
+    {
+        const char *yg = strstr(line, "You gain ");
+        if (yg && strstr(yg, " experience")) {
+            int val = atoi(yg + 9); /* "You gain " = 9 chars */
+            if (val > 0) pst_s.exp_gained += val;
+            return;
+        }
+    }
+
+    /* --- Monster killed --- */
+    if (pst_contains(line, " drops to the ground!")) {
+        pst_s.kills++;
+        /* end of round — record round damage */
+        if (pst_s.cur_round_dmg > 0) {
+            pst_record_hit(&pst_s.rnd, pst_s.cur_round_dmg);
+            pst_s.cur_round_dmg = 0;
+        }
+        return;
+    }
+
+    /* --- Player Dodge (you dodged monster attack) --- */
+    if (pst_contains(line, "but you dodge") ||
+        pst_contains(line, "but you sidestep") ||
+        pst_contains(line, "but you easily dodge") ||
+        pst_contains(line, "but you barely dodge") ||
+        pst_contains(line, "but you quickly roll") ||
+        pst_contains(line, "but you leap out of") ||
+        pst_contains(line, "but you duck the attack") ||
+        pst_contains(line, "You quickly backpedal")) {
+        pst_s.dodge++;
+        return;
+    }
+
+    /* --- Monster missed (not a dodge) --- */
+    if (pst_contains(line, "but misses") ||
+        pst_contains(line, "and barely misses you!") ||
+        pst_contains(line, "you easily misses!") ||
+        pst_contains(line, "scrambles to regain balance") ||
+        pst_contains(line, "looking for an opening!") ||
+        pst_contains(line, "an opportunity to strike!")) {
+        pst_s.mon_miss++;
+        return;
+    }
+
+    /* --- Player Hit (line contains " damage!") --- */
+    if (pst_contains(line, " damage!")) {
+        /* Is this us hitting a monster, or a monster hitting us? */
+        /* Monster hitting us: line starts with monster name, e.g. "The Goblin slashes you for X damage!" */
+        /* We check: if line contains " you for " or " you " before damage, it's monster hitting us */
+        const char *dmg_pos = strstr(line, " damage!");
+        int is_monster_hit = 0;
+
+        /* Check if this is a monster hitting us: look for "you for" before " damage!" */
+        if (dmg_pos) {
+            /* Simple heuristic: if " you for " appears, monster hit us */
+            const char *yf = strstr(line, " you for ");
+            if (yf && yf < dmg_pos) is_monster_hit = 1;
+            /* Also: "hits you for", "slashes you for", etc */
+            const char *hy = strstr(line, " you!");
+            if (hy) is_monster_hit = 1;
+        }
+
+        if (is_monster_hit) {
+            pst_s.mon_hit++;
+            return;
+        }
+
+        /* Player hit — parse damage and categorize */
+        int dmg = pst_parse_dmg(line);
+
+        if (pst_contains(line, " critically ")) {
+            pst_record_hit(&pst_s.crit, dmg);
+        } else if (pst_contains(line, "Your ") && (pst_contains(line, " hits ") || pst_contains(line, " blasts ") ||
+                   pst_contains(line, " burns ") || pst_contains(line, " freezes ") || pst_contains(line, " zaps "))) {
+            pst_record_hit(&pst_s.spell, dmg);
+        } else if (pst_contains(line, "extra attack") || pst_contains(line, "backstab")) {
+            pst_record_hit(&pst_s.extra, dmg);
+        } else {
+            pst_record_hit(&pst_s.hit, dmg);
+        }
+        pst_s.cur_round_dmg += dmg;
+        return;
+    }
+
+    /* --- Player Miss --- */
+    if (pst_contains(line, "You miss ") ||
+        pst_contains(line, "You fire at ") ||
+        pst_contains(line, "You flail at ") ||
+        pst_contains(line, "You hurl at ") ||
+        pst_contains(line, "You lash at ") ||
+        pst_contains(line, "You lunge at ") ||
+        pst_contains(line, "You shoot at ") ||
+        pst_contains(line, "You swing at ") ||
+        pst_contains(line, "You swipe at ") ||
+        pst_contains(line, "You thrust at ") ||
+        pst_contains(line, "You snap at ") ||
+        pst_contains(line, "You spray at ") ||
+        pst_contains(line, "You double-shoot at ") ||
+        pst_contains(line, " and barely miss ") ||
+        pst_contains(line, "Your inaccurate ") ||
+        pst_contains(line, "You stumble and ") ||
+        pst_contains(line, "You slip and scramble") ||
+        pst_contains(line, "You circle and ") ||
+        pst_contains(line, "You advance, looking") ||
+        pst_contains(line, "You jumpkick") ||
+        pst_contains(line, "You punch") ||
+        pst_contains(line, "You kick")) {
+        /* Only count as miss if the line does NOT also contain " damage!" (already handled above) */
+        if (!pst_contains(line, " damage!")) {
+            pst_s.miss++;
+        }
+        return;
+    }
+
+    /* --- New round detection: "* Combat Engaged *" or similar --- */
+    if (pst_contains(line, "Combat Engaged")) {
+        /* Record previous round if any damage was dealt */
+        if (pst_s.cur_round_dmg > 0) {
+            pst_record_hit(&pst_s.rnd, pst_s.cur_round_dmg);
+            pst_s.cur_round_dmg = 0;
+        }
+    }
+}
+
+/* ---- ANSI stripper + line extraction ---- */
+
+static void pst_feed(const char *data, int len)
+{
+    for (int i = 0; i < len; i++) {
+        char c = data[i];
+        if (c == '\x1b') { pst_esc = 1; continue; }
+        if (pst_esc) {
+            /* End of CSI sequence on letter */
+            if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')) pst_esc = 0;
+            continue;
+        }
+        if (c == '\n' || c == '\r') {
+            if (pst_lpos > 0) {
+                pst_lbuf[pst_lpos] = 0;
+                pst_parse_line(pst_lbuf);
+                pst_lpos = 0;
+            }
+            continue;
+        }
+        if (pst_lpos < (int)sizeof(pst_lbuf) - 1)
+            pst_lbuf[pst_lpos++] = c;
+    }
+}
+
+/* ---- Formatting helpers ---- */
+
+static void pst_fmt_num(char *out, int sz, __int64 v) {
+    if (v >= 1000000) _snprintf(out, sz, "%lld,%03lld,%03lld", v / 1000000, (v / 1000) % 1000, v % 1000);
+    else if (v >= 1000) _snprintf(out, sz, "%lld,%03lld", v / 1000, v % 1000);
+    else _snprintf(out, sz, "%lld", v);
+    out[sz - 1] = 0;
+}
+
+static void pst_fmt_time(char *out, int sz, DWORD elapsed_ms) {
+    int s = (int)(elapsed_ms / 1000);
+    int h = s / 3600; s %= 3600;
+    int m = s / 60; s %= 60;
+    _snprintf(out, sz, "%02d:%02d:%02d", h, m, s);
+    out[sz - 1] = 0;
+}
+
+/* ---- Reset functions ---- */
+
+static void pst_reset_exp(void) {
+    pst_s.exp_start_tick = GetTickCount();
+    pst_s.exp_gained = 0;
+    pst_s.kills = 0;
+}
+
+static void pst_reset_combat(void) {
+    pst_s.miss = 0;
+    pst_atk_clear(&pst_s.hit);
+    pst_atk_clear(&pst_s.crit);
+    pst_atk_clear(&pst_s.extra);
+    pst_atk_clear(&pst_s.spell);
+    pst_atk_clear(&pst_s.rnd);
+    pst_s.cur_round_dmg = 0;
+    pst_s.dodge = 0;
+    pst_s.mon_miss = 0;
+    pst_s.mon_hit = 0;
+    pst_s.combat_start_tick = GetTickCount();
+}
+
+/* ---- Toggle ---- */
+
+static void pst_toggle(void)
+{
+    pst_visible = !pst_visible;
+    if (pst_visible) {
+        int vp_w = (int)vk_sc_extent.width, vp_h = (int)vk_sc_extent.height;
+        if (pst_x < 1 && pst_y < 1) {
+            pst_x = (float)(vp_w - (int)pst_w) / 2.0f;
+            pst_y = (float)(vp_h - (int)pst_h) / 2.0f;
+        }
+        if (pst_s.exp_start_tick == 0) {
+            pst_s.exp_start_tick = GetTickCount();
+            pst_s.combat_start_tick = GetTickCount();
+            pst_atk_clear(&pst_s.hit);
+            pst_atk_clear(&pst_s.crit);
+            pst_atk_clear(&pst_s.extra);
+            pst_atk_clear(&pst_s.spell);
+            pst_atk_clear(&pst_s.rnd);
+        }
+    }
+}
+
+/* ---- Vulkan-rendered Player Stats Panel ---- */
+
+static void pst_draw(int vp_w, int vp_h)
+{
+    if (!pst_visible) return;
+
+    const ui_theme_t *t = &ui_themes[current_theme];
+    void (*psolid)(float, float, float, float, float, float, float, float, int, int) =
+        ui_font_ready ? push_solid_ui : push_solid;
+    void (*ptext)(int, int, const char *, float, float, float, int, int, int, int) =
+        ui_font_ready ? push_text_ui : push_text;
+    int cw = VSB_CHAR_W, ch = VSB_CHAR_H;
+
+    float x0 = pst_x, y0 = pst_y;
+    float pw = pst_w, ph = pst_h;
+    float x1 = x0 + pw, y1 = y0 + ph;
+
+    /* Theme colors */
+    float bgr = t->bg[0], bgg = t->bg[1], bgb = t->bg[2];
+    float txr = t->text[0], txg = t->text[1], txb = t->text[2];
+    float dmr = t->dim[0], dmg = t->dim[1], dmb = t->dim[2];
+    float acr = t->accent[0], acg = t->accent[1], acb = t->accent[2];
+
+    /* ---- Panel background ---- */
+    psolid(x0, y0, x1, y1,
+           bgr + 0.04f, bgg + 0.04f, bgb + 0.04f, 0.96f,
+           vp_w, vp_h);
+
+    /* ---- Outer bevel: light top/left, dark bottom/right ---- */
+    psolid(x0, y0, x1, y0 + 1.0f,
+           bgr + 0.18f, bgg + 0.18f, bgb + 0.18f, 0.8f, vp_w, vp_h);
+    psolid(x0, y0, x0 + 1.0f, y1,
+           bgr + 0.14f, bgg + 0.14f, bgb + 0.14f, 0.7f, vp_w, vp_h);
+    psolid(x0, y1 - 1.0f, x1, y1,
+           bgr * 0.4f, bgg * 0.4f, bgb * 0.4f, 0.9f, vp_w, vp_h);
+    psolid(x1 - 1.0f, y0, x1, y1,
+           bgr * 0.5f, bgg * 0.5f, bgb * 0.5f, 0.85f, vp_w, vp_h);
+
+    /* Inner bevel (second line for depth) */
+    psolid(x0 + 1.0f, y0 + 1.0f, x1 - 1.0f, y0 + 2.0f,
+           bgr + 0.10f, bgg + 0.10f, bgb + 0.10f, 0.5f, vp_w, vp_h);
+    psolid(x0 + 1.0f, y0 + 1.0f, x0 + 2.0f, y1 - 1.0f,
+           bgr + 0.08f, bgg + 0.08f, bgb + 0.08f, 0.4f, vp_w, vp_h);
+
+    int titlebar_h = ch + 10;
+    int section_h = ch + 6;
+    int row_h = ch + 4;
+    int pad = 8;
+    int val_x = (int)x0 + pad + 11 * cw; /* value column start */
+
+    /* ---- Title bar ---- */
+    float tb_y0 = y0 + 2.0f, tb_y1 = y0 + (float)titlebar_h;
+    /* Title bar background — accent tinted */
+    psolid(x0 + 2.0f, tb_y0, x1 - 2.0f, tb_y1,
+           acr * 0.25f + bgr * 0.5f, acg * 0.25f + bgg * 0.5f, acb * 0.25f + bgb * 0.5f, 0.95f,
+           vp_w, vp_h);
+    /* Title bar gloss highlight (top half lighter) */
+    psolid(x0 + 2.0f, tb_y0, x1 - 2.0f, tb_y0 + (float)(titlebar_h / 2),
+           1.0f, 1.0f, 1.0f, 0.06f, vp_w, vp_h);
+    /* Title bar bottom edge */
+    psolid(x0 + 2.0f, tb_y1 - 1.0f, x1 - 2.0f, tb_y1,
+           acr, acg, acb, 0.5f, vp_w, vp_h);
+
+    /* Title text */
+    int title_tx = (int)x0 + pad;
+    int title_ty = (int)tb_y0 + (titlebar_h - ch) / 2;
+    ptext(title_tx + 1, title_ty + 1, "Player Statistics", 0.0f, 0.0f, 0.0f, vp_w, vp_h, cw, ch);
+    ptext(title_tx, title_ty, "Player Statistics", txr, txg, txb, vp_w, vp_h, cw, ch);
+
+    /* Close button [X] */
+    int close_tx = (int)x1 - pad - cw;
+    ptext(close_tx, title_ty, "X", 1.0f, 0.3f, 0.3f, vp_w, vp_h, cw, ch);
+
+    /* ---- Content area ---- */
+    int cy = (int)tb_y1 + 2;
+    char buf[64], line[64];
+
+    /* ==== Experience Section Header ==== */
+    float sh_y0 = (float)cy, sh_y1 = (float)(cy + section_h);
+    /* Section header background — subtle accent band */
+    psolid(x0 + 3.0f, sh_y0, x1 - 3.0f, sh_y1,
+           acr * 0.15f + bgr * 0.6f, acg * 0.15f + bgg * 0.6f, acb * 0.15f + bgb * 0.6f, 0.9f,
+           vp_w, vp_h);
+    /* Top highlight for plastic/gloss look */
+    psolid(x0 + 3.0f, sh_y0, x1 - 3.0f, sh_y0 + 1.0f,
+           1.0f, 1.0f, 1.0f, 0.08f, vp_w, vp_h);
+    /* Bottom shadow */
+    psolid(x0 + 3.0f, sh_y1 - 1.0f, x1 - 3.0f, sh_y1,
+           0.0f, 0.0f, 0.0f, 0.15f, vp_w, vp_h);
+
+    int sh_ty = cy + (section_h - ch) / 2;
+    ptext((int)x0 + pad, sh_ty, "\xC4\xC4 Experience \xC4\xC4\xC4\xC4\xC4\xC4", acr, acg, acb, vp_w, vp_h, cw, ch);
+    ptext((int)x1 - pad - 7 * cw, sh_ty, "[Reset]", acr * 0.7f + 0.3f, acg * 0.7f + 0.3f, acb * 0.7f + 0.3f, vp_w, vp_h, cw, ch);
+    cy += section_h;
+
+    /* Duration */
+    DWORD now = GetTickCount();
+    DWORD elapsed = now - pst_s.exp_start_tick;
+    pst_fmt_time(buf, sizeof(buf), elapsed);
+    ptext((int)x0 + pad, cy + 2, "Duration:", dmr, dmg, dmb, vp_w, vp_h, cw, ch);
+    ptext(val_x, cy + 2, buf, txr, txg, txb, vp_w, vp_h, cw, ch);
+    cy += row_h;
+
+    /* Exp Made */
+    pst_fmt_num(buf, sizeof(buf), pst_s.exp_gained);
+    ptext((int)x0 + pad, cy + 2, "Exp Made:", dmr, dmg, dmb, vp_w, vp_h, cw, ch);
+    ptext(val_x, cy + 2, buf, 0.3f, 1.0f, 0.3f, vp_w, vp_h, cw, ch);
+    cy += row_h;
+
+    /* Exp Rate */
+    if (elapsed > 5000) {
+        __int64 rate = pst_s.exp_gained * 3600000LL / (__int64)elapsed;
+        if (rate >= 1000000LL) {
+            _snprintf(buf, sizeof(buf), "%lld m/hr", rate / 1000000LL);
+        } else {
+            pst_fmt_num(buf, sizeof(buf), rate);
+            strcat(buf, " /hr");
+        }
+    } else { strcpy(buf, "---"); }
+    ptext((int)x0 + pad, cy + 2, "Exp Rate:", dmr, dmg, dmb, vp_w, vp_h, cw, ch);
+    ptext(val_x, cy + 2, buf, 0.3f, 0.9f, 1.0f, vp_w, vp_h, cw, ch);
+    cy += row_h;
+
+    /* Kills */
+    _snprintf(buf, sizeof(buf), "%d", pst_s.kills);
+    ptext((int)x0 + pad, cy + 2, "Kills:", dmr, dmg, dmb, vp_w, vp_h, cw, ch);
+    ptext(val_x, cy + 2, buf, txr, txg, txb, vp_w, vp_h, cw, ch);
+    cy += row_h + 4;
+
+    /* ==== Accuracy Section Header ==== */
+    sh_y0 = (float)cy; sh_y1 = (float)(cy + section_h);
+    psolid(x0 + 3.0f, sh_y0, x1 - 3.0f, sh_y1,
+           acr * 0.15f + bgr * 0.6f, acg * 0.15f + bgg * 0.6f, acb * 0.15f + bgb * 0.6f, 0.9f,
+           vp_w, vp_h);
+    psolid(x0 + 3.0f, sh_y0, x1 - 3.0f, sh_y0 + 1.0f,
+           1.0f, 1.0f, 1.0f, 0.08f, vp_w, vp_h);
+    psolid(x0 + 3.0f, sh_y1 - 1.0f, x1 - 3.0f, sh_y1,
+           0.0f, 0.0f, 0.0f, 0.15f, vp_w, vp_h);
+
+    sh_ty = cy + (section_h - ch) / 2;
+    ptext((int)x0 + pad, sh_ty, "\xC4\xC4 Accuracy \xC4\xC4\xC4\xC4\xC4\xC4\xC4", acr, acg, acb, vp_w, vp_h, cw, ch);
+    ptext((int)x1 - pad - 7 * cw, sh_ty, "[Reset]", acr * 0.7f + 0.3f, acg * 0.7f + 0.3f, acb * 0.7f + 0.3f, vp_w, vp_h, cw, ch);
+    cy += section_h;
+
+    /* Column headers */
+    int col_pct = (int)x0 + pad + 5 * cw;
+    int col_rng = (int)x0 + pad + 11 * cw;
+    int col_avg = (int)x0 + pad + 24 * cw;
+    ptext(col_pct, cy + 2, "%", dmr, dmg, dmb, vp_w, vp_h, cw, ch);
+    ptext(col_rng, cy + 2, "Range", dmr, dmg, dmb, vp_w, vp_h, cw, ch);
+    ptext(col_avg, cy + 2, "Avg", dmr, dmg, dmb, vp_w, vp_h, cw, ch);
+    cy += row_h;
+
+    /* Accuracy rows */
+    int total_atk = pst_s.miss + pst_s.hit.n + pst_s.crit.n + pst_s.extra.n + pst_s.spell.n;
+    if (total_atk == 0) total_atk = 1;
+
+    struct { const char *name; int count; pst_atk_t *atk; float r, g, b; } arows[] = {
+        {"Miss", pst_s.miss,    NULL,          1.0f, 0.35f, 0.35f},
+        {"Hit",  pst_s.hit.n,   &pst_s.hit,    txr,  txg,   txb},
+        {"Crit", pst_s.crit.n,  &pst_s.crit,   1.0f, 0.85f, 0.2f},
+        {"Xtra", pst_s.extra.n, &pst_s.extra,   0.3f, 0.9f,  1.0f},
+        {"Spel", pst_s.spell.n, &pst_s.spell,   0.85f, 0.4f, 1.0f},
+    };
+
+    for (int i = 0; i < 5; i++) {
+        int pct = arows[i].count * 100 / total_atk;
+        float rr = arows[i].r, rg = arows[i].g, rb = arows[i].b;
+
+        /* Subtle alternating row background */
+        if (i & 1) {
+            psolid(x0 + 3.0f, (float)cy, x1 - 3.0f, (float)(cy + row_h),
+                   1.0f, 1.0f, 1.0f, 0.02f, vp_w, vp_h);
+        }
+
+        ptext((int)x0 + pad, cy + 2, arows[i].name, rr, rg, rb, vp_w, vp_h, cw, ch);
+        _snprintf(buf, sizeof(buf), "%3d%%", pct);
+        ptext(col_pct, cy + 2, buf, dmr, dmg, dmb, vp_w, vp_h, cw, ch);
+
+        if (arows[i].atk && arows[i].atk->n > 0) {
+            int mn = arows[i].atk->min < 0 ? 0 : arows[i].atk->min;
+            int avg = (int)(arows[i].atk->total / arows[i].atk->n);
+            _snprintf(buf, sizeof(buf), "%d-%d", mn, arows[i].atk->max);
+            ptext(col_rng, cy + 2, buf, dmr, dmg, dmb, vp_w, vp_h, cw, ch);
+            _snprintf(buf, sizeof(buf), "%d", avg);
+            ptext(col_avg, cy + 2, buf, txr, txg, txb, vp_w, vp_h, cw, ch);
+        }
+        cy += row_h;
+    }
+
+    /* Round row */
+    ptext((int)x0 + pad, cy + 2, "Rnd", 0.3f, 1.0f, 0.5f, vp_w, vp_h, cw, ch);
+    if (pst_s.rnd.n > 0) {
+        int mn = pst_s.rnd.min < 0 ? 0 : pst_s.rnd.min;
+        int avg = (int)(pst_s.rnd.total / pst_s.rnd.n);
+        _snprintf(buf, sizeof(buf), "%d-%d", mn, pst_s.rnd.max);
+        ptext(col_rng, cy + 2, buf, dmr, dmg, dmb, vp_w, vp_h, cw, ch);
+        _snprintf(buf, sizeof(buf), "%d", avg);
+        ptext(col_avg, cy + 2, buf, txr, txg, txb, vp_w, vp_h, cw, ch);
+    } else {
+        ptext(col_rng, cy + 2, "---", dmr, dmg, dmb, vp_w, vp_h, cw, ch);
+    }
+    cy += row_h + 4;
+
+    /* ==== Defense Section Header ==== */
+    sh_y0 = (float)cy; sh_y1 = (float)(cy + section_h);
+    psolid(x0 + 3.0f, sh_y0, x1 - 3.0f, sh_y1,
+           acr * 0.15f + bgr * 0.6f, acg * 0.15f + bgg * 0.6f, acb * 0.15f + bgb * 0.6f, 0.9f,
+           vp_w, vp_h);
+    psolid(x0 + 3.0f, sh_y0, x1 - 3.0f, sh_y0 + 1.0f,
+           1.0f, 1.0f, 1.0f, 0.08f, vp_w, vp_h);
+    psolid(x0 + 3.0f, sh_y1 - 1.0f, x1 - 3.0f, sh_y1,
+           0.0f, 0.0f, 0.0f, 0.15f, vp_w, vp_h);
+
+    sh_ty = cy + (section_h - ch) / 2;
+    ptext((int)x0 + pad, sh_ty, "\xC4\xC4 Defense \xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4", acr, acg, acb, vp_w, vp_h, cw, ch);
+    cy += section_h;
+
+    /* Defense rows */
+    int total_def = pst_s.dodge + pst_s.mon_miss + pst_s.mon_hit;
+    if (total_def > 0) {
+        struct { const char *name; int count; float r, g, b; } drows[] = {
+            {"Dodge:", pst_s.dodge,    0.3f, 1.0f, 0.3f},
+            {"Missed:", pst_s.mon_miss, txr,  txg,  txb},
+            {"Hit:",    pst_s.mon_hit,  1.0f, 0.35f, 0.35f},
+        };
+        for (int i = 0; i < 3; i++) {
+            if (i & 1) {
+                psolid(x0 + 3.0f, (float)cy, x1 - 3.0f, (float)(cy + row_h),
+                       1.0f, 1.0f, 1.0f, 0.02f, vp_w, vp_h);
+            }
+            int dpct = drows[i].count * 100 / total_def;
+            _snprintf(buf, sizeof(buf), "%d (%d%%)", drows[i].count, dpct);
+            ptext((int)x0 + pad, cy + 2, drows[i].name, drows[i].r, drows[i].g, drows[i].b, vp_w, vp_h, cw, ch);
+            ptext(val_x, cy + 2, buf, dmr, dmg, dmb, vp_w, vp_h, cw, ch);
+            cy += row_h;
+        }
+    } else {
+        ptext((int)x0 + pad, cy + 2, "No attacks received.", dmr, dmg, dmb, vp_w, vp_h, cw, ch);
+        cy += row_h;
+    }
+
+    /* Auto-size panel height to content */
+    pst_h = (float)(cy - (int)y0 + 6);
+}
+
+/* ---- Sound Settings Window ---- */
+
+/* winmm function pointers (dynamically loaded) */
+typedef UINT (WINAPI *waveInGetNumDevs_fn)(void);
+typedef UINT (WINAPI *waveOutGetNumDevs_fn)(void);
+typedef struct { WORD wMid; WORD wPid; UINT vDriverVersion; char szPname[32]; DWORD dwFormats; WORD wChannels; WORD wReserved1; } WAVEINCAPSA_t;
+typedef struct { WORD wMid; WORD wPid; UINT vDriverVersion; char szPname[32]; DWORD dwFormats; WORD wChannels; WORD wReserved1; DWORD dwSupport; } WAVEOUTCAPSA_t;
+typedef UINT (WINAPI *waveInGetDevCapsA_fn)(UINT, WAVEINCAPSA_t*, UINT);
+typedef UINT (WINAPI *waveOutGetDevCapsA_fn)(UINT, WAVEOUTCAPSA_t*, UINT);
+
+static HMODULE snd_winmm = NULL;
+static waveInGetNumDevs_fn   snd_waveInGetNumDevs = NULL;
+static waveOutGetNumDevs_fn  snd_waveOutGetNumDevs = NULL;
+static waveInGetDevCapsA_fn  snd_waveInGetDevCapsA = NULL;
+static waveOutGetDevCapsA_fn snd_waveOutGetDevCapsA = NULL;
+
+#define SND_MAX_DEVS 16
+static char snd_in_names[SND_MAX_DEVS][32];
+static int  snd_in_count = 0;
+static int  snd_in_sel = 0;
+static char snd_out_names[SND_MAX_DEVS][32];
+static int  snd_out_count = 0;
+static int  snd_out_sel = 0;
+static int  snd_master_vol = 80;  /* 0-100 */
+
+static void snd_load_winmm(void)
+{
+    if (snd_winmm) return;
+    snd_winmm = LoadLibraryA("winmm.dll");
+    if (!snd_winmm) return;
+    snd_waveInGetNumDevs = (waveInGetNumDevs_fn)GetProcAddress(snd_winmm, "waveInGetNumDevs");
+    snd_waveOutGetNumDevs = (waveOutGetNumDevs_fn)GetProcAddress(snd_winmm, "waveOutGetNumDevs");
+    snd_waveInGetDevCapsA = (waveInGetDevCapsA_fn)GetProcAddress(snd_winmm, "waveInGetDevCapsA");
+    snd_waveOutGetDevCapsA = (waveOutGetDevCapsA_fn)GetProcAddress(snd_winmm, "waveOutGetDevCapsA");
+}
+
+static void snd_enumerate(void)
+{
+    snd_load_winmm();
+    snd_in_count = 0;
+    snd_out_count = 0;
+    if (snd_waveInGetNumDevs && snd_waveInGetDevCapsA) {
+        int n = (int)snd_waveInGetNumDevs();
+        if (n > SND_MAX_DEVS) n = SND_MAX_DEVS;
+        for (int i = 0; i < n; i++) {
+            WAVEINCAPSA_t caps;
+            if (snd_waveInGetDevCapsA(i, &caps, sizeof(caps)) == 0) {
+                strncpy(snd_in_names[snd_in_count], caps.szPname, 31);
+                snd_in_names[snd_in_count][31] = 0;
+                snd_in_count++;
+            }
+        }
+    }
+    if (snd_waveOutGetNumDevs && snd_waveOutGetDevCapsA) {
+        int n = (int)snd_waveOutGetNumDevs();
+        if (n > SND_MAX_DEVS) n = SND_MAX_DEVS;
+        for (int i = 0; i < n; i++) {
+            WAVEOUTCAPSA_t caps;
+            if (snd_waveOutGetDevCapsA(i, &caps, sizeof(caps)) == 0) {
+                strncpy(snd_out_names[snd_out_count], caps.szPname, 31);
+                snd_out_names[snd_out_count][31] = 0;
+                snd_out_count++;
+            }
+        }
+    }
+    if (api) api->log("[sound] Found %d input, %d output devices\n", snd_in_count, snd_out_count);
+}
+
+static void snd_open_window(void)
+{
+    if (snd_wnd_idx >= 0 && vkw_windows[snd_wnd_idx].active) {
+        /* Already open — just focus it */
+        vkw_focus = snd_wnd_idx;
+        return;
+    }
+    snd_enumerate();
+    int vp_w = (int)vk_sc_extent.width, vp_h = (int)vk_sc_extent.height;
+    int ww = 380, wh = 400;
+    snd_wnd_idx = vkw_create("Sound Settings", (vp_w - ww) / 2, (vp_h - wh) / 2, ww, wh, 0);
+    if (snd_wnd_idx < 0) return;
+    vkw_focus = snd_wnd_idx;
+
+    /* Print device info into the window */
+    vkw_print(snd_wnd_idx, "\x1b[1;37m=== Recording Devices ===\x1b[0m");
+    if (snd_in_count == 0) {
+        vkw_print(snd_wnd_idx, "  \x1b[1;31m(none found)\x1b[0m");
+    } else {
+        for (int i = 0; i < snd_in_count; i++) {
+            char line[80];
+            sprintf(line, "  %s%d: %s\x1b[0m",
+                    i == snd_in_sel ? "\x1b[1;32m> " : "\x1b[0;37m  ", i, snd_in_names[i]);
+            vkw_print(snd_wnd_idx, line);
+        }
+    }
+    vkw_print(snd_wnd_idx, "");
+    vkw_print(snd_wnd_idx, "\x1b[1;37m=== Playback Devices ===\x1b[0m");
+    if (snd_out_count == 0) {
+        vkw_print(snd_wnd_idx, "  \x1b[1;31m(none found)\x1b[0m");
+    } else {
+        for (int i = 0; i < snd_out_count; i++) {
+            char line[80];
+            sprintf(line, "  %s%d: %s\x1b[0m",
+                    i == snd_out_sel ? "\x1b[1;32m> " : "\x1b[0;37m  ", i, snd_out_names[i]);
+            vkw_print(snd_wnd_idx, line);
+        }
+    }
+    vkw_print(snd_wnd_idx, "");
+    {
+        char vol_line[80];
+        sprintf(vol_line, "\x1b[1;37mMaster Volume:\x1b[0m %d%%", snd_master_vol);
+        vkw_print(snd_wnd_idx, vol_line);
+    }
+    vkw_print(snd_wnd_idx, "");
+    vkw_print(snd_wnd_idx, "\x1b[0;36mPTT Key: F9 (hold to record)\x1b[0m");
+    vkw_print(snd_wnd_idx, "\x1b[0;36mTTS: SAM + eSpeak loaded\x1b[0m");
+}
+
+__declspec(dllexport) void vkt_vk_plugins_show_experimental(int val)
+{
+    vk_experimental = val ? 1 : 0;
+    if (vkw_console_idx >= 0) {
+        vkw_print(vkw_console_idx, vk_experimental
+            ? "[vk_plugins] Experimental plugins: \x1b[1;32mENABLED\x1b[0m"
+            : "[vk_plugins] Experimental plugins: \x1b[1;31mDISABLED\x1b[0m");
+    }
+    if (api) api->log("[vk_terminal] vk_plugins.show_experimental = %s\n",
+                      vk_experimental ? "True" : "False");
+}
+
+__declspec(dllexport) void vkt_vk_plugins_list(void)
+{
+    if (vkw_console_idx < 0) return;
+    vkw_print(vkw_console_idx, "\x1b[1;37m---- VK Plugins ----\x1b[0m");
+    vkw_print(vkw_console_idx, " \x1b[1;32m*\x1b[0m Liquid Letters");
+    vkw_print(vkw_console_idx, " \x1b[1;32m*\x1b[0m Diagonal Waves");
+    vkw_print(vkw_console_idx, " \x1b[1;32m*\x1b[0m FBM Currents");
+    vkw_print(vkw_console_idx, " \x1b[1;32m*\x1b[0m Sobel/Sharp");
+    vkw_print(vkw_console_idx, " \x1b[1;32m*\x1b[0m CRT Scanlines");
+    vkw_print(vkw_console_idx, " \x1b[1;32m*\x1b[0m Round Timer");
+    vkw_print(vkw_console_idx, " \x1b[1;32m*\x1b[0m Exp Bar");
+    vkw_print(vkw_console_idx, "\x1b[1;37m---- Experimental ----\x1b[0m");
+    vkw_print(vkw_console_idx, vk_experimental
+        ? " \x1b[1;33m!\x1b[0m Wobbly Widgets  [\x1b[1;33mEXPERIMENTAL\x1b[0m]"
+        : " \x1b[1;30m-\x1b[0m Wobbly Widgets  [\x1b[1;30mHIDDEN\x1b[0m]");
+    vkw_print(vkw_console_idx, "");
+    vkw_print(vkw_console_idx, vk_experimental
+        ? "  show_experimental = \x1b[1;32mTrue\x1b[0m"
+        : "  show_experimental = \x1b[1;31mFalse\x1b[0m");
+}
+
 static slop_command_t vkt_commands[] = {
     { "vkt_show",     "vkt_show",     "",  "v", "Show Vulkan fullscreen terminal" },
     { "vkt_hide",     "vkt_hide",     "",  "v", "Hide Vulkan terminal" },
@@ -7253,6 +8437,8 @@ static slop_command_t vkt_commands[] = {
     { "wnd_opacity",  "vkt_wnd_set_opacity", "if", "v", "Set window opacity(id, 0.0-1.0)" },
     { "console_show", "vkt_console_show", "", "v", "Show the Python console window" },
     { "console_print","vkt_console_print","s", "v", "Print to console window" },
+    { "vk_plugins.show_experimental", "vkt_vk_plugins_show_experimental", "i", "v", "Enable/disable experimental plugins (1=True, 0=False)" },
+    { "vk_plugins.list", "vkt_vk_plugins_list", "", "v", "List all VK plugins and their status" },
 };
 
 __declspec(dllexport) slop_command_t *slop_get_commands(int *count)

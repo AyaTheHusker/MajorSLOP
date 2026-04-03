@@ -503,7 +503,7 @@ static void voice_stop_recording(void)
 
 /* ---- Plugin callbacks ---- */
 
-static int voice_on_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+__declspec(dllexport) int voice_on_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
     (void)hwnd; (void)lParam;
 

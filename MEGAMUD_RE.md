@@ -802,29 +802,138 @@ BBS Server → [ReadFile on ???] → Buffer at struct+0x863D
 
 ### Session / Combat Statistics
 
-**WARNING:** Session stats (exp meter, accuracy, collected items) are stored in a **heap
-allocation** managed by the Player Statistics dialog, NOT in the main game state struct.
-The 0x95xx-0x96xx range in the struct contains pointers and stack data, not counters.
+**CORRECTED (2026-04-03 via Ghidra/Rizin RE):** Combat stats ARE in the main struct at
+0x9620-0x96C4. The earlier note about "heap allocation" was wrong — the dialog update
+function at VA `0x470A10` reads directly from these struct offsets and formats them for
+display via `SetDlgItemText` (0x478BB0) and a number formatter (0x470980).
+
+**Key functions:**
+- `0x470720` — Reset handler (zeros counters, snapshots ticks)
+- `0x470A10` — Dialog display update (506 lines, reads all counters, formats for dialog)
+- `0x480C00` — Full session reset (zeros everything on login/re-login)
+- `0x41A000-0x41AD50` — Combat text parser (string matching → counter increments)
+- `0x419060-0x419130` — Experience gain parser ("You gain X experience")
 
 **To reset:** Use `SendMessageA(button, BM_CLICK, 0, 0)` on control IDs 1721/1722/1723.
 See Player Statistics Window section above and `scripts/reset_stats.py`.
 
-**To read displayed values:** Use `GetWindowTextA` on the static control IDs (1134, 1141, etc.)
-from the Player Statistics window via Wine Python.
+#### Session Timekeeping
 
-**Verified reset handler code** (VA 0x470720, uses `eax` = struct base):
+| Offset | Size | Name | Description |
+|---|---|---|---|
+| 0x95D8 | i32 | SESSION_START_TICK_A | Tick at session/reset start (from 0x9468) |
+| 0x95DC | i32 | SESSION_START_TICK_B | High dword |
+| 0x95E0 | i32 | SESSION_SNAP_TICK_A | Online time snapshot tick A |
+| 0x95E4 | i32 | SESSION_SNAP_TICK_B | High dword |
+| 0x95E8 | i32 | LAST_DISCONNECT_TICK_A | Set on disconnect |
+| 0x95EC | i32 | LAST_DISCONNECT_TICK_B | High dword |
+| 0x95F0 | i32 | ONLINE_TICKS_LO | Accumulated online milliseconds (64-bit) |
+| 0x95F4 | i32 | ONLINE_TICKS_HI | High dword |
 
-The reset function snapshots the current tick and zeros counters at these struct offsets:
-- `0x95D8/0x95DC` — session start tick snapshot (copied from 0x9468/0x946C)
-- `0x95E0/0x95E4` — second tick snapshot
-- `0x95F0-0x9604` — zeroed (internal counters, but NOT the displayed session stats)
-- `0x9608-0x960C` — zeroed
-- `0x9610/0x9614` — zeroed
-- `0x9618` — HP snapshot (copied from 0x53D4)
-- `0x961C` — Mana snapshot (copied from 0x53E0)
+Duration = `(TICK_COUNT_A - SESSION_START_TICK_A)` converted to HH:MM:SS.
+Online time = `ONLINE_TICKS + (current_tick - SNAP_TICK)` across disconnects.
+Disconnect handler at `0x41CC80` accumulates delta into ONLINE_TICKS.
 
-These are internal bookkeeping values. The actual displayed stats (exp made, duration,
-hit%, etc.) are computed and stored in the dialog's own heap memory.
+#### Connection/Other Stats (displayed via dialog update at 0x470A10)
+
+| Offset | Size | Name | Dialog Ctrl | Description |
+|---|---|---|---|---|
+| 0x95F8 | i32 | CONN_SUCCESS | 1119 | Successful connection count |
+| 0x95FC | i32 | CONN_FAIL | 1120 | Failed dial/connection count |
+| 0x9600 | i32 | CONN_EVENTS | 1098 | Total connection events |
+| 0x9604 | i32 | UNK_9604 | 1075 | Unknown counter |
+| 0x9608 | i32 | UNK_9608 | 1617 | Unknown (formatted as "%d") |
+| 0x960C | i32 | UNK_960C | 1370 | Unknown counter |
+| 0x9610 | i32 | MONSTERS_KILLED | 1621 | Formatted as "%d monster(s)" |
+| 0x9614 | i32 | UNK_9614 | 1620 | Unknown counter |
+| 0x9618 | i32 | SESSION_START_HP | 1619 | HP at session start (shown as "X (Y%)" of max) |
+| 0x961C | i32 | SESSION_START_MANA | 1762 | Mana at session start |
+
+#### Combat Accuracy Stats — Player Attacks
+
+Each attack type has 4 fields: count, min damage, max damage, total damage.
+Average = total / count. Range = "Rng:min-max".
+
+| Offset | Size | Name | Description |
+|---|---|---|---|
+| 0x9620 | i32 | PLAYER_MISS_COUNT | Player attack missed (normal state) |
+| 0x9624 | i32 | HIT_COUNT | Normal hit count |
+| 0x9628 | i32 | HIT_DMG_MIN | Normal hit min damage (-1 = unset) |
+| 0x962C | i32 | HIT_DMG_MAX | Normal hit max damage (-1 = unset) |
+| 0x9630 | i32 | HIT_DMG_TOTAL | Normal hit total damage |
+| 0x9634 | i32 | CRIT_COUNT | Critical hit count |
+| 0x9638 | i32 | CRIT_DMG_MIN | Crit min damage |
+| 0x963C | i32 | CRIT_DMG_MAX | Crit max damage |
+| 0x9640 | i32 | CRIT_DMG_TOTAL | Crit total damage |
+| 0x9644 | i32 | EXTRA_COUNT | Extra/backstab hit count |
+| 0x9648 | i32 | EXTRA_DMG_MIN | Extra min damage |
+| 0x964C | i32 | EXTRA_DMG_MAX | Extra max damage |
+| 0x9650 | i32 | EXTRA_DMG_TOTAL | Extra total damage |
+| 0x9654 | i32 | BS_ATTEMPT_COUNT | Backstab attempts (hits+misses when state=0xE) |
+| 0x9658 | i32 | SPELL_HIT_COUNT | Spell/preemptive hit count |
+| 0x965C | i32 | SPELL_DMG_MIN | Spell min damage |
+| 0x9660 | i32 | SPELL_DMG_MAX | Spell max damage |
+| 0x9664 | i32 | SPELL_DMG_TOTAL | Spell total damage |
+
+#### Round/Session Damage Tracking
+
+| Offset | Size | Name | Description |
+|---|---|---|---|
+| 0x9690 | i32 | DID_DAMAGE_FLAG | 1 = player dealt damage this round |
+| 0x9694 | i32 | COMBAT_ACTIVE_FLAG | 1 = combat active this round |
+| 0x9698 | i32 | COMBAT_FLAG_3 | 1 = set on hit |
+| 0x96A0 | i32 | ROUND_DMG_TOTAL | Damage dealt this round (reset per round) |
+| 0x96A4 | i32 | SESSION_DMG_TOTAL | Total damage dealt this session |
+
+#### Monster Attack Tracking (Defensive Stats)
+
+| Offset | Size | Name | Description |
+|---|---|---|---|
+| 0x96BC | i32 | MONSTER_HIT_YOU | Monster successfully hit player |
+| 0x96C0 | i32 | MONSTER_MISS_YOU | Monster missed (not a dodge) |
+| 0x96C4 | i32 | PLAYER_DODGE_COUNT | Player actively dodged attack |
+
+#### Combat Text Patterns (VA 0x41A000-0x41AD50)
+
+MegaMUD detects combat events by substring matching on MUD output lines.
+Function at `0x47C390` = strstr-like search, returns position or -1.
+
+**Player Miss Patterns** (→ `inc [struct + 0x9620]`, or `0x9654` if backstab state):
+```
+"You miss "  "You fire at "  "You flail at "  "You hurl at "
+"You lash at "  "You lunge at "  "You shoot at "  "You double-shoot at "
+"You snap at "  "You spray at "  "You swing at "  "You swipe at "
+"You thrust at "  " and barely miss "  "Your inaccurate "
+"You stumble and "  "You slip and scramble"  "You circle and "
+"You advance, looking"  "You jumpkick"  "You punch"  "You kick"
+" with your "  (general attack-miss prefix)
+```
+
+**Player Dodge Patterns** (→ `inc [struct + 0x96C4]`):
+```
+"You quickly backpedal"  "but you dodge"  "but you sidestep"
+"but you easily dodge"  "but you barely dodge"  "but you quickly roll"
+"but you leap out of"  "but you duck the attack"
+```
+
+**Monster Miss Patterns** (→ `inc [struct + 0x96C0]`):
+```
+" at you"  " for you"  "but misses"  "and barely misses you!"
+"you easily misses!"  "scrambles to regain balance"
+"looking for an opening!"  "an opportunity to strike!"
+```
+
+**Hit Detection** (line contains `" damage!"`):
+- Also contains `" critically "` → critical hit (0x9634+)
+- Game state `[struct + 0x54C0]` == 0xE → backstab mode (inc 0x9654)
+- Damage value parsed from text between attack verb and `" damage!"`
+- Normal hit → 0x9624+, extra/BS hit → 0x9644+, spell → 0x9658+
+
+**Experience Gain** (VA 0x41908B):
+- Pattern: `"You gain "` + `" experience"` in same line
+- Number parsed via atoi (0x4A66A5) from between the two strings
+- Directly adds to PLAYER_EXP (0x53B0/0x53B4), subtracts from PLAYER_NEED (0x53B8/0x53BC)
+- Exp meter = (current_exp - exp_at_session_start), rate = exp_made / elapsed_time
 
 ### Timers / Ticks
 
