@@ -554,20 +554,35 @@ static int ttf_loaded[MAX_TTF_FONTS] = {0};
 #define VKM_ROOT       1
 
 /* Root menu item indices */
-#define VKM_ITEM_THEME   0
-#define VKM_ITEM_FONT    1
-#define VKM_ITEM_FX      2
-#define VKM_ITEM_SEP     3
-#define VKM_ITEM_CONSOLE 4
-#define VKM_ITEM_SEP2    5
-#define VKM_ITEM_CLOSE   6
-#define VKM_ROOT_COUNT   7
+#define VKM_ITEM_VISUAL  0   /* Visual > (Theme, Font, FX) */
+#define VKM_ITEM_WIDGETS 1   /* Widgets > (Round Timer, Conversation) */
+#define VKM_ITEM_SEP     2
+#define VKM_ITEM_CONSOLE 3
+#define VKM_ITEM_PATHS   4   /* Paths & Loops — opens VKW window */
+#define VKM_ITEM_RECENT  5   /* Recent > last 10 goto destinations */
+#define VKM_ITEM_SEP2    6
+#define VKM_ITEM_CLOSE   7
+#define VKM_ROOT_COUNT   8
 
 /* Submenu types */
-#define VKM_SUB_NONE   0
-#define VKM_SUB_THEME  1
-#define VKM_SUB_FONT   2
-#define VKM_SUB_FX     3
+#define VKM_SUB_NONE     0
+#define VKM_SUB_VISUAL   1
+#define VKM_SUB_WIDGETS  2
+#define VKM_SUB_RECENT   3
+#define VKM_SUB_THEME    4   /* 2nd-level under Visual */
+#define VKM_SUB_FONT     5
+#define VKM_SUB_FX       6
+
+/* Visual submenu items */
+#define VKM_VIS_THEME    0
+#define VKM_VIS_FONT     1
+#define VKM_VIS_FX       2
+#define VKM_VIS_COUNT    3
+
+/* Widgets submenu items */
+#define VKM_WID_RTIMER   0
+#define VKM_WID_CONVO    1
+#define VKM_WID_COUNT    2
 
 /* FX submenu items */
 #define VKM_FX_LIQUID    0
@@ -583,6 +598,12 @@ static int vkm_hover = -1;        /* hovered root item */
 static int vkm_sub = VKM_SUB_NONE;/* which submenu is expanded */
 static int vkm_sub_hover = -1;    /* hovered submenu item */
 static int vkm_mouse_x = 0, vkm_mouse_y = 0;
+
+/* Recent GOTO destinations (rotating list, newest first) */
+#define VKM_GOTO_MAX 10
+static char vkm_goto_names[VKM_GOTO_MAX][64];
+static int  vkm_goto_nums[VKM_GOTO_MAX];  /* room number for goto command */
+static int  vkm_goto_count = 0;
 
 /* Mouse coordinate scaling: window client area may differ from Vulkan surface
  * extent under Wine/XWayland with DPI scaling. All mouse coords must be
@@ -690,8 +711,34 @@ static vkw_input_cb_t vkw_input_callback = NULL;
 
 /* Console window shortcut */
 static int vkw_console_idx = -1;
+/* Conversation window shortcut */
+static int vkw_convo_idx = -1;
 /* Backscroll window shortcut (defined later, declared here) */
 static int vkw_backscroll_idx = -1;
+
+/* Forward decl for convo input handler */
+static void convo_on_input(const char *text);
+
+/* Chat channel types */
+#define CHAT_GOSSIP    0
+#define CHAT_BROADCAST 1
+#define CHAT_GANGPATH  2
+#define CHAT_TELEPATH  3
+#define CHAT_AUCTION   4
+#define CHAT_SAY       5
+#define CHAT_NUM       6
+
+static const char *chat_chan_tags[] = {
+    "[Gos]", "[Broad]", "[Gang]", "[Tell]", "[Auct]", "[Say]"
+};
+
+static int convo_out_channel = CHAT_GOSSIP;
+static char convo_tell_target[32] = {0};
+
+static const char *chat_send_prefix[] = {
+    "gossip ", "broadcast ", "gangpath ", "telepath ",
+    "auction ", "say "
+};
 
 /* Forward decls */
 static void vkw_print(int idx, const char *text);
@@ -1180,9 +1227,11 @@ static int vkw_key_char(unsigned int ch)
             }
             w->hist_idx = w->hist_count;
         }
-        /* Console window → Python eval; other windows → callback */
+        /* Console window → Python eval; Convo window → chat; others → callback */
         if (vkw_focus == vkw_console_idx && w->input[0]) {
             vkt_eval_python(w->input, w->id);
+        } else if (vkw_focus == vkw_convo_idx && w->input[0]) {
+            convo_on_input(w->input);
         } else if (vkw_input_callback) {
             vkw_input_callback(w->id, w->input);
         }
@@ -1332,6 +1381,756 @@ static void vkw_toggle_console(int vp_w, int vp_h)
     }
 }
 
+static void vkw_toggle_convo(int vp_w, int vp_h)
+{
+    if (vkw_convo_idx >= 0 && vkw_windows[vkw_convo_idx].active) {
+        vkw_close(vkw_convo_idx);
+        vkw_convo_idx = -1;
+        return;
+    }
+    int cw = 480, ch = 360;
+    int cx = vp_w - cw - 20, cy = vp_h - ch - 40;
+    vkw_convo_idx = vkw_create("Conversation", cx, cy, cw, ch, 1);
+    if (vkw_convo_idx >= 0) {
+        vkw_focus = vkw_convo_idx;
+        vkw_print(vkw_convo_idx, "--- Chat ---");
+        vkw_print(vkw_convo_idx, "Channel: /gos /tell <name> /broad /gang /auct /say");
+        vkw_print(vkw_convo_idx, "");
+    }
+}
+
+/* ---- Chat line parsing ---- */
+/* Detect chat lines from MUD output, forward to conversation window */
+
+static int str_starts(const char *s, const char *prefix)
+{
+    while (*prefix) { if (*s++ != *prefix++) return 0; }
+    return 1;
+}
+
+/* Case-insensitive check if word at `s` matches `w`, followed by space or ':' */
+static int str_word_match(const char *s, const char *w)
+{
+    while (*w) {
+        char a = *s, b = *w;
+        if (a >= 'A' && a <= 'Z') a += 32;
+        if (b >= 'A' && b <= 'Z') b += 32;
+        if (a != b) return 0;
+        s++; w++;
+    }
+    return 1;
+}
+
+static void convo_parse_line(const char *line)
+{
+    if (vkw_convo_idx < 0 || !vkw_windows[vkw_convo_idx].active) return;
+    if (!line || !line[0]) return;
+
+    /* Strip ANSI escape sequences for matching */
+    char clean[256];
+    int ci = 0;
+    for (const char *p = line; *p && ci < 254; ) {
+        if (*p == '\x1b') {
+            p++;
+            if (*p == '[') {
+                p++;
+                while (*p && *p != 'm') p++;
+                if (*p == 'm') p++;
+            }
+            continue;
+        }
+        clean[ci++] = *p++;
+    }
+    clean[ci] = 0;
+
+    char buf[300];
+    const char *s = clean;
+
+    /* "You gossip: msg" */
+    if (str_starts(s, "You gossip:")) {
+        wsprintfA(buf, "%s You: %s", chat_chan_tags[CHAT_GOSSIP], s + 12);
+        vkw_print(vkw_convo_idx, buf);
+        return;
+    }
+    /* "PlayerName gossips: msg" */
+    {
+        const char *g = strstr(s, " gossips:");
+        if (g && g > s && g < s + 30) {
+            int nlen = (int)(g - s);
+            char name[32]; if (nlen > 31) nlen = 31;
+            memcpy(name, s, nlen); name[nlen] = 0;
+            wsprintfA(buf, "%s %s: %s", chat_chan_tags[CHAT_GOSSIP], name, g + 10);
+            vkw_print(vkw_convo_idx, buf);
+            return;
+        }
+    }
+    /* "Broadcast from PlayerName \"msg\"" */
+    if (str_starts(s, "Broadcast from ")) {
+        wsprintfA(buf, "%s %s", chat_chan_tags[CHAT_BROADCAST], s + 15);
+        vkw_print(vkw_convo_idx, buf);
+        return;
+    }
+    /* "PlayerName telepaths to you: msg" */
+    {
+        const char *t = strstr(s, " telepaths to you:");
+        if (t && t > s && t < s + 30) {
+            int nlen = (int)(t - s);
+            char name[32]; if (nlen > 31) nlen = 31;
+            memcpy(name, s, nlen); name[nlen] = 0;
+            wsprintfA(buf, "%s %s: %s", chat_chan_tags[CHAT_TELEPATH], name, t + 19);
+            vkw_print(vkw_convo_idx, buf);
+            return;
+        }
+    }
+    /* "PlayerName telepaths: msg" (outgoing telepath echo) */
+    {
+        const char *t = strstr(s, " telepaths:");
+        if (t && t > s && t < s + 30) {
+            int nlen = (int)(t - s);
+            char name[32]; if (nlen > 31) nlen = 31;
+            memcpy(name, s, nlen); name[nlen] = 0;
+            wsprintfA(buf, "%s %s: %s", chat_chan_tags[CHAT_TELEPATH], name, t + 12);
+            vkw_print(vkw_convo_idx, buf);
+            return;
+        }
+    }
+    /* "You gangpath: msg" / "PlayerName gangpaths: msg" */
+    if (str_starts(s, "You gangpath:")) {
+        wsprintfA(buf, "%s You: %s", chat_chan_tags[CHAT_GANGPATH], s + 14);
+        vkw_print(vkw_convo_idx, buf);
+        return;
+    }
+    {
+        const char *g = strstr(s, " gangpaths:");
+        if (g && g > s && g < s + 30) {
+            int nlen = (int)(g - s);
+            char name[32]; if (nlen > 31) nlen = 31;
+            memcpy(name, s, nlen); name[nlen] = 0;
+            wsprintfA(buf, "%s %s: %s", chat_chan_tags[CHAT_GANGPATH], name, g + 12);
+            vkw_print(vkw_convo_idx, buf);
+            return;
+        }
+    }
+    /* "You auction: msg" / "PlayerName auctions: msg" */
+    if (str_starts(s, "You auction:")) {
+        wsprintfA(buf, "%s You: %s", chat_chan_tags[CHAT_AUCTION], s + 13);
+        vkw_print(vkw_convo_idx, buf);
+        return;
+    }
+    {
+        const char *a = strstr(s, " auctions:");
+        if (a && a > s && a < s + 30) {
+            int nlen = (int)(a - s);
+            char name[32]; if (nlen > 31) nlen = 31;
+            memcpy(name, s, nlen); name[nlen] = 0;
+            wsprintfA(buf, "%s %s: %s", chat_chan_tags[CHAT_AUCTION], name, a + 11);
+            vkw_print(vkw_convo_idx, buf);
+            return;
+        }
+    }
+    /* 'You say "msg"' / 'PlayerName says "msg"' */
+    if (str_starts(s, "You say \"")) {
+        wsprintfA(buf, "%s You: %s", chat_chan_tags[CHAT_SAY], s + 9);
+        vkw_print(vkw_convo_idx, buf);
+        return;
+    }
+    {
+        const char *a = strstr(s, " says \"");
+        if (a && a > s && a < s + 30) {
+            int nlen = (int)(a - s);
+            char name[32]; if (nlen > 31) nlen = 31;
+            memcpy(name, s, nlen); name[nlen] = 0;
+            wsprintfA(buf, "%s %s: %s", chat_chan_tags[CHAT_SAY], name, a + 7);
+            vkw_print(vkw_convo_idx, buf);
+            return;
+        }
+    }
+}
+
+/* Handle conversation window input — send to MUD via WM_CHAR to MMANSI */
+static void convo_on_input(const char *text)
+{
+    if (!text || !text[0]) return;
+
+    /* Channel switch commands */
+    if (str_starts(text, "/gos")) { convo_out_channel = CHAT_GOSSIP; vkw_print(vkw_convo_idx, "Channel: Gossip"); return; }
+    if (str_starts(text, "/broad")) { convo_out_channel = CHAT_BROADCAST; vkw_print(vkw_convo_idx, "Channel: Broadcast"); return; }
+    if (str_starts(text, "/gang")) { convo_out_channel = CHAT_GANGPATH; vkw_print(vkw_convo_idx, "Channel: Gangpath"); return; }
+    if (str_starts(text, "/auct")) { convo_out_channel = CHAT_AUCTION; vkw_print(vkw_convo_idx, "Channel: Auction"); return; }
+    if (str_starts(text, "/say")) { convo_out_channel = CHAT_SAY; vkw_print(vkw_convo_idx, "Channel: Say"); return; }
+    if (str_starts(text, "/tell ")) {
+        convo_out_channel = CHAT_TELEPATH;
+        /* Extract target name */
+        const char *name = text + 6;
+        while (*name == ' ') name++;
+        int i = 0;
+        while (name[i] && name[i] != ' ' && i < 31) {
+            convo_tell_target[i] = name[i]; i++;
+        }
+        convo_tell_target[i] = 0;
+        char msg[64];
+        wsprintfA(msg, "Channel: Tell -> %s", convo_tell_target);
+        vkw_print(vkw_convo_idx, msg);
+        return;
+    }
+
+    /* Build command string and send to MUD */
+    char cmd[300];
+    if (convo_out_channel == CHAT_TELEPATH && convo_tell_target[0]) {
+        wsprintfA(cmd, "telepath %s %s", convo_tell_target, text);
+    } else {
+        wsprintfA(cmd, "%s%s", chat_send_prefix[convo_out_channel], text);
+    }
+
+    /* Send via WM_CHAR to MMANSI */
+    HWND mw = FindWindowA("MMMAIN", NULL);
+    if (!mw) return;
+    HWND ansi = FindWindowExA(mw, NULL, "MMANSI", NULL);
+    HWND target = ansi ? ansi : mw;
+    for (int i = 0; cmd[i]; i++)
+        PostMessageA(target, WM_CHAR, (WPARAM)(unsigned char)cmd[i], 0);
+    PostMessageA(target, WM_CHAR, (WPARAM)'\r', 0);
+}
+
+/* ---- Paths & Loops Window ---- */
+/* Reads Rooms.md and .mp files directly from MegaMUD directories.
+ * Merges Default + Chars/All (All overrides Default).
+ * Displays in a VKW window with Goto/Loop tabs, search, hidden toggle, walk/run. */
+
+#define PL_MAX_ROOMS    2000
+#define PL_MAX_CATS      100
+#define PL_MAX_PATHS     800
+#define PL_MAX_NAME       80
+#define PL_MAX_CODE        8
+#define PL_MAX_CAT        40
+#define PL_MAX_FILE       16
+
+typedef struct {
+    char name[PL_MAX_NAME];
+    char code[PL_MAX_CODE];
+    char category[PL_MAX_CAT];
+    unsigned int hash;
+    unsigned int flags;
+    int hidden; /* flags & 0x10 */
+} pl_room_t;
+
+typedef struct {
+    char name[PL_MAX_NAME];
+    char creator[32];
+    char file[PL_MAX_FILE];
+    char start_code[PL_MAX_CODE];
+    char start_category[PL_MAX_CAT];
+    char start_room[PL_MAX_NAME];
+    unsigned int start_hash, end_hash;
+    int steps;
+    int is_loop; /* start_hash == end_hash */
+} pl_path_t;
+
+static pl_room_t *pl_rooms = NULL;
+static int pl_room_count = 0;
+static pl_path_t *pl_paths = NULL;
+static int pl_path_count = 0;
+
+/* Category index for tree display */
+typedef struct {
+    char name[PL_MAX_CAT];
+    int first_idx;  /* index into pl_rooms or pl_paths */
+    int count;
+    int expanded;
+} pl_cat_t;
+
+static pl_cat_t pl_room_cats[PL_MAX_CATS];
+static int pl_room_cat_count = 0;
+static pl_cat_t pl_loop_cats[PL_MAX_CATS];
+static int pl_loop_cat_count = 0;
+
+/* Window state */
+static int pl_wnd_open = 0;
+static float pl_x = 100, pl_y = 50, pl_w = 520, pl_h = 480;
+static int pl_dragging = 0;
+static float pl_drag_ox, pl_drag_oy;
+static int pl_tab = 0;       /* 0 = Goto, 1 = Loop */
+static int pl_show_hidden = 1;  /* shown by default, like MegaMUD */
+static int pl_run_mode = 0;  /* 0 = Walk (combat on), 1 = Run (combat off) */
+static char pl_search[64] = {0};
+static int pl_search_len = 0;
+static int pl_scroll = 0;
+static int pl_hover_item = -1;
+static int pl_selected_item = -1;  /* currently selected (green) item, -1 = none */
+static int pl_focused = 0;   /* input focus for search box */
+static int pl_loaded = 0;
+
+/* Get MegaMUD base directory (where the DLL's host exe lives) */
+static void pl_get_megamud_dir(char *buf, int bufsz)
+{
+    GetModuleFileNameA(NULL, buf, bufsz);
+    /* Strip exe filename */
+    char *last = buf;
+    for (char *p = buf; *p; p++) {
+        if (*p == '\\' || *p == '/') last = p;
+    }
+    if (last > buf) *(last + 1) = 0;
+    else buf[0] = 0;
+}
+
+static unsigned int pl_parse_hex(const char *s)
+{
+    unsigned int v = 0;
+    for (int i = 0; i < 8 && s[i]; i++) {
+        char c = s[i];
+        int d = 0;
+        if (c >= '0' && c <= '9') d = c - '0';
+        else if (c >= 'a' && c <= 'f') d = 10 + c - 'a';
+        else if (c >= 'A' && c <= 'F') d = 10 + c - 'A';
+        v = (v << 4) | d;
+    }
+    return v;
+}
+
+/* Parse one Rooms.md line: HASH:FLAGS:v1:v2:v3:CODE:CATEGORY:NAME */
+static int pl_parse_room_line(const char *line, pl_room_t *r)
+{
+    const char *p = line;
+    /* Field 0: hash (8 hex chars) */
+    const char *f0 = p;
+    while (*p && *p != ':') p++;
+    if (*p != ':') return 0; p++;
+    r->hash = pl_parse_hex(f0);
+
+    /* Field 1: flags (8 hex chars) */
+    const char *f1 = p;
+    while (*p && *p != ':') p++;
+    if (*p != ':') return 0; p++;
+    r->flags = pl_parse_hex(f1);
+    r->hidden = (r->flags & 0x10) ? 1 : 0;
+
+    /* Fields 2,3,4: skip */
+    for (int i = 0; i < 3; i++) {
+        while (*p && *p != ':') p++;
+        if (*p != ':') return 0; p++;
+    }
+
+    /* Field 5: code */
+    const char *f5 = p;
+    while (*p && *p != ':') p++;
+    if (*p != ':') return 0;
+    int len = (int)(p - f5); if (len >= PL_MAX_CODE) len = PL_MAX_CODE - 1;
+    memcpy(r->code, f5, len); r->code[len] = 0;
+    p++;
+
+    /* Field 6: category */
+    const char *f6 = p;
+    while (*p && *p != ':') p++;
+    if (*p != ':') return 0;
+    len = (int)(p - f6); if (len >= PL_MAX_CAT) len = PL_MAX_CAT - 1;
+    memcpy(r->category, f6, len); r->category[len] = 0;
+    p++;
+
+    /* Field 7: name (rest of line) */
+    const char *f7 = p;
+    len = 0;
+    while (f7[len] && f7[len] != '\n' && f7[len] != '\r') len++;
+    if (len >= PL_MAX_NAME) len = PL_MAX_NAME - 1;
+    memcpy(r->name, f7, len); r->name[len] = 0;
+
+    return (r->name[0] && r->code[0] && r->category[0]) ? 1 : 0;
+}
+
+/* Parse one .mp file: returns 1 on success */
+static int pl_parse_mp(const char *filepath, pl_path_t *path)
+{
+    FILE *f = fopen(filepath, "r");
+    if (!f) return 0;
+    char buf[512];
+    memset(path, 0, sizeof(*path));
+
+    /* Line 1: [Name][Creator] */
+    if (!fgets(buf, sizeof(buf), f)) { fclose(f); return 0; }
+    {
+        char *p = buf;
+        if (*p == '[') {
+            p++;
+            char *end = strchr(p, ']');
+            if (end) {
+                int len = (int)(end - p);
+                if (len >= PL_MAX_NAME) len = PL_MAX_NAME - 1;
+                memcpy(path->name, p, len); path->name[len] = 0;
+                p = end + 1;
+                if (*p == '[') {
+                    p++;
+                    end = strchr(p, ']');
+                    if (end) {
+                        len = (int)(end - p);
+                        if (len >= 31) len = 31;
+                        memcpy(path->creator, p, len); path->creator[len] = 0;
+                    }
+                }
+            }
+        }
+    }
+
+    /* Line 2: [CODE:Category:RoomName] */
+    if (!fgets(buf, sizeof(buf), f)) { fclose(f); return 0; }
+    {
+        char *p = buf;
+        if (*p == '[') {
+            p++;
+            char *end = strchr(p, ':');
+            if (end) {
+                int len = (int)(end - p);
+                if (len >= PL_MAX_CODE) len = PL_MAX_CODE - 1;
+                memcpy(path->start_code, p, len); path->start_code[len] = 0;
+                p = end + 1;
+                end = strchr(p, ':');
+                if (end) {
+                    len = (int)(end - p);
+                    if (len >= PL_MAX_CAT) len = PL_MAX_CAT - 1;
+                    memcpy(path->start_category, p, len); path->start_category[len] = 0;
+                    p = end + 1;
+                    end = strchr(p, ']');
+                    if (end) {
+                        len = (int)(end - p);
+                        if (len >= PL_MAX_NAME) len = PL_MAX_NAME - 1;
+                        memcpy(path->start_room, p, len); path->start_room[len] = 0;
+                    }
+                }
+            }
+        }
+    }
+
+    /* Line 3: start_hash:end_hash:steps:-1:0::: */
+    if (!fgets(buf, sizeof(buf), f)) { fclose(f); return 0; }
+    {
+        char *p = buf;
+        const char *f0 = p;
+        while (*p && *p != ':') p++;
+        if (*p == ':') { path->start_hash = pl_parse_hex(f0); p++; }
+        const char *f1 = p;
+        while (*p && *p != ':') p++;
+        if (*p == ':') { path->end_hash = pl_parse_hex(f1); p++; }
+        /* steps */
+        path->steps = 0;
+        while (*p >= '0' && *p <= '9') { path->steps = path->steps * 10 + (*p - '0'); p++; }
+    }
+
+    fclose(f);
+    path->is_loop = (path->start_hash == path->end_hash) ? 1 : 0;
+
+    /* Extract filename from path */
+    const char *fname = filepath;
+    for (const char *p = filepath; *p; p++) {
+        if (*p == '\\' || *p == '/') fname = p + 1;
+    }
+    int flen = 0;
+    while (fname[flen] && fname[flen] != '.' && flen < PL_MAX_FILE - 1) {
+        path->file[flen] = fname[flen]; flen++;
+    }
+    path->file[flen] = 0;
+
+    /* Skip unnamed/empty paths */
+    if (!path->name[0] || !path->start_code[0]) return 0;
+    return 1;
+}
+
+/* Case-insensitive substring search */
+static int pl_stristr(const char *hay, const char *needle)
+{
+    if (!needle[0]) return 1;
+    for (const char *h = hay; *h; h++) {
+        const char *a = h, *b = needle;
+        while (*a && *b) {
+            char ca = *a, cb = *b;
+            if (ca >= 'A' && ca <= 'Z') ca += 32;
+            if (cb >= 'A' && cb <= 'Z') cb += 32;
+            if (ca != cb) break;
+            a++; b++;
+        }
+        if (!*b) return 1;
+    }
+    return 0;
+}
+
+/* strcmp for qsort */
+static int pl_cat_cmp(const void *a, const void *b)
+{
+    return strcmp(((const pl_cat_t *)a)->name, ((const pl_cat_t *)b)->name);
+}
+
+static int pl_room_cmp(const void *a, const void *b)
+{
+    const pl_room_t *ra = (const pl_room_t *)a, *rb = (const pl_room_t *)b;
+    int c = strcmp(ra->category, rb->category);
+    return c ? c : strcmp(ra->name, rb->name);
+}
+
+static int pl_path_cmp(const void *a, const void *b)
+{
+    const pl_path_t *pa = (const pl_path_t *)a, *pb = (const pl_path_t *)b;
+    int c = strcmp(pa->start_category, pb->start_category);
+    if (c) return c;
+    /* Sort loops before non-loops so loop category indices are contiguous */
+    if (pa->is_loop != pb->is_loop) return pb->is_loop - pa->is_loop;
+    return strcmp(pa->name, pb->name);
+}
+
+/* Build category index from rooms or paths */
+static void pl_build_room_cats(void)
+{
+    pl_room_cat_count = 0;
+    /* Sort rooms by category then name */
+    if (pl_room_count > 1)
+        qsort(pl_rooms, pl_room_count, sizeof(pl_room_t), pl_room_cmp);
+
+    for (int i = 0; i < pl_room_count; i++) {
+        /* Find or create category */
+        int found = -1;
+        for (int c = 0; c < pl_room_cat_count; c++) {
+            if (strcmp(pl_room_cats[c].name, pl_rooms[i].category) == 0) {
+                found = c; break;
+            }
+        }
+        if (found < 0 && pl_room_cat_count < PL_MAX_CATS) {
+            found = pl_room_cat_count++;
+            strncpy(pl_room_cats[found].name, pl_rooms[i].category, PL_MAX_CAT - 1);
+            pl_room_cats[found].first_idx = i;
+            pl_room_cats[found].count = 0;
+            pl_room_cats[found].expanded = 0;
+        }
+        if (found >= 0) pl_room_cats[found].count++;
+    }
+    if (pl_room_cat_count > 1)
+        qsort(pl_room_cats, pl_room_cat_count, sizeof(pl_cat_t), pl_cat_cmp);
+
+    /* Recompute first_idx after sort */
+    for (int c = 0; c < pl_room_cat_count; c++) {
+        pl_room_cats[c].count = 0;
+        pl_room_cats[c].first_idx = -1;
+    }
+    for (int i = 0; i < pl_room_count; i++) {
+        for (int c = 0; c < pl_room_cat_count; c++) {
+            if (strcmp(pl_room_cats[c].name, pl_rooms[i].category) == 0) {
+                if (pl_room_cats[c].first_idx < 0) pl_room_cats[c].first_idx = i;
+                pl_room_cats[c].count++;
+                break;
+            }
+        }
+    }
+}
+
+static void pl_build_loop_cats(void)
+{
+    pl_loop_cat_count = 0;
+    if (pl_path_count > 1)
+        qsort(pl_paths, pl_path_count, sizeof(pl_path_t), pl_path_cmp);
+
+    /* Only index loops (start_hash == end_hash) — matches MegaMUD's "Roam area" */
+    for (int i = 0; i < pl_path_count; i++) {
+        if (!pl_paths[i].is_loop) continue;
+        const char *cat = pl_paths[i].start_category;
+        int found = -1;
+        for (int c = 0; c < pl_loop_cat_count; c++) {
+            if (strcmp(pl_loop_cats[c].name, cat) == 0) { found = c; break; }
+        }
+        if (found < 0 && pl_loop_cat_count < PL_MAX_CATS) {
+            found = pl_loop_cat_count++;
+            strncpy(pl_loop_cats[found].name, cat, PL_MAX_CAT - 1);
+            pl_loop_cats[found].first_idx = i;
+            pl_loop_cats[found].count = 0;
+            pl_loop_cats[found].expanded = 0;
+        }
+        if (found >= 0) pl_loop_cats[found].count++;
+    }
+    if (pl_loop_cat_count > 1)
+        qsort(pl_loop_cats, pl_loop_cat_count, sizeof(pl_cat_t), pl_cat_cmp);
+
+    for (int c = 0; c < pl_loop_cat_count; c++) {
+        pl_loop_cats[c].count = 0;
+        pl_loop_cats[c].first_idx = -1;
+    }
+    for (int i = 0; i < pl_path_count; i++) {
+        if (!pl_paths[i].is_loop) continue;
+        for (int c = 0; c < pl_loop_cat_count; c++) {
+            if (strcmp(pl_loop_cats[c].name, pl_paths[i].start_category) == 0) {
+                if (pl_loop_cats[c].first_idx < 0) pl_loop_cats[c].first_idx = i;
+                pl_loop_cats[c].count++;
+                break;
+            }
+        }
+    }
+}
+
+/* Load all room and path data from MegaMUD files */
+static void pl_load_data(void)
+{
+    if (pl_loaded) return;
+    pl_loaded = 1;
+
+    char base[MAX_PATH];
+    pl_get_megamud_dir(base, MAX_PATH);
+
+    /* Allocate */
+    if (!pl_rooms) pl_rooms = (pl_room_t *)calloc(PL_MAX_ROOMS, sizeof(pl_room_t));
+    if (!pl_paths) pl_paths = (pl_path_t *)calloc(PL_MAX_PATHS, sizeof(pl_path_t));
+    pl_room_count = 0;
+    pl_path_count = 0;
+
+    /* ---- Load Rooms.md ---- */
+    /* Load Default first, then Chars/All overrides by hash */
+    char path[MAX_PATH];
+
+    /* Default/Rooms.md */
+    wsprintfA(path, "%sDefault\\Rooms.md", base);
+    FILE *f = fopen(path, "r");
+    if (f) {
+        char line[512];
+        while (fgets(line, sizeof(line), f) && pl_room_count < PL_MAX_ROOMS) {
+            pl_room_t r;
+            if (pl_parse_room_line(line, &r))
+                pl_rooms[pl_room_count++] = r;
+        }
+        fclose(f);
+    }
+
+    /* Chars/All/Rooms.md — override by hash */
+    wsprintfA(path, "%sChars\\All\\Rooms.md", base);
+    f = fopen(path, "r");
+    if (f) {
+        char line[512];
+        while (fgets(line, sizeof(line), f)) {
+            pl_room_t r;
+            if (!pl_parse_room_line(line, &r)) continue;
+            /* Check for existing room with same hash */
+            int found = 0;
+            for (int i = 0; i < pl_room_count; i++) {
+                if (pl_rooms[i].hash == r.hash) {
+                    pl_rooms[i] = r; found = 1; break;
+                }
+            }
+            if (!found && pl_room_count < PL_MAX_ROOMS)
+                pl_rooms[pl_room_count++] = r;
+        }
+        fclose(f);
+    }
+
+    /* ---- Load .mp path files ---- */
+    /* Default first, then Chars/All overrides by filename */
+    WIN32_FIND_DATAA fd;
+    HANDLE hFind;
+
+    wsprintfA(path, "%sDefault\\*.mp", base);
+    hFind = FindFirstFileA(path, &fd);
+    int mp_total = 0, mp_named = 0, mp_loop = 0;
+    if (hFind != INVALID_HANDLE_VALUE) {
+        do {
+            char fpath[MAX_PATH];
+            wsprintfA(fpath, "%sDefault\\%s", base, fd.cFileName);
+            pl_path_t p;
+            mp_total++;
+            if (pl_parse_mp(fpath, &p) && pl_path_count < PL_MAX_PATHS) {
+                mp_named++;
+                if (p.is_loop) mp_loop++;
+                if (p.is_loop && api)
+                    api->log("[P&L] Default loop: '%s' cat='%s' file='%s' hash=%08X steps=%d\n",
+                             p.name, p.start_category, p.file, p.start_hash, p.steps);
+                pl_paths[pl_path_count++] = p;
+            }
+        } while (FindNextFileA(hFind, &fd));
+        FindClose(hFind);
+    }
+    if (api) api->log("[P&L] Default: %d total .mp, %d named, %d loops\n", mp_total, mp_named, mp_loop);
+
+    /* Chars/All — override by filename */
+    wsprintfA(path, "%sChars\\All\\*.mp", base);
+    hFind = FindFirstFileA(path, &fd);
+    int ca_total = 0, ca_named = 0, ca_loop = 0;
+    if (hFind != INVALID_HANDLE_VALUE) {
+        do {
+            char fpath[MAX_PATH];
+            wsprintfA(fpath, "%sChars\\All\\%s", base, fd.cFileName);
+            pl_path_t p;
+            ca_total++;
+            if (!pl_parse_mp(fpath, &p)) continue;
+            ca_named++;
+            if (p.is_loop) ca_loop++;
+            if (p.is_loop && api)
+                api->log("[P&L] Chars/All loop: '%s' cat='%s' file='%s' hash=%08X steps=%d\n",
+                         p.name, p.start_category, p.file, p.start_hash, p.steps);
+            /* Override existing by filename */
+            int found = 0;
+            for (int i = 0; i < pl_path_count; i++) {
+                if (strcmp(pl_paths[i].file, p.file) == 0) {
+                    pl_paths[i] = p; found = 1; break;
+                }
+            }
+            if (!found && pl_path_count < PL_MAX_PATHS)
+                pl_paths[pl_path_count++] = p;
+        } while (FindNextFileA(hFind, &fd));
+        FindClose(hFind);
+    }
+    if (api) api->log("[P&L] Chars/All: %d total .mp, %d named, %d loops\n", ca_total, ca_named, ca_loop);
+    if (api) api->log("[P&L] Total paths loaded: %d\n", pl_path_count);
+
+    /* Build category indices */
+    pl_build_room_cats();
+    pl_build_loop_cats();
+
+    if (api) api->log("[vk_terminal] Paths&Loops: %d rooms (%d cats), %d paths/loops (%d cats)\n",
+                       pl_room_count, pl_room_cat_count, pl_path_count, pl_loop_cat_count);
+}
+
+/* Execute goto via Python eval */
+static void pl_do_goto(const char *room_name)
+{
+    mmudpy_queue_eval_fn fn = vkt_resolve_eval();
+    if (!fn) return;
+    char code[400];
+    wsprintfA(code,
+        "import urllib.request,json\n"
+        "r=urllib.request.urlopen(urllib.request.Request("
+        "'http://127.0.0.1:8000/api/mem/goto',"
+        "data=json.dumps({'room':'%s','run':%s}).encode(),"
+        "method='POST',headers={'Content-Type':'application/json'}))\n"
+        "d=json.loads(r.read())\n"
+        "print('Goto:',d.get('room','?'),'ok' if d.get('ok') else d.get('error','fail'))",
+        room_name, pl_run_mode ? "True" : "False");
+    fn(code, 0);
+
+    /* Add to recent goto list */
+    if (vkm_goto_count < VKM_GOTO_MAX) {
+        /* Shift down */
+        for (int i = vkm_goto_count; i > 0; i--) {
+            memcpy(vkm_goto_names[i], vkm_goto_names[i-1], 64);
+            vkm_goto_nums[i] = vkm_goto_nums[i-1];
+        }
+        vkm_goto_count++;
+    } else {
+        for (int i = VKM_GOTO_MAX - 1; i > 0; i--) {
+            memcpy(vkm_goto_names[i], vkm_goto_names[i-1], 64);
+            vkm_goto_nums[i] = vkm_goto_nums[i-1];
+        }
+    }
+    strncpy(vkm_goto_names[0], room_name, 63);
+    vkm_goto_names[0][63] = 0;
+    vkm_goto_nums[0] = 1;
+}
+
+static void pl_do_loop(const char *file)
+{
+    mmudpy_queue_eval_fn fn = vkt_resolve_eval();
+    if (!fn) return;
+    char code[400];
+    wsprintfA(code,
+        "import urllib.request,json\n"
+        "r=urllib.request.urlopen(urllib.request.Request("
+        "'http://127.0.0.1:8000/api/mem/loop',"
+        "data=json.dumps({'file':'%s'}).encode(),"
+        "method='POST',headers={'Content-Type':'application/json'}))\n"
+        "d=json.loads(r.read())\n"
+        "print('Loop:',d.get('file','?'),'ok' if d.get('ok') else d.get('error','fail'))",
+        file);
+    fn(code, 0);
+}
+
 /* ---- Exported functions for Python API ---- */
 
 __declspec(dllexport) int vkt_wnd_create(const char *title, int x, int y, int w, int h, int has_input)
@@ -1442,6 +2241,70 @@ static int fx_fbm_mode = 0;       /* 0 = off, 1 = FBM noise warp */
 static int fx_sobel_mode = 0;     /* 0 = off, 1 = sobel/sharp/plastic */
 static int fx_scanline_mode = 0;  /* 0 = off, 1 = CRT scanlines */
 static float fx_time = 0.0f;      /* animation time in seconds */
+
+/* ---- Vulkan Round Timer Widget ---- */
+#define VRT_DEFAULT_SIZE 160
+#define VRT_MIN_SIZE      80
+#define VRT_MAX_SIZE     400
+#define VRT_ARC_SEGS      64     /* segments for smooth arc */
+#define VRT_PARTICLE_MAX   24
+
+static int  vrt_visible = 0;
+static float vrt_x = 50.0f, vrt_y = 50.0f;   /* top-left in pixels */
+static float vrt_size = VRT_DEFAULT_SIZE;      /* widget diameter */
+static int  vrt_dragging = 0;
+static float vrt_drag_ox, vrt_drag_oy;
+
+/* Round timing — mirrors gl_round_timer.c algorithm exactly */
+static volatile int    vrt_round_num = 0;
+static volatile int    vrt_synced = 0;
+static double          vrt_last_tick_ts = 0.0;
+static double          vrt_round_period = 5000.0;
+static double          vrt_recent_intervals[12];
+static int             vrt_interval_count = 0;
+static char            vrt_delta_text[32] = "";
+static double          vrt_delta_fade = 0.0;
+static int             vrt_flash_tick = 0;
+
+/* Manual sync state */
+static char vrt_sync_spell[22] = {0};
+static volatile int vrt_ms_state = 0;       /* 0=idle, 1=spamming */
+static volatile int vrt_ms_already_count = 0;
+static volatile int vrt_ms_rounds_detected = 0;
+
+/* Context menu */
+static int  vrt_ctx_open = 0;
+static int  vrt_ctx_x = 0, vrt_ctx_y = 0;
+static int  vrt_ctx_hover = -1;
+#define VRT_CTX_W       220
+#define VRT_CTX_ITEM_H   28
+#define VRT_CTX_PAD       6
+
+/* Menu item IDs */
+#define VRT_CTX_SPELL     0
+#define VRT_CTX_CAST      1
+#define VRT_CTX_SEP1      2
+#define VRT_CTX_SMALL     3
+#define VRT_CTX_NORMAL    4
+#define VRT_CTX_LARGE     5
+#define VRT_CTX_SEP2      6
+#define VRT_CTX_RESET     7
+#define VRT_CTX_HIDE      8
+#define VRT_CTX_COUNT     9
+
+/* Spell input dialog state */
+static int  vrt_spell_input = 0;   /* 1 = showing spell input */
+static char vrt_spell_buf[22] = {0};
+static int  vrt_spell_len = 0;
+static int  vrt_spell_cursor = 0;
+
+/* Particles */
+static struct {
+    float x, y, vx, vy, alpha, r, g, b;
+    int alive;
+} vrt_particles[VRT_PARTICLE_MAX];
+static int vrt_particle_idx = 0;
+
 static VkDescriptorSetLayout vk_desc_layout = VK_NULL_HANDLE;
 static VkDescriptorPool vk_desc_pool = VK_NULL_HANDLE;
 static VkDescriptorSet vk_desc_set = VK_NULL_HANDLE;
@@ -1458,6 +2321,17 @@ static VkDeviceMemory vk_font_mem = VK_NULL_HANDLE;
 static VkImageView vk_font_view = VK_NULL_HANDLE;
 static VkSampler vk_font_sampler = VK_NULL_HANDLE;
 
+/* UI font texture (dedicated high-quality TTF for P&L window, convo, etc.) */
+static VkImage ui_font_img = VK_NULL_HANDLE;
+static VkDeviceMemory ui_font_mem = VK_NULL_HANDLE;
+static VkImageView ui_font_view = VK_NULL_HANDLE;
+static VkSampler ui_font_sampler = VK_NULL_HANDLE;
+static VkDescriptorSet ui_desc_set = VK_NULL_HANDLE;
+static uint32_t ui_atlas_w = 256, ui_atlas_h = 512;
+static int ui_font_ready = 0;
+static int pl_quad_start = 0;  /* index in quad buffer where P&L quads begin */
+static int pl_quad_end = 0;    /* index where P&L quads end (menu quads follow) */
+
 /* Vertex + index buffers */
 static VkBuffer vk_vbuf = VK_NULL_HANDLE;
 static VkDeviceMemory vk_vmem = VK_NULL_HANDLE;
@@ -1465,6 +2339,7 @@ static VkBuffer vk_ibuf = VK_NULL_HANDLE;
 static VkDeviceMemory vk_imem = VK_NULL_HANDLE;
 static vertex_t *vk_vdata = NULL;  /* persistently mapped */
 static int quad_count = 0;
+static int fx_split_quad = 0;     /* quads before this = terminal (FX), after = UI (normal) */
 
 /* ---- Forward declarations ---- */
 
@@ -1627,6 +2502,27 @@ static void push_quad(float x0, float y0, float x1, float y1,
     quad_count++;
 }
 
+/* Free-form quad: 4 arbitrary corners (clockwise or CCW), solid color.
+ * Uses glyph 219 (solid block) UVs so fragment shader outputs solid fill.
+ * All positions in NDC [-1,1]. */
+static void push_quad_free(float x0, float y0, float x1, float y1,
+                           float x2, float y2, float x3, float y3,
+                           float r, float g, float b, float a)
+{
+    if (quad_count >= MAX_QUADS) return;
+    int vi = quad_count * 4;
+    /* Solid fill UVs — center of glyph 219 */
+    float tex_cw = 1.0f / 16.0f, tex_ch = 1.0f / 16.0f;
+    float hp_u = 0.5f / (float)cur_atlas_w, hp_v = 0.5f / (float)cur_atlas_h;
+    float su = (219 % 16) * tex_cw + tex_cw * 0.5f;
+    float sv = (219 / 16) * tex_ch + tex_ch * 0.5f;
+    vk_vdata[vi+0] = (vertex_t){ x0, y0, su, sv, r, g, b, a };
+    vk_vdata[vi+1] = (vertex_t){ x1, y1, su, sv, r, g, b, a };
+    vk_vdata[vi+2] = (vertex_t){ x2, y2, su, sv, r, g, b, a };
+    vk_vdata[vi+3] = (vertex_t){ x3, y3, su, sv, r, g, b, a };
+    quad_count++;
+}
+
 /* Push a solid filled rect (uses glyph 219 █ for solid pixels) */
 static void push_solid(float x0, float y0, float x1, float y1,
                        float r, float g, float b, float a,
@@ -1665,6 +2561,43 @@ static void push_text(int px, int py, const char *str,
     #undef T2Y
 }
 
+/* Push solid/text using UI font atlas (for P&L window — always high-quality TTF) */
+static void push_solid_ui(float x0, float y0, float x1, float y1,
+                           float r, float g, float b, float a,
+                           int vp_w, int vp_h)
+{
+    float tex_cw = 1.0f / 16.0f, tex_ch = 1.0f / 16.0f;
+    float hp_u = 0.5f / (float)ui_atlas_w, hp_v = 0.5f / (float)ui_atlas_h;
+    float su0 = (219 % 16) * tex_cw + hp_u, sv0 = (219 / 16) * tex_ch + hp_v;
+    float su1 = su0 + tex_cw - 2*hp_u, sv1 = sv0 + tex_ch - 2*hp_v;
+    #define US2X(px) (((float)(px) / (float)vp_w) * 2.0f - 1.0f)
+    #define US2Y(py) (((float)(py) / (float)vp_h) * 2.0f - 1.0f)
+    push_quad(US2X(x0), US2Y(y0), US2X(x1), US2Y(y1),
+              su0, sv0, su1, sv1, r, g, b, a);
+    #undef US2X
+    #undef US2Y
+}
+
+static void push_text_ui(int px, int py, const char *str,
+                          float r, float g, float b,
+                          int vp_w, int vp_h, int char_w, int char_h)
+{
+    float tex_cw = 1.0f / 16.0f, tex_ch = 1.0f / 16.0f;
+    float hp_u = 0.5f / (float)ui_atlas_w, hp_v = 0.5f / (float)ui_atlas_h;
+    #define UT2X(p) (((float)(p) / (float)vp_w) * 2.0f - 1.0f)
+    #define UT2Y(p) (((float)(p) / (float)vp_h) * 2.0f - 1.0f)
+    for (int i = 0; str[i]; i++) {
+        unsigned char ch = (unsigned char)str[i];
+        if (ch <= 32) { px += char_w; continue; }
+        float u0 = (ch % 16) * tex_cw + hp_u, v0 = (ch / 16) * tex_ch + hp_v;
+        push_quad(UT2X(px), UT2Y(py), UT2X(px + char_w), UT2Y(py + char_h),
+                  u0, v0, u0 + tex_cw - 2*hp_u, v0 + tex_ch - 2*hp_v, r, g, b, 1.0f);
+        px += char_w;
+    }
+    #undef UT2X
+    #undef UT2Y
+}
+
 /* ---- Vulkan menu rendering ---- */
 
 static int vkm_is_sep(int idx) { return idx == VKM_ITEM_SEP || idx == VKM_ITEM_SEP2; }
@@ -1672,9 +2605,8 @@ static int vkm_is_sep(int idx) { return idx == VKM_ITEM_SEP || idx == VKM_ITEM_S
 static void vkm_get_root_item_rect(int idx, int *iy, int *ih)
 {
     int y = vkm_y + VKM_PAD;
-    for (int i = 0; i < idx; i++) {
+    for (int i = 0; i < idx; i++)
         y += vkm_is_sep(i) ? VKM_SEP_H : VKM_ITEM_H;
-    }
     *iy = y;
     *ih = vkm_is_sep(idx) ? VKM_SEP_H : VKM_ITEM_H;
 }
@@ -1689,6 +2621,9 @@ static int vkm_root_height(void)
 
 static int vkm_sub_count(void)
 {
+    if (vkm_sub == VKM_SUB_VISUAL) return VKM_VIS_COUNT;
+    if (vkm_sub == VKM_SUB_WIDGETS) return VKM_WID_COUNT;
+    if (vkm_sub == VKM_SUB_RECENT) return vkm_goto_count > 0 ? vkm_goto_count : 1;
     if (vkm_sub == VKM_SUB_THEME) return NUM_THEMES;
     if (vkm_sub == VKM_SUB_FONT) return NUM_TTF_FONTS + 1; /* +1 for bitmap */
     if (vkm_sub == VKM_SUB_FX) return VKM_FX_COUNT;
@@ -1719,9 +2654,16 @@ static int vkm_hit_sub(int mx, int my)
     int sx = vkm_x + VKM_ROOT_W;
     int sy_item;
     /* submenu y = aligned to the parent item */
-    int parent = (vkm_sub == VKM_SUB_THEME) ? VKM_ITEM_THEME
-               : (vkm_sub == VKM_SUB_FX)    ? VKM_ITEM_FX
-               :                               VKM_ITEM_FONT;
+    int parent;
+    if (vkm_sub == VKM_SUB_VISUAL || vkm_sub == VKM_SUB_THEME ||
+        vkm_sub == VKM_SUB_FONT || vkm_sub == VKM_SUB_FX)
+        parent = VKM_ITEM_VISUAL;
+    else if (vkm_sub == VKM_SUB_WIDGETS)
+        parent = VKM_ITEM_WIDGETS;
+    else if (vkm_sub == VKM_SUB_RECENT)
+        parent = VKM_ITEM_RECENT;
+    else
+        parent = VKM_ITEM_VISUAL;
     int parent_y, parent_h;
     vkm_get_root_item_rect(parent, &parent_y, &parent_h);
     int sy = parent_y;
@@ -1757,6 +2699,1115 @@ static void vkm_draw_panel(int x, int y, int w, int h,
     push_solid(x + w - 1, y, x + w, y + h, br, bg, bb, 0.6f, vp_w, vp_h);
 }
 
+/* ---- Vulkan Round Timer Widget ---- */
+
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
+static float vrt_sinf(float x) {
+    /* Reduce to [-PI, PI] for Taylor accuracy */
+    float pi2 = 2.0f * (float)M_PI;
+    while (x > (float)M_PI)  x -= pi2;
+    while (x < -(float)M_PI) x += pi2;
+    float x2 = x * x;
+    float r = x;
+    float term = x;
+    term *= -x2 / (2.0f * 3.0f); r += term;
+    term *= -x2 / (4.0f * 5.0f); r += term;
+    term *= -x2 / (6.0f * 7.0f); r += term;
+    term *= -x2 / (8.0f * 9.0f); r += term;
+    term *= -x2 / (10.0f * 11.0f); r += term;
+    term *= -x2 / (12.0f * 13.0f); r += term;
+    return r;
+}
+
+static float vrt_cosf(float x) {
+    return vrt_sinf(x + (float)M_PI / 2.0f);
+}
+
+static float vrt_sqrtf(float x) {
+    if (x <= 0.0f) return 0.0f;
+    /* Newton's method */
+    float r = x;
+    for (int i = 0; i < 8; i++) r = 0.5f * (r + x / r);
+    return r;
+}
+
+/* Pixel to NDC helpers for round timer (need viewport dims) */
+#define VRT_X(px) (((float)(px) / (float)vp_w) * 2.0f - 1.0f)
+#define VRT_Y(py) (((float)(py) / (float)vp_h) * 2.0f - 1.0f)
+
+/* Push a filled arc (ring wedge) using proper trapezoid quads in NDC.
+ * Each segment is 4 vertices: outer0, outer1, inner1, inner0 */
+static void vrt_push_arc(float cx, float cy, float r_inner, float r_outer,
+                         float angle_start, float angle_end,
+                         float r1, float g1, float b1,
+                         float r2, float g2, float b2,
+                         float alpha, int segs, int vp_w, int vp_h)
+{
+    if (angle_end <= angle_start) return;
+    float step = (angle_end - angle_start) / (float)segs;
+    for (int i = 0; i < segs; i++) {
+        float t = ((float)i + 0.5f) / (float)segs;
+        float a0 = angle_start + step * (float)i;
+        float a1 = angle_start + step * (float)(i + 1);
+        float cr = r1 + (r2 - r1) * t;
+        float cg = g1 + (g2 - g1) * t;
+        float cb = b1 + (b2 - b1) * t;
+        /* 4 corners of the wedge quad */
+        float ox0 = cx + r_outer * vrt_cosf(a0);
+        float oy0 = cy - r_outer * vrt_sinf(a0);
+        float ox1 = cx + r_outer * vrt_cosf(a1);
+        float oy1 = cy - r_outer * vrt_sinf(a1);
+        float ix1 = cx + r_inner * vrt_cosf(a1);
+        float iy1 = cy - r_inner * vrt_sinf(a1);
+        float ix0 = cx + r_inner * vrt_cosf(a0);
+        float iy0 = cy - r_inner * vrt_sinf(a0);
+        push_quad_free(VRT_X(ox0), VRT_Y(oy0), VRT_X(ox1), VRT_Y(oy1),
+                       VRT_X(ix1), VRT_Y(iy1), VRT_X(ix0), VRT_Y(iy0),
+                       cr, cg, cb, alpha);
+    }
+}
+
+/* Push a filled circle as pie-slice quads (center → edge → edge) */
+static void vrt_push_circle(float cx, float cy, float radius,
+                            float r, float g, float b, float a,
+                            int segs, int vp_w, int vp_h)
+{
+    float step = 2.0f * (float)M_PI / (float)segs;
+    for (int i = 0; i < segs; i++) {
+        float a0 = step * (float)i;
+        float a1 = step * (float)(i + 1);
+        float x0 = cx + radius * vrt_cosf(a0);
+        float y0 = cy - radius * vrt_sinf(a0);
+        float x1 = cx + radius * vrt_cosf(a1);
+        float y1 = cy - radius * vrt_sinf(a1);
+        /* Pie slice: center, edge0, edge1, center (degenerate quad = triangle) */
+        push_quad_free(VRT_X(cx), VRT_Y(cy), VRT_X(x0), VRT_Y(y0),
+                       VRT_X(x1), VRT_Y(y1), VRT_X(cx), VRT_Y(cy),
+                       r, g, b, a);
+    }
+}
+
+static void vrt_spawn_particle(float x, float y, float r, float g, float b)
+{
+    int idx = vrt_particle_idx % VRT_PARTICLE_MAX;
+    vrt_particles[idx].x = x;
+    vrt_particles[idx].y = y;
+    vrt_particles[idx].vx = ((float)((int)(fx_time * 1000) % 100) - 50.0f) / 2000.0f;
+    vrt_particles[idx].vy = ((float)((int)(fx_time * 1337) % 100) - 50.0f) / 2000.0f;
+    vrt_particles[idx].alpha = 0.8f;
+    vrt_particles[idx].r = r;
+    vrt_particles[idx].g = g;
+    vrt_particles[idx].b = b;
+    vrt_particles[idx].alive = 1;
+    vrt_particle_idx++;
+}
+
+static void vrt_draw(int vp_w, int vp_h)
+{
+    if (!vrt_visible) return;
+
+    const ui_theme_t *t = &ui_themes[current_theme];
+    float sz = vrt_size;
+    float cx = vrt_x + sz / 2.0f;
+    float cy = vrt_y + sz / 2.0f;
+    float R = sz / 2.0f;  /* outer radius */
+    DWORD now = GetTickCount();
+    double now_d = (double)GetTickCount64();
+
+    /* Progress */
+    float progress = 0.0f;
+    if (vrt_synced && vrt_last_tick_ts > 0.0 && vrt_round_period > 0.0) {
+        double elapsed = now_d - vrt_last_tick_ts;
+        progress = (float)(elapsed / vrt_round_period);
+        /* Wrap progress to 0..1 range each 5s cycle */
+        if (progress > 1.0f) {
+            progress = progress - (float)(int)progress;
+        }
+    }
+
+    /* ---- Beveled torus background ---- */
+    /* Layer 1: outermost ring — bright edge highlight (top-left lit) */
+    vrt_push_arc(cx, cy, R * 0.88f, R * 0.95f, 0, 2.0f*(float)M_PI,
+                 t->bg[0]*1.8f+0.08f, t->bg[1]*1.8f+0.08f, t->bg[2]*1.8f+0.08f,
+                 t->bg[0]*0.5f, t->bg[1]*0.5f, t->bg[2]*0.5f,
+                 0.7f, 96, vp_w, vp_h);
+    /* Layer 2: main ring body */
+    vrt_push_arc(cx, cy, R * 0.60f, R * 0.89f, 0, 2.0f*(float)M_PI,
+                 t->bg[0]*0.7f+0.04f, t->bg[1]*0.7f+0.04f, t->bg[2]*0.7f+0.04f,
+                 t->bg[0]*0.7f+0.04f, t->bg[1]*0.7f+0.04f, t->bg[2]*0.7f+0.04f,
+                 0.92f, 96, vp_w, vp_h);
+    /* Layer 3: inner ring shadow (gives inset depth) */
+    vrt_push_arc(cx, cy, R * 0.56f, R * 0.63f, 0, 2.0f*(float)M_PI,
+                 t->bg[0]*0.3f, t->bg[1]*0.3f, t->bg[2]*0.3f,
+                 t->bg[0]*1.2f+0.06f, t->bg[1]*1.2f+0.06f, t->bg[2]*1.2f+0.06f,
+                 0.5f, 96, vp_w, vp_h);
+    /* Center fill — dark glass */
+    vrt_push_circle(cx, cy, R * 0.58f,
+                    t->bg[0]*0.35f, t->bg[1]*0.35f, t->bg[2]*0.35f,
+                    0.92f, 64, vp_w, vp_h);
+
+    /* ---- Tick marks (thin lines) ---- */
+    {
+        int num_ticks = (int)(vrt_round_period / 1000.0 + 0.5);
+        if (num_ticks < 3) num_ticks = 5;
+        if (num_ticks > 12) num_ticks = 12;
+        for (int i = 0; i < num_ticks; i++) {
+            float theta = (float)M_PI / 2.0f - 2.0f * (float)M_PI * (float)i / (float)num_ticks;
+            /* Thin tick as a very narrow arc wedge */
+            float tick_w = 0.015f; /* angular half-width */
+            vrt_push_arc(cx, cy, R * 0.72f, R * 0.85f,
+                         theta - tick_w, theta + tick_w,
+                         t->dim[0]*0.6f, t->dim[1]*0.6f, t->dim[2]*0.6f,
+                         t->dim[0]*0.6f, t->dim[1]*0.6f, t->dim[2]*0.6f,
+                         0.4f, 1, vp_w, vp_h);
+        }
+    }
+
+    /* ---- Color gradient: green → yellow → red (themed) ---- */
+    float p = progress > 1.0f ? 1.0f : progress;
+    float sr, sg, sb, er, eg, eb;
+    if (p < 0.5f) {
+        float tt = p * 2.0f;
+        sr = t->accent[0]*0.2f + 0.1f;
+        sg = t->accent[1]*0.2f + 0.7f;
+        sb = t->accent[2]*0.2f + 0.15f;
+        er = sr + 0.6f * tt;
+        eg = sg;
+        eb = sb - 0.05f * tt;
+    } else {
+        float tt = (p - 0.5f) * 2.0f;
+        sr = t->accent[0]*0.2f + 0.7f;
+        sg = t->accent[1]*0.2f + 0.7f;
+        sb = t->accent[2]*0.2f + 0.1f;
+        er = sr;
+        eg = sg - 0.5f * tt;
+        eb = sb;
+    }
+
+    /* ---- Main arc — neon tube style, sweeps from 12 o'clock CW ---- */
+    if (progress > 0.01f && vrt_synced) {
+        float arc_start = (float)M_PI / 2.0f;
+        float sweep = progress > 1.0f ? 1.0f : progress;
+        float arc_end = arc_start - 2.0f * (float)M_PI * sweep;
+        int segs = (int)(sweep * 96.0f);
+        if (segs < 6) segs = 6;
+
+        /* Layer 1: Wide soft glow (bloom) */
+        vrt_push_arc(cx, cy, R * 0.64f, R * 0.86f,
+                     arc_end, arc_start,
+                     er*0.5f, eg*0.5f, eb*0.5f, sr*0.5f, sg*0.5f, sb*0.5f,
+                     0.06f, segs, vp_w, vp_h);
+        /* Layer 2: Main tube body — darker base color */
+        vrt_push_arc(cx, cy, R * 0.71f, R * 0.80f,
+                     arc_end, arc_start,
+                     er*0.7f, eg*0.7f, eb*0.7f, sr*0.7f, sg*0.7f, sb*0.7f,
+                     0.9f, segs, vp_w, vp_h);
+        /* Layer 3: Hot center specular — bright white-ish core (neon tube highlight) */
+        {
+            float wr = er*0.3f+0.7f, wg = eg*0.3f+0.7f, wb = eb*0.3f+0.7f;
+            float ws = sr*0.3f+0.7f, wsg = sg*0.3f+0.7f, wsb = sb*0.3f+0.7f;
+            if (wr > 1) wr = 1; if (wg > 1) wg = 1; if (wb > 1) wb = 1;
+            if (ws > 1) ws = 1; if (wsg > 1) wsg = 1; if (wsb > 1) wsb = 1;
+            vrt_push_arc(cx, cy, R * 0.735f, R * 0.775f,
+                         arc_end, arc_start,
+                         wr, wg, wb, ws, wsg, wsb,
+                         0.55f, segs, vp_w, vp_h);
+        }
+        /* Layer 4: Top-edge specular glint (glass reflection) */
+        vrt_push_arc(cx, cy, R * 0.785f, R * 0.80f,
+                     arc_end, arc_start,
+                     1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f,
+                     0.15f, segs, vp_w, vp_h);
+
+        /* Leading edge dot — bright with glow */
+        float mid_r = R * 0.755f;
+        float edge_x = cx + mid_r * vrt_cosf(arc_end);
+        float edge_y = cy - mid_r * vrt_sinf(arc_end);
+        vrt_push_circle(edge_x, edge_y, R * 0.04f,
+                        1.0f, 1.0f, 1.0f, 0.8f, 12, vp_w, vp_h);
+        vrt_push_circle(edge_x, edge_y, R * 0.07f,
+                        er, eg, eb, 0.3f, 12, vp_w, vp_h);
+
+        /* Spawn particle at edge occasionally */
+        if (((int)(fx_time * 60) % 4) == 0)
+            vrt_spawn_particle(edge_x, edge_y, er, eg, eb);
+    }
+
+    /* ---- Overdue pulse ---- */
+    if (progress > 1.0f) {
+        float pulse = 0.15f + 0.1f * vrt_sinf((float)now / 150.0f);
+        vrt_push_arc(cx, cy, R * 0.68f, R * 0.82f, 0, 2.0f*(float)M_PI,
+                     1.0f, 0.2f, 0.1f, 1.0f, 0.2f, 0.1f,
+                     pulse, 64, vp_w, vp_h);
+    }
+
+    /* ---- Flash on round tick ---- */
+    if (vrt_flash_tick > 0) {
+        float a = (float)vrt_flash_tick / 15.0f;
+        vrt_push_circle(cx, cy, R * (0.80f + a * 0.1f),
+                        1.0f, 1.0f, 0.85f, a * 0.25f, 48, vp_w, vp_h);
+        vrt_flash_tick--;
+    }
+
+    /* ---- Particles ---- */
+    for (int i = 0; i < VRT_PARTICLE_MAX; i++) {
+        if (!vrt_particles[i].alive) continue;
+        vrt_particles[i].x += vrt_particles[i].vx;
+        vrt_particles[i].y += vrt_particles[i].vy;
+        vrt_particles[i].alpha -= 0.018f;
+        if (vrt_particles[i].alpha <= 0.0f) { vrt_particles[i].alive = 0; continue; }
+        float ps = R * 0.025f;
+        vrt_push_circle(vrt_particles[i].x, vrt_particles[i].y, ps,
+                        vrt_particles[i].r, vrt_particles[i].g, vrt_particles[i].b,
+                        vrt_particles[i].alpha, 6, vp_w, vp_h);
+    }
+
+    /* ---- Glossy specular highlight (upper crescent) ---- */
+    vrt_push_arc(cx, cy - R * 0.05f, R * 0.70f, R * 0.88f,
+                 (float)M_PI * 0.15f, (float)M_PI * 0.85f,
+                 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f,
+                 0.04f, 24, vp_w, vp_h);
+
+    /* ---- Center text: matches msimg32 real round timer exactly ---- */
+    {
+        int cw = (int)(sz / 12.0f); if (cw < 6) cw = 6;
+        int ch = cw * 2;
+        int scw = cw * 2 / 3, sch = ch * 2 / 3;
+
+        if (vrt_ms_state == 1) {
+            /* Manual sync in progress — "TIMING" with blinking dots */
+            int tw = 6 * scw;
+            push_text((int)(cx - tw/2), (int)(cy - sch/2),
+                      "TIMING", 1.0f, 0.8f, 0.2f, vp_w, vp_h, scw, sch);
+        } else if (vrt_synced) {
+            /* Synced — big "ROUND" in center with flash on tick */
+            double tick_age = (vrt_last_tick_ts > 0) ? (now_d - vrt_last_tick_ts) / 1000.0 : 99.0;
+            float flash = 1.0f - (float)(tick_age / 1.5);
+            if (flash < 0) flash = 0;
+            float cr = t->text[0] * (0.4f + 0.6f * flash);
+            float cg = t->text[1] * (0.4f + 0.6f * flash);
+            float cb = t->text[2] * (0.4f + 0.6f * flash);
+            int tw = 5 * cw;
+            /* Shadow */
+            push_text((int)(cx - tw/2 + 1), (int)(cy - ch/2 + 2),
+                      "ROUND", 0, 0, 0, vp_w, vp_h, cw, ch);
+            /* Text */
+            push_text((int)(cx - tw/2), (int)(cy - ch/2),
+                      "ROUND", cr, cg, cb, vp_w, vp_h, cw, ch);
+
+            /* Elapsed readout below: "3.2s / 5.0s" */
+            if (vrt_last_tick_ts > 0.0) {
+                double elapsed = now_d - vrt_last_tick_ts;
+                double in_cycle = elapsed / 1000.0;
+                double period_s = vrt_round_period / 1000.0;
+                if (in_cycle > period_s)
+                    in_cycle = in_cycle - ((int)(in_cycle / period_s)) * period_s;
+                int e10 = (int)(in_cycle * 10.0);
+                if (e10 > 50) e10 = 50;
+                /* Build "X.Xs / 5.0s" */
+                char ebuf[16];
+                int ei = 0;
+                ebuf[ei++] = '0' + (e10 / 10);
+                ebuf[ei++] = '.';
+                ebuf[ei++] = '0' + (e10 % 10);
+                ebuf[ei++] = 's';
+                ebuf[ei++] = ' ';
+                ebuf[ei++] = '/';
+                ebuf[ei++] = ' ';
+                ebuf[ei++] = '5';
+                ebuf[ei++] = '.';
+                ebuf[ei++] = '0';
+                ebuf[ei++] = 's';
+                ebuf[ei] = '\0';
+                int etw = ei * (scw * 3 / 4);
+                push_text((int)(cx - etw/2), (int)(cy + ch/2 + 4),
+                          ebuf, t->dim[0], t->dim[1], t->dim[2],
+                          vp_w, vp_h, scw * 3 / 4, sch * 3 / 4);
+            }
+        } else {
+            /* Not synced — "WAITING" big + "FOR SYNC" small below */
+            int tw = 7 * cw;
+            push_text((int)(cx - tw/2), (int)(cy - ch/2 - sch/2),
+                      "WAITING", t->accent[0], t->accent[1], t->accent[2],
+                      vp_w, vp_h, cw, ch);
+            int stw = 8 * scw;
+            push_text((int)(cx - stw/2), (int)(cy + ch/2 - sch/2),
+                      "FOR SYNC", t->dim[0], t->dim[1], t->dim[2],
+                      vp_w, vp_h, scw, sch);
+        }
+
+        /* Delta text below circle */
+        if (vrt_delta_text[0] && vrt_delta_fade > 0.01) {
+            float dr = (vrt_delta_text[0] == '+') ? 1.0f : 0.3f;
+            float dg = (vrt_delta_text[0] == '+') ? 0.5f : 1.0f;
+            float db = 0.2f;
+            int dlen = 0; while (vrt_delta_text[dlen]) dlen++;
+            int dtw = dlen * scw;
+            push_text((int)(cx - dtw/2), (int)(cy + R * 0.55f),
+                      vrt_delta_text, dr, dg, db, vp_w, vp_h, scw, sch);
+            vrt_delta_fade -= 0.006;
+        }
+    }
+
+    /* ---- Context menu ---- */
+    if (vrt_ctx_open) {
+        int mx = vrt_ctx_x, my = vrt_ctx_y;
+        int mw = VRT_CTX_W;
+        int mh = VRT_CTX_PAD * 2;
+        for (int i = 0; i < VRT_CTX_COUNT; i++)
+            mh += (i == VRT_CTX_SEP1 || i == VRT_CTX_SEP2) ? 8 : VRT_CTX_ITEM_H;
+
+        /* Panel bg */
+        push_solid(mx, my, mx + mw, my + mh,
+                   t->bg[0] * 0.9f, t->bg[1] * 0.9f, t->bg[2] * 0.9f, 0.95f,
+                   vp_w, vp_h);
+        /* Border */
+        push_solid(mx, my, mx + mw, my + 1, t->dim[0] * 0.4f, t->dim[1] * 0.4f, t->dim[2] * 0.4f, 0.6f, vp_w, vp_h);
+        push_solid(mx, my + mh - 1, mx + mw, my + mh, t->dim[0] * 0.4f, t->dim[1] * 0.4f, t->dim[2] * 0.4f, 0.6f, vp_w, vp_h);
+        push_solid(mx, my, mx + 1, my + mh, t->dim[0] * 0.4f, t->dim[1] * 0.4f, t->dim[2] * 0.4f, 0.6f, vp_w, vp_h);
+        push_solid(mx + mw - 1, my, mx + mw, my + mh, t->dim[0] * 0.4f, t->dim[1] * 0.4f, t->dim[2] * 0.4f, 0.6f, vp_w, vp_h);
+
+        const char *labels[VRT_CTX_COUNT] = {
+            "Set Timing Spell...",
+            vrt_ms_state == 1 ? "Stop Timing" : "Cast to Time",
+            "", /* sep */
+            "Small (80)",
+            "Normal (160)",
+            "Large (280)",
+            "", /* sep */
+            "Reset Timer",
+            "Hide Round Timer"
+        };
+
+        int iy = my + VRT_CTX_PAD;
+        int item_cw = 7, item_ch = 14;
+        for (int i = 0; i < VRT_CTX_COUNT; i++) {
+            if (i == VRT_CTX_SEP1 || i == VRT_CTX_SEP2) {
+                push_solid(mx + 4, iy + 3, mx + mw - 4, iy + 4,
+                           t->dim[0] * 0.3f, t->dim[1] * 0.3f, t->dim[2] * 0.3f,
+                           0.4f, vp_w, vp_h);
+                iy += 8;
+                continue;
+            }
+            /* Hover */
+            if (i == vrt_ctx_hover) {
+                push_solid(mx + 1, iy, mx + mw - 1, iy + VRT_CTX_ITEM_H,
+                           t->accent[0], t->accent[1], t->accent[2],
+                           0.15f, vp_w, vp_h);
+            }
+            /* Check marks for current size */
+            int checked = 0;
+            if (i == VRT_CTX_SMALL  && vrt_size <= 100) checked = 1;
+            if (i == VRT_CTX_NORMAL && vrt_size > 100 && vrt_size <= 200) checked = 1;
+            if (i == VRT_CTX_LARGE  && vrt_size > 200) checked = 1;
+
+            if (checked) {
+                push_text(mx + 4, iy + (VRT_CTX_ITEM_H - item_ch) / 2,
+                          "\x10", t->accent[0], t->accent[1], t->accent[2],
+                          vp_w, vp_h, item_cw, item_ch);
+            }
+            /* Grayed out "Cast to Time" if no spell set */
+            float lr = t->text[0], lg = t->text[1], lb = t->text[2];
+            if (i == VRT_CTX_CAST && !vrt_sync_spell[0]) {
+                lr = t->dim[0] * 0.5f; lg = t->dim[1] * 0.5f; lb = t->dim[2] * 0.5f;
+            }
+            push_text(mx + 14, iy + (VRT_CTX_ITEM_H - item_ch) / 2,
+                      labels[i], lr, lg, lb,
+                      vp_w, vp_h, item_cw, item_ch);
+            iy += VRT_CTX_ITEM_H;
+        }
+    }
+
+    /* ---- Spell input dialog ---- */
+    if (vrt_spell_input) {
+        int dw = 240, dh = 80;
+        int dx = (int)(cx - dw / 2);
+        int dy = (int)(cy + R + 10);
+        /* BG */
+        push_solid(dx, dy, dx + dw, dy + dh,
+                   t->bg[0] * 0.8f + 0.05f, t->bg[1] * 0.8f + 0.05f, t->bg[2] * 0.8f + 0.05f,
+                   0.95f, vp_w, vp_h);
+        /* Border */
+        push_solid(dx, dy, dx + dw, dy + 1, t->accent[0] * 0.6f, t->accent[1] * 0.6f, t->accent[2] * 0.6f, 0.7f, vp_w, vp_h);
+        push_solid(dx, dy + dh - 1, dx + dw, dy + dh, t->accent[0] * 0.6f, t->accent[1] * 0.6f, t->accent[2] * 0.6f, 0.7f, vp_w, vp_h);
+        push_solid(dx, dy, dx + 1, dy + dh, t->accent[0] * 0.6f, t->accent[1] * 0.6f, t->accent[2] * 0.6f, 0.7f, vp_w, vp_h);
+        push_solid(dx + dw - 1, dy, dx + dw, dy + dh, t->accent[0] * 0.6f, t->accent[1] * 0.6f, t->accent[2] * 0.6f, 0.7f, vp_w, vp_h);
+        /* Label */
+        push_text(dx + 8, dy + 6, "Spell command:", t->dim[0], t->dim[1], t->dim[2],
+                  vp_w, vp_h, 7, 14);
+        /* Input field bg */
+        push_solid(dx + 8, dy + 24, dx + dw - 8, dy + 44,
+                   t->bg[0] * 0.3f, t->bg[1] * 0.3f, t->bg[2] * 0.3f, 0.9f,
+                   vp_w, vp_h);
+        /* Input text */
+        push_text(dx + 12, dy + 26, vrt_spell_buf, t->text[0], t->text[1], t->text[2],
+                  vp_w, vp_h, 7, 14);
+        /* Cursor */
+        if ((frame_count / 30) % 2 == 0) {
+            int cux = dx + 12 + vrt_spell_cursor * 7;
+            push_solid(cux, dy + 26, cux + 7, dy + 40, t->accent[0], t->accent[1], t->accent[2],
+                       0.5f, vp_w, vp_h);
+        }
+        /* Buttons */
+        push_solid(dx + 8, dy + 50, dx + 60, dy + 70,
+                   t->accent[0] * 0.4f, t->accent[1] * 0.4f, t->accent[2] * 0.4f, 0.7f,
+                   vp_w, vp_h);
+        push_text(dx + 20, dy + 52, "OK", t->text[0], t->text[1], t->text[2],
+                  vp_w, vp_h, 7, 14);
+        push_solid(dx + 70, dy + 50, dx + 140, dy + 70,
+                   t->bg[0] * 0.5f + 0.1f, t->bg[1] * 0.5f + 0.1f, t->bg[2] * 0.5f + 0.1f, 0.7f,
+                   vp_w, vp_h);
+        push_text(dx + 80, dy + 52, "Cancel", t->text[0], t->text[1], t->text[2],
+                  vp_w, vp_h, 7, 14);
+        push_solid(dx + 150, dy + 50, dx + 220, dy + 70,
+                   t->bg[0] * 0.5f + 0.1f, t->bg[1] * 0.5f + 0.1f, t->bg[2] * 0.5f + 0.1f, 0.7f,
+                   vp_w, vp_h);
+        push_text(dx + 162, dy + 52, "Clear", t->text[0], t->text[1], t->text[2],
+                  vp_w, vp_h, 7, 14);
+    }
+}
+
+/* ---- Round timer: on_round callback (mirrors gl_round_timer.c exactly) ---- */
+static void vrt_on_round(int round_num)
+{
+    double now = (double)GetTickCount64();
+    double prev = vrt_last_tick_ts;
+    vrt_round_num = round_num;
+    vrt_flash_tick = 15;
+
+    /* Delta calculation */
+    if (prev > 0.0 && vrt_synced && vrt_round_period > 0.0) {
+        double elapsed = now - prev;
+        double cycles = (int)(elapsed / vrt_round_period + 0.5);
+        if (cycles < 1) cycles = 1;
+        double predicted = prev + cycles * vrt_round_period;
+        int delta = (int)(now - predicted);
+        /* sprintf without libc: manual format */
+        int di = 0;
+        if (delta >= 0) vrt_delta_text[di++] = '+';
+        else { vrt_delta_text[di++] = '-'; delta = -delta; }
+        if (delta >= 1000) { vrt_delta_text[di++] = '0' + (delta / 1000) % 10; }
+        if (delta >= 100)  { vrt_delta_text[di++] = '0' + (delta / 100) % 10; }
+        if (delta >= 10)   { vrt_delta_text[di++] = '0' + (delta / 10) % 10; }
+        vrt_delta_text[di++] = '0' + delta % 10;
+        vrt_delta_text[di++] = 'm'; vrt_delta_text[di++] = 's';
+        vrt_delta_text[di] = '\0';
+        vrt_delta_fade = 1.0;
+    }
+
+    /* Fixed 5s period — no auto-calibration (lag spikes would corrupt it) */
+
+    vrt_last_tick_ts = now;
+    vrt_synced = 1;
+
+    /* Auto-show on first round */
+    if (!vrt_visible) { vrt_visible = 1; }
+}
+
+/* ---- Manual sync: on_line callback ---- */
+static void vrt_sync_on_line(const char *line)
+{
+    if (vrt_ms_state != 1) return;
+
+    if (strstr(line, "You have already cast")) {
+        vrt_ms_already_count++;
+        return;
+    }
+
+    if (vrt_ms_already_count >= 2) {
+        int boundary = 0;
+        if (strncmp(line, "You cast ", 9) == 0) boundary = 1;
+        else if (strncmp(line, "You sing ", 9) == 0) boundary = 1;
+        else if (strncmp(line, "You invoke ", 11) == 0) boundary = 1;
+        else if (strncmp(line, "You attempt to cast", 19) == 0) boundary = 1;
+        else if (strncmp(line, "You attempt to sing", 19) == 0) boundary = 1;
+        else if (strncmp(line, "You attempt to invoke", 21) == 0) boundary = 1;
+
+        if (boundary) {
+            vrt_ms_rounds_detected++;
+            vrt_round_num++;
+            vrt_on_round(vrt_round_num);
+            vrt_ms_already_count = 0;
+        }
+    }
+
+    if (line[0] && !strstr(line, "You have already cast")) {
+        if (vrt_ms_already_count > 0 && vrt_ms_already_count < 2)
+            vrt_ms_already_count = 0;
+    }
+}
+
+/* Combined on_line handler for all features */
+static void vkt_on_line(const char *line)
+{
+    vrt_sync_on_line(line);
+    convo_parse_line(line);
+}
+
+/* Manual sync spam thread */
+static DWORD WINAPI vrt_ms_spam_thread(LPVOID param)
+{
+    (void)param;
+    HWND mw = FindWindowA("MMMAIN", NULL);
+    if (!mw) { vrt_ms_state = 0; return 0; }
+    HWND ansi = FindWindowExA(mw, NULL, "MMANSI", NULL);
+    HWND target = ansi ? ansi : mw;
+
+    DWORD start = GetTickCount();
+    while (vrt_ms_state == 1) {
+        if (GetTickCount() - start > 10000) {
+            vrt_ms_state = 0;
+            break;
+        }
+        for (int i = 0; vrt_sync_spell[i]; i++)
+            PostMessageA(target, WM_CHAR, (WPARAM)(unsigned char)vrt_sync_spell[i], 0);
+        PostMessageA(target, WM_CHAR, (WPARAM)'\r', 0);
+        Sleep(150);
+    }
+    return 0;
+}
+
+static void vrt_perform_manual_sync(void)
+{
+    if (!vrt_sync_spell[0]) {
+        /* Show spell input dialog */
+        vrt_spell_input = 1;
+        vrt_spell_len = 0;
+        vrt_spell_buf[0] = '\0';
+        vrt_spell_cursor = 0;
+        /* Copy current spell if exists */
+        for (int i = 0; vrt_sync_spell[i] && i < 21; i++) {
+            vrt_spell_buf[i] = vrt_sync_spell[i];
+            vrt_spell_len = i + 1;
+        }
+        vrt_spell_buf[vrt_spell_len] = '\0';
+        vrt_spell_cursor = vrt_spell_len;
+        return;
+    }
+    if (vrt_ms_state == 1) {
+        vrt_ms_state = 0;
+        return;
+    }
+
+    vrt_synced = 0;
+    vrt_last_tick_ts = 0.0;
+    vrt_interval_count = 0;
+    vrt_round_period = 5000.0;
+    vrt_delta_text[0] = '\0';
+    vrt_delta_fade = 0.0;
+
+    vrt_ms_state = 1;
+    vrt_ms_already_count = 0;
+    vrt_ms_rounds_detected = 0;
+    CreateThread(NULL, 0, vrt_ms_spam_thread, NULL, 0, NULL);
+}
+
+/* ---- Round timer hit testing ---- */
+static int vrt_hit_circle(int mx, int my)
+{
+    if (!vrt_visible) return 0;
+    float cx = vrt_x + vrt_size / 2.0f;
+    float cy = vrt_y + vrt_size / 2.0f;
+    float dx = (float)mx - cx;
+    float dy = (float)my - cy;
+    float r = vrt_size / 2.0f;
+    return (dx * dx + dy * dy) <= (r * r);
+}
+
+/* Returns context menu item at mouse position, or -1 */
+static int vrt_ctx_hit(int mx, int my)
+{
+    if (!vrt_ctx_open) return -1;
+    if (mx < vrt_ctx_x || mx > vrt_ctx_x + VRT_CTX_W) return -1;
+    int iy = vrt_ctx_y + VRT_CTX_PAD;
+    for (int i = 0; i < VRT_CTX_COUNT; i++) {
+        int ih = (i == VRT_CTX_SEP1 || i == VRT_CTX_SEP2) ? 8 : VRT_CTX_ITEM_H;
+        if (my >= iy && my < iy + ih) {
+            if (i == VRT_CTX_SEP1 || i == VRT_CTX_SEP2) return -1;
+            return i;
+        }
+        iy += ih;
+    }
+    return -1;
+}
+
+/* ---- Paths & Loops window drawing ---- */
+#define PL_TITLEBAR  24
+#define PL_TAB_H     28
+#define PL_TOOLBAR_H 26
+#define PL_ITEM_H    20
+#define PL_PAD        6
+#define PL_CW         8
+#define PL_CH        15
+#define PL_GO_H      28  /* GO button height at bottom */
+
+static void pl_draw(int vp_w, int vp_h)
+{
+    if (!pl_wnd_open) return;
+    const ui_theme_t *t = &ui_themes[current_theme];
+    int cw = PL_CW, ch = PL_CH;
+    int x = (int)pl_x, y = (int)pl_y, w = (int)pl_w, h = (int)pl_h;
+
+    /* Select UI font draw functions when available, else fallback to terminal font */
+    void (*psolid)(float,float,float,float,float,float,float,float,int,int) =
+        ui_font_ready ? push_solid_ui : push_solid;
+    void (*ptext)(int,int,const char*,float,float,float,int,int,int,int) =
+        ui_font_ready ? push_text_ui : push_text;
+
+    /* Drop shadow */
+    psolid(x + 4, y + 4, x + w + 4, y + h + 4, 0, 0, 0, 0.4f, vp_w, vp_h);
+    /* Background */
+    psolid(x, y, x + w, y + h,
+           t->bg[0] + 0.04f, t->bg[1] + 0.04f, t->bg[2] + 0.04f, 0.96f, vp_w, vp_h);
+    /* Border */
+    psolid(x, y, x + w, y + 1, t->accent[0]*0.4f, t->accent[1]*0.4f, t->accent[2]*0.4f, 0.6f, vp_w, vp_h);
+    psolid(x, y+h-1, x+w, y+h, t->accent[0]*0.4f, t->accent[1]*0.4f, t->accent[2]*0.4f, 0.6f, vp_w, vp_h);
+    psolid(x, y, x+1, y+h, t->accent[0]*0.4f, t->accent[1]*0.4f, t->accent[2]*0.4f, 0.6f, vp_w, vp_h);
+    psolid(x+w-1, y, x+w, y+h, t->accent[0]*0.4f, t->accent[1]*0.4f, t->accent[2]*0.4f, 0.6f, vp_w, vp_h);
+
+    /* Titlebar */
+    psolid(x, y, x + w, y + PL_TITLEBAR,
+           t->bg[0] * 0.6f + 0.08f, t->bg[1] * 0.6f + 0.08f, t->bg[2] * 0.6f + 0.08f,
+           0.95f, vp_w, vp_h);
+    ptext(x + PL_PAD, y + (PL_TITLEBAR - ch) / 2,
+          "Paths & Loops", t->text[0], t->text[1], t->text[2], vp_w, vp_h, cw, ch);
+    /* Close button */
+    ptext(x + w - 16, y + (PL_TITLEBAR - ch) / 2,
+          "X", t->dim[0], t->dim[1], t->dim[2], vp_w, vp_h, cw, ch);
+
+    int ty = y + PL_TITLEBAR;
+
+    /* Tab bar */
+    int tab_w = w / 2;
+    for (int i = 0; i < 2; i++) {
+        int tx = x + i * tab_w;
+        int active = (pl_tab == i);
+        if (active) {
+            psolid(tx, ty, tx + tab_w, ty + PL_TAB_H,
+                   t->accent[0] * 0.15f, t->accent[1] * 0.15f, t->accent[2] * 0.15f,
+                   0.5f, vp_w, vp_h);
+        }
+        psolid(tx, ty + PL_TAB_H - 2, tx + tab_w, ty + PL_TAB_H,
+               active ? t->accent[0] : t->dim[0] * 0.3f,
+               active ? t->accent[1] : t->dim[1] * 0.3f,
+               active ? t->accent[2] : t->dim[2] * 0.3f,
+               active ? 0.8f : 0.3f, vp_w, vp_h);
+        const char *tab_label = (i == 0) ? "Goto" : "Loops";
+        float tr = active ? t->accent[0] : t->dim[0];
+        float tg = active ? t->accent[1] : t->dim[1];
+        float tb = active ? t->accent[2] : t->dim[2];
+        ptext(tx + (tab_w - (int)strlen(tab_label) * cw) / 2,
+              ty + (PL_TAB_H - ch) / 2,
+              tab_label, tr, tg, tb, vp_w, vp_h, cw, ch);
+    }
+    ty += PL_TAB_H;
+
+    /* Toolbar: [Search...] [_] Hidden  [Walk|Run] */
+    psolid(x, ty, x + w, ty + PL_TOOLBAR_H,
+           t->bg[0] * 0.8f, t->bg[1] * 0.8f, t->bg[2] * 0.8f, 0.6f, vp_w, vp_h);
+    /* Search box */
+    int sx = x + PL_PAD, sy = ty + 3, sw = w / 2 - PL_PAD * 2, sh = PL_TOOLBAR_H - 6;
+    psolid(sx, sy, sx + sw, sy + sh,
+           t->bg[0] * 0.4f, t->bg[1] * 0.4f, t->bg[2] * 0.4f, 0.8f, vp_w, vp_h);
+    if (pl_search[0]) {
+        ptext(sx + 3, sy + (sh - ch) / 2,
+              pl_search, t->text[0], t->text[1], t->text[2], vp_w, vp_h, cw - 1, ch - 2);
+    } else {
+        ptext(sx + 3, sy + (sh - ch) / 2,
+              "Search...", t->dim[0] * 0.6f, t->dim[1] * 0.6f, t->dim[2] * 0.6f,
+              vp_w, vp_h, cw - 1, ch - 2);
+    }
+
+    /* Hidden checkbox (goto tab only) */
+    if (pl_tab == 0) {
+        int hx = x + w / 2 + PL_PAD;
+        int hy = ty + (PL_TOOLBAR_H - ch) / 2;
+        ptext(hx, hy, pl_show_hidden ? "\xFE" : "\x04",
+              t->dim[0], t->dim[1], t->dim[2], vp_w, vp_h, cw, ch);
+        ptext(hx + cw + 2, hy, "Hidden",
+              t->dim[0], t->dim[1], t->dim[2], vp_w, vp_h, cw, ch);
+    }
+
+    /* Walk/Run toggle */
+    {
+        int rx = x + w - 70;
+        int ry = ty + (PL_TOOLBAR_H - ch) / 2;
+        if (!pl_run_mode) {
+            ptext(rx, ry, "Walk", t->accent[0], t->accent[1], t->accent[2],
+                  vp_w, vp_h, cw, ch);
+        } else {
+            ptext(rx, ry, "Run", 1.0f, 0.6f, 0.2f, vp_w, vp_h, cw, ch);
+        }
+    }
+    ty += PL_TOOLBAR_H;
+
+    /* Bottom area: GO button + footer */
+    int bottom_h = PL_GO_H + ch + 8;  /* GO button + footer text */
+
+    /* Content area — tree view */
+    int content_bottom = y + h - bottom_h;
+    int content_h = content_bottom - ty;
+    psolid(x + 1, ty, x + w - 1, content_bottom,
+           t->bg[0], t->bg[1], t->bg[2], 0.9f, vp_w, vp_h);
+
+    int iy = ty + 2 - pl_scroll * PL_ITEM_H;
+    int visible_items = content_h / PL_ITEM_H;
+    int item_idx = 0;
+    (void)visible_items;
+
+    if (pl_tab == 0) {
+        /* Goto tab — rooms by category */
+        for (int c = 0; c < pl_room_cat_count && iy < content_bottom; c++) {
+            pl_cat_t *cat = &pl_room_cats[c];
+
+            /* Count visible rooms in this category */
+            int vis_count = 0;
+            for (int r = 0; r < cat->count; r++) {
+                int ri = cat->first_idx + r;
+                if (ri >= pl_room_count) break;
+                if (strcmp(pl_rooms[ri].category, cat->name) != 0) break;
+                if (pl_rooms[ri].hidden && !pl_show_hidden) continue;
+                if (pl_search[0] && !pl_stristr(pl_rooms[ri].name, pl_search) &&
+                    !pl_stristr(pl_rooms[ri].code, pl_search) &&
+                    !pl_stristr(pl_rooms[ri].category, pl_search)) continue;
+                vis_count++;
+            }
+            if (vis_count == 0 && pl_search[0]) continue;
+
+            /* Category header — bold, flush left */
+            if (iy >= ty - PL_ITEM_H && iy < content_bottom) {
+                char catbuf[80];
+                wsprintfA(catbuf, "%s %s (%d)",
+                          cat->expanded ? "\x1F" : "\x10",
+                          cat->name, vis_count);
+                int is_hover = (pl_hover_item == item_idx);
+                if (is_hover) {
+                    psolid(x + 2, iy, x + w - 2, iy + PL_ITEM_H,
+                           t->accent[0], t->accent[1], t->accent[2],
+                           0.1f, vp_w, vp_h);
+                }
+                /* Categories rendered brighter/bolder */
+                ptext(x + PL_PAD, iy + (PL_ITEM_H - ch) / 2,
+                      catbuf, t->text[0], t->text[1], t->text[2],
+                      vp_w, vp_h, cw, ch);
+            }
+            iy += PL_ITEM_H;
+            item_idx++;
+
+            /* Room items (if expanded) — indented */
+            if (cat->expanded) {
+                for (int r = 0; r < cat->count; r++) {
+                    int ri = cat->first_idx + r;
+                    if (ri >= pl_room_count) break;
+                    if (strcmp(pl_rooms[ri].category, cat->name) != 0) break;
+                    if (pl_rooms[ri].hidden && !pl_show_hidden) continue;
+                    if (pl_search[0] && !pl_stristr(pl_rooms[ri].name, pl_search) &&
+                        !pl_stristr(pl_rooms[ri].code, pl_search)) continue;
+
+                    if (iy >= ty - PL_ITEM_H && iy < content_bottom) {
+                        int is_hover = (pl_hover_item == item_idx);
+                        int is_selected = (pl_selected_item == item_idx);
+                        if (is_selected) {
+                            psolid(x + 2, iy, x + w - 2, iy + PL_ITEM_H,
+                                   0.1f, 0.5f, 0.15f, 0.35f, vp_w, vp_h);
+                        } else if (is_hover) {
+                            psolid(x + 2, iy, x + w - 2, iy + PL_ITEM_H,
+                                   t->accent[0], t->accent[1], t->accent[2],
+                                   0.12f, vp_w, vp_h);
+                        }
+                        float cr = pl_rooms[ri].hidden ? t->dim[0] * 0.7f : t->text[0] * 0.85f;
+                        float cg = pl_rooms[ri].hidden ? t->dim[1] * 0.7f : t->text[1] * 0.85f;
+                        float cb = pl_rooms[ri].hidden ? t->dim[2] * 0.7f : t->text[2] * 0.85f;
+                        if (is_selected) { cr = 0.4f; cg = 1.0f; cb = 0.5f; }
+                        /* Indented from category */
+                        ptext(x + PL_PAD + cw * 4, iy + (PL_ITEM_H - ch) / 2,
+                              pl_rooms[ri].name, cr, cg, cb,
+                              vp_w, vp_h, cw, ch);
+                        /* Room code on right */
+                        int codelen = (int)strlen(pl_rooms[ri].code);
+                        ptext(x + w - PL_PAD - codelen * (cw - 1), iy + (PL_ITEM_H - ch) / 2,
+                              pl_rooms[ri].code, t->dim[0] * 0.5f, t->dim[1] * 0.5f, t->dim[2] * 0.5f,
+                              vp_w, vp_h, cw - 1, ch);
+                    }
+                    iy += PL_ITEM_H;
+                    item_idx++;
+                }
+            }
+        }
+    } else {
+        /* Loop tab — only loops (is_loop) by start category */
+        for (int c = 0; c < pl_loop_cat_count && iy < content_bottom; c++) {
+            pl_cat_t *cat = &pl_loop_cats[c];
+
+            int vis_count = 0;
+            for (int p = 0; p < cat->count; p++) {
+                int pi = cat->first_idx + p;
+                if (pi >= pl_path_count) break;
+                if (!pl_paths[pi].is_loop) break;
+                if (strcmp(pl_paths[pi].start_category, cat->name) != 0) break;
+                if (pl_search[0] && !pl_stristr(pl_paths[pi].name, pl_search) &&
+                    !pl_stristr(pl_paths[pi].file, pl_search) &&
+                    !pl_stristr(pl_paths[pi].start_category, pl_search)) continue;
+                vis_count++;
+            }
+            if (vis_count == 0 && pl_search[0]) continue;
+
+            if (iy >= ty - PL_ITEM_H && iy < content_bottom) {
+                char catbuf[80];
+                wsprintfA(catbuf, "%s %s (%d)",
+                          cat->expanded ? "\x1F" : "\x10",
+                          cat->name, vis_count);
+                int is_hover = (pl_hover_item == item_idx);
+                if (is_hover) {
+                    psolid(x + 2, iy, x + w - 2, iy + PL_ITEM_H,
+                           t->accent[0], t->accent[1], t->accent[2],
+                           0.1f, vp_w, vp_h);
+                }
+                ptext(x + PL_PAD, iy + (PL_ITEM_H - ch) / 2,
+                      catbuf, t->text[0], t->text[1], t->text[2],
+                      vp_w, vp_h, cw, ch);
+            }
+            iy += PL_ITEM_H;
+            item_idx++;
+
+            if (cat->expanded) {
+                for (int p = 0; p < cat->count; p++) {
+                    int pi = cat->first_idx + p;
+                    if (pi >= pl_path_count) break;
+                    if (!pl_paths[pi].is_loop) break;
+                    if (strcmp(pl_paths[pi].start_category, cat->name) != 0) break;
+                    if (pl_search[0] && !pl_stristr(pl_paths[pi].name, pl_search) &&
+                        !pl_stristr(pl_paths[pi].file, pl_search)) continue;
+
+                    if (iy >= ty - PL_ITEM_H && iy < content_bottom) {
+                        int is_hover = (pl_hover_item == item_idx);
+                        int is_selected = (pl_selected_item == item_idx);
+                        if (is_selected) {
+                            psolid(x + 2, iy, x + w - 2, iy + PL_ITEM_H,
+                                   0.1f, 0.5f, 0.15f, 0.35f, vp_w, vp_h);
+                        } else if (is_hover) {
+                            psolid(x + 2, iy, x + w - 2, iy + PL_ITEM_H,
+                                   t->accent[0], t->accent[1], t->accent[2],
+                                   0.12f, vp_w, vp_h);
+                        }
+                        float ir = t->dim[0], ig = t->dim[1], ib = t->dim[2];
+                        float nr = t->text[0] * 0.85f, ng = t->text[1] * 0.85f, nb = t->text[2] * 0.85f;
+                        if (is_selected) { nr = 0.4f; ng = 1.0f; nb = 0.5f; }
+                        const char *icon = pl_paths[pi].is_loop ? "\x0E" : "\x1A";
+                        ptext(x + PL_PAD + cw * 3, iy + (PL_ITEM_H - ch) / 2,
+                              icon, ir, ig, ib, vp_w, vp_h, cw, ch);
+                        ptext(x + PL_PAD + cw * 5, iy + (PL_ITEM_H - ch) / 2,
+                              pl_paths[pi].name, nr, ng, nb,
+                              vp_w, vp_h, cw, ch);
+                        /* Steps on right */
+                        char sbuf[16];
+                        wsprintfA(sbuf, "%d steps", pl_paths[pi].steps);
+                        int slen = (int)strlen(sbuf);
+                        ptext(x + w - PL_PAD - slen * (cw - 1), iy + (PL_ITEM_H - ch) / 2,
+                              sbuf, t->dim[0] * 0.5f, t->dim[1] * 0.5f, t->dim[2] * 0.5f,
+                              vp_w, vp_h, cw - 1, ch);
+                    }
+                    iy += PL_ITEM_H;
+                    item_idx++;
+                }
+            }
+        }
+    }
+
+    /* GO button */
+    {
+        int go_y = content_bottom + 4;
+        int go_w = 80, go_h = PL_GO_H - 8;
+        int go_x = x + (w - go_w) / 2;
+        int has_sel = (pl_selected_item >= 0);
+        float br = has_sel ? 0.15f : 0.08f;
+        float bg = has_sel ? 0.55f : 0.15f;
+        float bb = has_sel ? 0.2f : 0.08f;
+        float ba = has_sel ? 0.9f : 0.4f;
+        psolid(go_x, go_y, go_x + go_w, go_y + go_h, br, bg, bb, ba, vp_w, vp_h);
+        /* Button border */
+        psolid(go_x, go_y, go_x + go_w, go_y + 1, br*1.5f, bg*1.5f, bb*1.5f, ba, vp_w, vp_h);
+        psolid(go_x, go_y+go_h-1, go_x+go_w, go_y+go_h, br*0.5f, bg*0.5f, bb*0.5f, ba, vp_w, vp_h);
+        float gr = has_sel ? 1.0f : 0.5f;
+        float gg = has_sel ? 1.0f : 0.5f;
+        float gb = has_sel ? 1.0f : 0.5f;
+        ptext(go_x + (go_w - 2 * cw) / 2, go_y + (go_h - ch) / 2,
+              "GO", gr, gg, gb, vp_w, vp_h, cw, ch);
+    }
+
+    /* Footer: item count */
+    {
+        char fbuf[64];
+        if (pl_tab == 0)
+            wsprintfA(fbuf, "%d rooms in %d areas", pl_room_count, pl_room_cat_count);
+        else
+            wsprintfA(fbuf, "%d paths/loops in %d areas", pl_path_count, pl_loop_cat_count);
+        ptext(x + PL_PAD, y + h - ch - 4,
+              fbuf, t->dim[0] * 0.5f, t->dim[1] * 0.5f, t->dim[2] * 0.5f,
+              vp_w, vp_h, cw - 1, ch - 2);
+    }
+}
+
+/* Paths & Loops window hit test — returns 1 if mouse is in window */
+static int pl_hit(int mx, int my)
+{
+    if (!pl_wnd_open) return 0;
+    return (mx >= (int)pl_x && mx < (int)(pl_x + pl_w) &&
+            my >= (int)pl_y && my < (int)(pl_y + pl_h));
+}
+
+/* Map mouse Y to item index in content area */
+static int pl_item_at_y(int my)
+{
+    int ty = (int)pl_y + PL_TITLEBAR + PL_TAB_H + PL_TOOLBAR_H + 2;
+    if (my < ty) return -1;
+    return (my - ty) / PL_ITEM_H + pl_scroll;
+}
+
+/* Execute the goto/loop for the given item_idx. Returns 1 if executed, 0 if category. */
+static int pl_exec_item(int item_idx)
+{
+    int idx = 0;
+    if (pl_tab == 0) {
+        for (int c = 0; c < pl_room_cat_count; c++) {
+            pl_cat_t *cat = &pl_room_cats[c];
+            int vis_count = 0;
+            for (int r = 0; r < cat->count; r++) {
+                int ri = cat->first_idx + r;
+                if (ri >= pl_room_count || strcmp(pl_rooms[ri].category, cat->name) != 0) break;
+                if (pl_rooms[ri].hidden && !pl_show_hidden) continue;
+                if (pl_search[0] && !pl_stristr(pl_rooms[ri].name, pl_search) &&
+                    !pl_stristr(pl_rooms[ri].code, pl_search) &&
+                    !pl_stristr(pl_rooms[ri].category, pl_search)) continue;
+                vis_count++;
+            }
+            if (vis_count == 0 && pl_search[0]) continue;
+            if (idx == item_idx) return 0; /* category header */
+            idx++;
+            if (cat->expanded) {
+                for (int r = 0; r < cat->count; r++) {
+                    int ri = cat->first_idx + r;
+                    if (ri >= pl_room_count || strcmp(pl_rooms[ri].category, cat->name) != 0) break;
+                    if (pl_rooms[ri].hidden && !pl_show_hidden) continue;
+                    if (pl_search[0] && !pl_stristr(pl_rooms[ri].name, pl_search) &&
+                        !pl_stristr(pl_rooms[ri].code, pl_search)) continue;
+                    if (idx == item_idx) {
+                        pl_do_goto(pl_rooms[ri].name);
+                        pl_wnd_open = 0;
+                        return 1;
+                    }
+                    idx++;
+                }
+            }
+        }
+    } else {
+        for (int c = 0; c < pl_loop_cat_count; c++) {
+            pl_cat_t *cat = &pl_loop_cats[c];
+            int vis_count = 0;
+            for (int p = 0; p < cat->count; p++) {
+                int pi = cat->first_idx + p;
+                if (pi >= pl_path_count || !pl_paths[pi].is_loop) break;
+                if (strcmp(pl_paths[pi].start_category, cat->name) != 0) break;
+                if (pl_search[0] && !pl_stristr(pl_paths[pi].name, pl_search) &&
+                    !pl_stristr(pl_paths[pi].file, pl_search) &&
+                    !pl_stristr(pl_paths[pi].start_category, pl_search)) continue;
+                vis_count++;
+            }
+            if (vis_count == 0 && pl_search[0]) continue;
+            if (idx == item_idx) return 0; /* category header */
+            idx++;
+            if (cat->expanded) {
+                for (int p = 0; p < cat->count; p++) {
+                    int pi = cat->first_idx + p;
+                    if (pi >= pl_path_count || !pl_paths[pi].is_loop) break;
+                    if (strcmp(pl_paths[pi].start_category, cat->name) != 0) break;
+                    if (pl_search[0] && !pl_stristr(pl_paths[pi].name, pl_search) &&
+                        !pl_stristr(pl_paths[pi].file, pl_search)) continue;
+                    if (idx == item_idx) {
+                        pl_do_loop(pl_paths[pi].file);
+                        pl_wnd_open = 0;
+                        return 1;
+                    }
+                    idx++;
+                }
+            }
+        }
+    }
+    return 0;
+}
+
+/* Single click: categories toggle, items select (green highlight) */
+static void pl_click_item(int item_idx)
+{
+    int idx = 0;
+    if (pl_tab == 0) {
+        for (int c = 0; c < pl_room_cat_count; c++) {
+            pl_cat_t *cat = &pl_room_cats[c];
+            int vis_count = 0;
+            for (int r = 0; r < cat->count; r++) {
+                int ri = cat->first_idx + r;
+                if (ri >= pl_room_count || strcmp(pl_rooms[ri].category, cat->name) != 0) break;
+                if (pl_rooms[ri].hidden && !pl_show_hidden) continue;
+                if (pl_search[0] && !pl_stristr(pl_rooms[ri].name, pl_search) &&
+                    !pl_stristr(pl_rooms[ri].code, pl_search) &&
+                    !pl_stristr(pl_rooms[ri].category, pl_search)) continue;
+                vis_count++;
+            }
+            if (vis_count == 0 && pl_search[0]) continue;
+            if (idx == item_idx) { cat->expanded = !cat->expanded; pl_selected_item = -1; return; }
+            idx++;
+            if (cat->expanded) {
+                for (int r = 0; r < cat->count; r++) {
+                    int ri = cat->first_idx + r;
+                    if (ri >= pl_room_count || strcmp(pl_rooms[ri].category, cat->name) != 0) break;
+                    if (pl_rooms[ri].hidden && !pl_show_hidden) continue;
+                    if (pl_search[0] && !pl_stristr(pl_rooms[ri].name, pl_search) &&
+                        !pl_stristr(pl_rooms[ri].code, pl_search)) continue;
+                    if (idx == item_idx) { pl_selected_item = item_idx; return; }
+                    idx++;
+                }
+            }
+        }
+    } else {
+        for (int c = 0; c < pl_loop_cat_count; c++) {
+            pl_cat_t *cat = &pl_loop_cats[c];
+            int vis_count = 0;
+            for (int p = 0; p < cat->count; p++) {
+                int pi = cat->first_idx + p;
+                if (pi >= pl_path_count || !pl_paths[pi].is_loop) break;
+                if (strcmp(pl_paths[pi].start_category, cat->name) != 0) break;
+                if (pl_search[0] && !pl_stristr(pl_paths[pi].name, pl_search) &&
+                    !pl_stristr(pl_paths[pi].file, pl_search) &&
+                    !pl_stristr(pl_paths[pi].start_category, pl_search)) continue;
+                vis_count++;
+            }
+            if (vis_count == 0 && pl_search[0]) continue;
+            if (idx == item_idx) { cat->expanded = !cat->expanded; pl_selected_item = -1; return; }
+            idx++;
+            if (cat->expanded) {
+                for (int p = 0; p < cat->count; p++) {
+                    int pi = cat->first_idx + p;
+                    if (pi >= pl_path_count || !pl_paths[pi].is_loop) break;
+                    if (strcmp(pl_paths[pi].start_category, cat->name) != 0) break;
+                    if (pl_search[0] && !pl_stristr(pl_paths[pi].name, pl_search) &&
+                        !pl_stristr(pl_paths[pi].file, pl_search)) continue;
+                    if (idx == item_idx) { pl_selected_item = item_idx; return; }
+                    idx++;
+                }
+            }
+        }
+    }
+}
+
+/* Execute whatever is currently selected */
+static void pl_exec_selected(void)
+{
+    if (pl_selected_item >= 0) pl_exec_item(pl_selected_item);
+}
+
 static void vkm_draw(int vp_w, int vp_h)
 {
     if (!vkm_open) return;
@@ -1771,9 +3822,10 @@ static void vkm_draw(int vp_w, int vp_h)
     vkm_draw_panel(vkm_x, vkm_y, VKM_ROOT_W, rh, t, vp_w, vp_h);
 
     /* Root menu items */
-    /* FX label changes based on state */
     const char *root_labels[VKM_ROOT_COUNT] = {
-        "Theme  \x10", "Font  \x10", "FX  \x10", "", "Console", "", "Close  (F11)"
+        "Visual  \x10", "Widgets  \x10", "",
+        "Console", "Paths & Loops", "Recent  \x10",
+        "", "Close  (F11)"
     };
 
     for (int i = 0; i < VKM_ROOT_COUNT; i++) {
@@ -1781,7 +3833,6 @@ static void vkm_draw(int vp_w, int vp_h)
         vkm_get_root_item_rect(i, &iy, &ih);
 
         if (vkm_is_sep(i)) {
-            /* Simple thin horizontal line */
             push_solid(vkm_x + VKM_PAD, iy + ih/2,
                        vkm_x + VKM_ROOT_W - VKM_PAD, iy + ih/2 + 1,
                        t->text[0] * 0.3f, t->text[1] * 0.3f, t->text[2] * 0.3f,
@@ -1789,38 +3840,44 @@ static void vkm_draw(int vp_w, int vp_h)
             continue;
         }
 
-        /* Hover highlight — subtle accent tint */
         if (i == vkm_hover) {
             push_solid(vkm_x + 1, iy, vkm_x + VKM_ROOT_W - 1, iy + ih,
                        t->accent[0], t->accent[1], t->accent[2],
                        0.15f, vp_w, vp_h);
         }
 
-        /* Text color: accent when expanded, normal otherwise */
         float tr = t->text[0], tg = t->text[1], tb = t->text[2];
-        if ((i == VKM_ITEM_THEME && vkm_sub == VKM_SUB_THEME) ||
-            (i == VKM_ITEM_FONT && vkm_sub == VKM_SUB_FONT) ||
-            (i == VKM_ITEM_FX && vkm_sub == VKM_SUB_FX)) {
+        if ((i == VKM_ITEM_VISUAL && (vkm_sub == VKM_SUB_VISUAL || vkm_sub == VKM_SUB_THEME || vkm_sub == VKM_SUB_FONT || vkm_sub == VKM_SUB_FX)) ||
+            (i == VKM_ITEM_WIDGETS && vkm_sub == VKM_SUB_WIDGETS) ||
+            (i == VKM_ITEM_RECENT && vkm_sub == VKM_SUB_RECENT)) {
             tr = t->accent[0]; tg = t->accent[1]; tb = t->accent[2];
         }
         push_text(vkm_x + VKM_PAD, iy + (ih - ch) / 2,
                   root_labels[i], tr, tg, tb, vp_w, vp_h, cw, ch);
     }
 
-    /* Submenu */
+    /* Submenu drawing */
     if (vkm_sub != VKM_SUB_NONE) {
-        int draw_parent = (vkm_sub == VKM_SUB_THEME) ? VKM_ITEM_THEME
-                       : (vkm_sub == VKM_SUB_FX)    ? VKM_ITEM_FX
-                       :                               VKM_ITEM_FONT;
+        /* Determine parent root item for positioning */
+        int draw_parent;
+        if (vkm_sub == VKM_SUB_VISUAL || vkm_sub == VKM_SUB_THEME ||
+            vkm_sub == VKM_SUB_FONT || vkm_sub == VKM_SUB_FX)
+            draw_parent = VKM_ITEM_VISUAL;
+        else if (vkm_sub == VKM_SUB_WIDGETS)
+            draw_parent = VKM_ITEM_WIDGETS;
+        else if (vkm_sub == VKM_SUB_RECENT)
+            draw_parent = VKM_ITEM_RECENT;
+        else
+            draw_parent = VKM_ITEM_VISUAL;
+
         int parent_y, parent_h;
         vkm_get_root_item_rect(draw_parent, &parent_y, &parent_h);
 
-        int sx = vkm_x + VKM_ROOT_W - 1; /* overlap border by 1px */
+        int sx = vkm_x + VKM_ROOT_W - 1;
         int sy = parent_y;
         int count = vkm_sub_count();
         int sh = vkm_sub_height();
 
-        /* Clamp submenu to screen */
         if (sy + sh > vp_h) sy = vp_h - sh;
         if (sx + VKM_SUB_W > vp_w) sx = vkm_x - VKM_SUB_W + 1;
 
@@ -1829,7 +3886,6 @@ static void vkm_draw(int vp_w, int vp_h)
         for (int i = 0; i < count; i++) {
             int iy2 = sy + VKM_PAD + i * VKM_ITEM_H;
 
-            /* Hover highlight */
             if (i == vkm_sub_hover) {
                 push_solid(sx + 1, iy2, sx + VKM_SUB_W - 1, iy2 + VKM_ITEM_H,
                            t->accent[0], t->accent[1], t->accent[2],
@@ -1838,8 +3894,28 @@ static void vkm_draw(int vp_w, int vp_h)
 
             const char *label = NULL;
             int is_active = 0;
+            int has_arrow = 0; /* sub-items that open further submenus */
 
-            if (vkm_sub == VKM_SUB_THEME) {
+            if (vkm_sub == VKM_SUB_VISUAL) {
+                if (i == VKM_VIS_THEME) { label = "Theme  \x10"; has_arrow = 1; }
+                else if (i == VKM_VIS_FONT) { label = "Font  \x10"; has_arrow = 1; }
+                else if (i == VKM_VIS_FX) { label = "FX  \x10"; has_arrow = 1; }
+            } else if (vkm_sub == VKM_SUB_WIDGETS) {
+                if (i == VKM_WID_RTIMER) {
+                    label = vrt_visible ? "\x04 Round Timer" : "  Round Timer";
+                    is_active = vrt_visible;
+                } else if (i == VKM_WID_CONVO) {
+                    int cv = (vkw_convo_idx >= 0 && vkw_windows[vkw_convo_idx].active);
+                    label = cv ? "\x04 Conversation" : "  Conversation";
+                    is_active = cv;
+                }
+            } else if (vkm_sub == VKM_SUB_RECENT) {
+                if (vkm_goto_count == 0) {
+                    label = "(empty)";
+                } else if (i < vkm_goto_count) {
+                    label = vkm_goto_names[i];
+                }
+            } else if (vkm_sub == VKM_SUB_THEME) {
                 label = ui_themes[i].name;
                 is_active = (i == current_theme);
             } else if (vkm_sub == VKM_SUB_FONT) {
@@ -1851,22 +3927,11 @@ static void vkm_draw(int vp_w, int vp_h)
                     is_active = (current_font == i - 1);
                 }
             } else if (vkm_sub == VKM_SUB_FX) {
-                if (i == VKM_FX_LIQUID) {
-                    label = "Liquid Letters";
-                    is_active = fx_liquid_mode;
-                } else if (i == VKM_FX_WAVES) {
-                    label = "Diagonal Waves";
-                    is_active = fx_waves_mode;
-                } else if (i == VKM_FX_FBM) {
-                    label = "FBM Currents";
-                    is_active = fx_fbm_mode;
-                } else if (i == VKM_FX_SOBEL) {
-                    label = "Sobel/Sharp";
-                    is_active = fx_sobel_mode;
-                } else if (i == VKM_FX_SCANLINES) {
-                    label = "CRT Scanlines";
-                    is_active = fx_scanline_mode;
-                }
+                if (i == VKM_FX_LIQUID) { label = "Liquid Letters"; is_active = fx_liquid_mode; }
+                else if (i == VKM_FX_WAVES) { label = "Diagonal Waves"; is_active = fx_waves_mode; }
+                else if (i == VKM_FX_FBM) { label = "FBM Currents"; is_active = fx_fbm_mode; }
+                else if (i == VKM_FX_SOBEL) { label = "Sobel/Sharp"; is_active = fx_sobel_mode; }
+                else if (i == VKM_FX_SCANLINES) { label = "CRT Scanlines"; is_active = fx_scanline_mode; }
             }
 
             float tr, tg, tb;
@@ -1877,8 +3942,7 @@ static void vkm_draw(int vp_w, int vp_h)
             }
 
             if (label) {
-                /* Active marker: small filled square before active item */
-                if (is_active) {
+                if (is_active && vkm_sub != VKM_SUB_WIDGETS) {
                     push_text(sx + 3, iy2 + (VKM_ITEM_H - ch) / 2,
                               "\x04", tr, tg, tb, vp_w, vp_h, cw, ch);
                 }
@@ -2183,7 +4247,7 @@ static void vkt_build_vertices(void)
         cw = ch / 2.0f;
     }
     float grid_w = cw * TERM_COLS;
-    float x_offset = ((float)vp_w - grid_w) / 2.0f; /* center horizontally */
+    float x_offset = 0.0f; /* left-justified */
 
     /* UV constants for font atlas (16x16 grid) with half-texel inset
      * to prevent bilinear filtering from sampling neighboring glyph cells */
@@ -2334,8 +4398,20 @@ static void vkt_build_vertices(void)
     #undef PX2NDC_X
     #undef PX2NDC_Y
 
+    /* Mark where terminal text ends and UI chrome begins.
+     * FX pipeline (liquid/waves/etc) only applies to quads before this split. */
+    fx_split_quad = quad_count;
+
     /* Draw floating windows */
     vkw_draw_all(vp_w, vp_h);
+
+    /* Draw round timer widget */
+    vrt_draw(vp_w, vp_h);
+
+    /* Draw paths & loops window (may use UI font — tracked separately) */
+    pl_quad_start = quad_count;
+    pl_draw(vp_w, vp_h);
+    pl_quad_end = quad_count;
 
     /* Draw context menu on top of EVERYTHING (last = topmost) */
     vkm_draw(vp_w, vp_h);
@@ -2879,10 +4955,10 @@ static uint8_t *vkt_build_font_pixels(int font_idx, uint32_t *out_w, uint32_t *o
             }
         }
 
-        /* ---- Gaussian blur on alpha channel for smoother SDF/liquid FX ----
-         * 5x5 Gaussian kernel applied per-cell to avoid cross-glyph bleed.
-         * This smooths aliased edges, making liquid letters + wobble look
-         * crisp at 4K instead of pixelated. */
+        /* ---- Light antialias on alpha channel ----
+         * 3x3 separable kernel (1,2,1) / sigma ~0.5 — just smooths
+         * staircase aliasing without blurring glyph detail.
+         * Applied per-cell to prevent cross-glyph bleed. */
         {
             uint8_t *tmp = (uint8_t *)calloc(aw * ah, 1);
             if (tmp) {
@@ -2890,10 +4966,7 @@ static uint8_t *vkt_build_font_pixels(int font_idx, uint32_t *out_w, uint32_t *o
                 for (uint32_t i = 0; i < aw * ah; i++)
                     tmp[i] = pixels[i * 4 + 3];
 
-                /* 5x5 Gaussian kernel (sigma ~1.0): 1,4,6,4,1 */
-                static const int kern[5] = { 1, 4, 6, 4, 1 };
-                static const int ksum = 256; /* 16*16 for separable */
-
+                /* 3x3 separable kernel: 1,2,1 (sum=4 per pass, 16 total) */
                 /* Separable: horizontal pass */
                 uint8_t *h_buf = (uint8_t *)calloc(aw * ah, 1);
                 if (h_buf) {
@@ -2903,14 +4976,10 @@ static uint8_t *vkt_build_font_pixels(int font_idx, uint32_t *out_w, uint32_t *o
                         int gy = (cp / 16) * cell_h;
                         for (int y = gy + 1; y < gy + cell_h - 1; y++) {
                             for (int x = gx + 1; x < gx + cell_w - 1; x++) {
-                                int sum = 0;
-                                for (int k = -2; k <= 2; k++) {
-                                    int sx = x + k;
-                                    if (sx < gx) sx = gx;
-                                    if (sx >= gx + cell_w) sx = gx + cell_w - 1;
-                                    sum += tmp[y * aw + sx] * kern[k + 2];
-                                }
-                                h_buf[y * aw + x] = (uint8_t)(sum / 16);
+                                int xl = x - 1 < gx ? gx : x - 1;
+                                int xr = x + 1 >= gx + cell_w ? gx + cell_w - 1 : x + 1;
+                                int sum = tmp[y * aw + xl] + 2 * tmp[y * aw + x] + tmp[y * aw + xr];
+                                h_buf[y * aw + x] = (uint8_t)(sum / 4);
                             }
                         }
                     }
@@ -2921,14 +4990,10 @@ static uint8_t *vkt_build_font_pixels(int font_idx, uint32_t *out_w, uint32_t *o
                         int gy = (cp / 16) * cell_h;
                         for (int y = gy + 1; y < gy + cell_h - 1; y++) {
                             for (int x = gx + 1; x < gx + cell_w - 1; x++) {
-                                int sum = 0;
-                                for (int k = -2; k <= 2; k++) {
-                                    int sy = y + k;
-                                    if (sy < gy) sy = gy;
-                                    if (sy >= gy + cell_h) sy = gy + cell_h - 1;
-                                    sum += h_buf[sy * aw + x] * kern[k + 2];
-                                }
-                                int val = sum / 16;
+                                int yt = y - 1 < gy ? gy : y - 1;
+                                int yb = y + 1 >= gy + cell_h ? gy + cell_h - 1 : y + 1;
+                                int sum = h_buf[yt * aw + x] + 2 * h_buf[y * aw + x] + h_buf[yb * aw + x];
+                                int val = sum / 4;
                                 if (val > 255) val = 255;
                                 pixels[(y * aw + x) * 4 + 3] = (uint8_t)val;
                             }
@@ -2942,7 +5007,7 @@ static uint8_t *vkt_build_font_pixels(int font_idx, uint32_t *out_w, uint32_t *o
 
         *out_w = aw; *out_h = ah;
         cur_atlas_w = aw; cur_atlas_h = ah;
-        if (api) api->log("[vk_terminal] TTF atlas: %s %dx%d (cell %dx%d, blurred)\n",
+        if (api) api->log("[vk_terminal] TTF atlas: %s %dx%d (cell %dx%d, AA)\n",
                           ttf_fonts[font_idx].name, aw, ah, cell_w, cell_h);
         return pixels;
     }
@@ -3113,6 +5178,193 @@ static int vkt_create_font_texture(void)
     return ret;
 }
 
+/* Build and upload a dedicated UI font atlas (always TTF, independent of terminal font).
+ * Tries each TTF font in order until one loads. Uses a fixed 28px cell height for legibility. */
+static void vkt_init_ui_font(void)
+{
+    /* Try each TTF font in order */
+    unsigned char *ttf_data = NULL;
+    int font_idx = -1, ttf_size;
+    for (int i = 0; i < NUM_TTF_FONTS; i++) {
+        ttf_data = vkt_load_ttf_file(i, &ttf_size);
+        if (ttf_data) { font_idx = i; break; }
+    }
+    if (!ttf_data) {
+        if (api) api->log("[vk_terminal] No TTF fonts found for UI — P&L will use terminal font\n");
+        return;
+    }
+
+    stbtt_fontinfo font;
+    if (!stbtt_InitFont(&font, ttf_data, stbtt_GetFontOffsetForIndex(ttf_data, 0))) {
+        if (api) api->log("[vk_terminal] stbtt_InitFont failed for UI font\n");
+        return;
+    }
+
+    /* Fixed cell size for high-quality UI text */
+    int cell_h = 28, cell_w = 14;
+    uint32_t aw = (uint32_t)(cell_w * 16), ah = (uint32_t)(cell_h * 16);
+    uint8_t *pixels = (uint8_t *)calloc(aw * ah * 4, 1);
+    if (!pixels) return;
+
+    float scale = stbtt_ScaleForPixelHeight(&font, (float)cell_h);
+    int ascent, descent, lineGap;
+    stbtt_GetFontVMetrics(&font, &ascent, &descent, &lineGap);
+    int baseline = (int)(ascent * scale);
+
+    for (int cp = 0; cp < 256; cp++) {
+        unsigned int unicode = cp437_to_unicode[cp];
+        if (unicode == 0 && cp != 0) continue;
+
+        int glyph = stbtt_FindGlyphIndex(&font, unicode);
+        if (glyph == 0 && unicode != 0x20 && cp != 0) continue;
+
+        int x0, y0, x1, y1;
+        stbtt_GetGlyphBitmapBox(&font, glyph, scale, scale, &x0, &y0, &x1, &y1);
+        int gw = x1 - x0, gh = y1 - y0;
+        if (gw <= 0 || gh <= 0) continue;
+
+        int bw, bh, bxoff, byoff;
+        unsigned char *bmp = stbtt_GetGlyphBitmap(&font, scale, scale, glyph,
+                                                   &bw, &bh, &bxoff, &byoff);
+        if (!bmp) continue;
+
+        int grid_x = (cp % 16) * cell_w;
+        int grid_y = (cp / 16) * cell_h;
+
+        /* Center glyph in cell */
+        int adv, lsb;
+        stbtt_GetGlyphHMetrics(&font, glyph, &adv, &lsb);
+        int x_off = (cell_w - (int)(adv * scale)) / 2 + (int)(lsb * scale);
+        int y_off = baseline + y0;
+
+        for (int row = 0; row < bh; row++) {
+            for (int col = 0; col < bw; col++) {
+                int px = grid_x + x_off + col;
+                int py = grid_y + y_off + row;
+                if (px <= grid_x || px >= grid_x + cell_w - 1) continue;
+                if (py <= grid_y || py >= grid_y + cell_h - 1) continue;
+                if (px < 0 || px >= (int)aw || py < 0 || py >= (int)ah) continue;
+                pixels[(py * aw + px) * 4 + 3] = bmp[row * bw + col];
+            }
+        }
+        stbtt_FreeBitmap(bmp, NULL);
+    }
+
+    /* Ensure glyph 219 (full block) is solid white — needed for push_solid_ui */
+    {
+        int g_x = (219 % 16) * cell_w, g_y = (219 / 16) * cell_h;
+        for (int yy = g_y; yy < g_y + cell_h; yy++)
+            for (int xx = g_x; xx < g_x + cell_w; xx++) {
+                int idx = (yy * aw + xx) * 4;
+                pixels[idx + 0] = 255; pixels[idx + 1] = 255;
+                pixels[idx + 2] = 255; pixels[idx + 3] = 255;
+            }
+    }
+
+    ui_atlas_w = aw; ui_atlas_h = ah;
+
+    /* Create VkImage */
+    VkImageCreateInfo ici = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+    ici.imageType = VK_IMAGE_TYPE_2D;
+    ici.format = VK_FORMAT_R8G8B8A8_UNORM;
+    ici.extent = (VkExtent3D){ aw, ah, 1 };
+    ici.mipLevels = 1; ici.arrayLayers = 1;
+    ici.samples = VK_SAMPLE_COUNT_1_BIT;
+    ici.tiling = VK_IMAGE_TILING_LINEAR;
+    ici.usage = VK_IMAGE_USAGE_SAMPLED_BIT;
+    ici.initialLayout = VK_IMAGE_LAYOUT_PREINITIALIZED;
+    vkCreateImage(vk_dev, &ici, NULL, &ui_font_img);
+
+    VkMemoryRequirements mr;
+    vkGetImageMemoryRequirements(vk_dev, ui_font_img, &mr);
+    VkMemoryAllocateInfo mai = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+    mai.allocationSize = mr.size;
+    mai.memoryTypeIndex = vk_find_memory(vk_pdev, mr.memoryTypeBits,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    vkAllocateMemory(vk_dev, &mai, NULL, &ui_font_mem);
+    vkBindImageMemory(vk_dev, ui_font_img, ui_font_mem, 0);
+
+    /* Copy pixel data */
+    void *mapped;
+    vkMapMemory(vk_dev, ui_font_mem, 0, mr.size, 0, &mapped);
+    VkImageSubresource sub = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0 };
+    VkSubresourceLayout layout;
+    vkGetImageSubresourceLayout(vk_dev, ui_font_img, &sub, &layout);
+    for (uint32_t row = 0; row < ah; row++) {
+        memcpy((uint8_t *)mapped + layout.offset + row * layout.rowPitch,
+               pixels + row * aw * 4, aw * 4);
+    }
+    vkUnmapMemory(vk_dev, ui_font_mem);
+    free(pixels);
+
+    /* Transition to SHADER_READ_ONLY_OPTIMAL */
+    VkCommandBuffer tmp_cmd;
+    VkCommandBufferAllocateInfo cbai = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+    cbai.commandPool = vk_cmd_pool;
+    cbai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    cbai.commandBufferCount = 1;
+    vkAllocateCommandBuffers(vk_dev, &cbai, &tmp_cmd);
+
+    VkCommandBufferBeginInfo cbbi = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+    cbbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(tmp_cmd, &cbbi);
+    VkImageMemoryBarrier imb = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+    imb.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT;
+    imb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    imb.oldLayout = VK_IMAGE_LAYOUT_PREINITIALIZED;
+    imb.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    imb.image = ui_font_img;
+    imb.subresourceRange = (VkImageSubresourceRange){ VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+    vkCmdPipelineBarrier(tmp_cmd, VK_PIPELINE_STAGE_HOST_BIT,
+                         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0,
+                         0, NULL, 0, NULL, 1, &imb);
+    vkEndCommandBuffer(tmp_cmd);
+
+    VkFence tmp_fence;
+    VkFenceCreateInfo fci = { VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
+    vkCreateFence(vk_dev, &fci, NULL, &tmp_fence);
+    VkSubmitInfo si = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
+    si.commandBufferCount = 1;
+    si.pCommandBuffers = &tmp_cmd;
+    vkQueueSubmit(vk_queue, 1, &si, tmp_fence);
+    vkWaitForFences(vk_dev, 1, &tmp_fence, VK_TRUE, UINT64_MAX);
+    vkDestroyFence(vk_dev, tmp_fence, NULL);
+    vkFreeCommandBuffers(vk_dev, vk_cmd_pool, 1, &tmp_cmd);
+
+    /* Image view */
+    VkImageViewCreateInfo ivci = { VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+    ivci.image = ui_font_img;
+    ivci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    ivci.format = VK_FORMAT_R8G8B8A8_UNORM;
+    ivci.subresourceRange = (VkImageSubresourceRange){ VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+    vkCreateImageView(vk_dev, &ivci, NULL, &ui_font_view);
+
+    /* Sampler — LINEAR for smooth antialiased TTF */
+    VkSamplerCreateInfo saci = { VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
+    saci.magFilter = VK_FILTER_LINEAR;
+    saci.minFilter = VK_FILTER_LINEAR;
+    saci.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    saci.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    vkCreateSampler(vk_dev, &saci, NULL, &ui_font_sampler);
+
+    /* Update UI descriptor set */
+    VkDescriptorImageInfo dii = {0};
+    dii.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    dii.imageView = ui_font_view;
+    dii.sampler = ui_font_sampler;
+    VkWriteDescriptorSet wds = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+    wds.dstSet = ui_desc_set;
+    wds.dstBinding = 0;
+    wds.descriptorCount = 1;
+    wds.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    wds.pImageInfo = &dii;
+    vkUpdateDescriptorSets(vk_dev, 1, &wds, 0, NULL);
+
+    ui_font_ready = 1;
+    if (api) api->log("[vk_terminal] UI font ready: %s (%dx%d atlas)\n",
+                      ttf_fonts[font_idx].name, aw, ah);
+}
+
 /* Switch font at runtime — called ONLY from inside vkt_render_frame
  * after the fence wait, so previous frame is guaranteed complete.
  * No vkDeviceWaitIdle needed (which can deadlock under Wine FIFO present
@@ -3207,20 +5459,23 @@ static int vkt_create_descriptors(void)
     dslci.pBindings = &binding;
     vkCreateDescriptorSetLayout(vk_dev, &dslci, NULL, &vk_desc_layout);
 
-    /* Pool */
-    VkDescriptorPoolSize ps = { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1 };
+    /* Pool — 2 sets: main font + UI font */
+    VkDescriptorPoolSize ps = { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2 };
     VkDescriptorPoolCreateInfo dpci = { VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
-    dpci.maxSets = 1;
+    dpci.maxSets = 2;
     dpci.poolSizeCount = 1;
     dpci.pPoolSizes = &ps;
     vkCreateDescriptorPool(vk_dev, &dpci, NULL, &vk_desc_pool);
 
-    /* Allocate */
+    /* Allocate main font descriptor set */
     VkDescriptorSetAllocateInfo dsai = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
     dsai.descriptorPool = vk_desc_pool;
     dsai.descriptorSetCount = 1;
     dsai.pSetLayouts = &vk_desc_layout;
     vkAllocateDescriptorSets(vk_dev, &dsai, &vk_desc_set);
+
+    /* Allocate UI font descriptor set */
+    vkAllocateDescriptorSets(vk_dev, &dsai, &ui_desc_set);
 
     /* Update with font texture */
     VkDescriptorImageInfo dii = {0};
@@ -3545,8 +5800,14 @@ static void vkt_render_frame(void)
     rpbi.pClearValues = &clear;
     vkCmdBeginRenderPass(vk_cmd_buf, &rpbi, VK_SUBPASS_CONTENTS_INLINE);
 
-    if ((fx_liquid_mode || fx_waves_mode || fx_scanline_mode || fx_fbm_mode || fx_sobel_mode) && vk_liquid_pipeline) {
-        /* FX mode — use FX pipeline with push constants */
+    int fx_active = (fx_liquid_mode || fx_waves_mode || fx_scanline_mode || fx_fbm_mode || fx_sobel_mode) && vk_liquid_pipeline;
+
+    VkDeviceSize offset = 0;
+    vkCmdBindVertexBuffers(vk_cmd_buf, 0, 1, &vk_vbuf, &offset);
+    vkCmdBindIndexBuffer(vk_cmd_buf, vk_ibuf, 0, VK_INDEX_TYPE_UINT16);
+
+    if (fx_active && fx_split_quad > 0) {
+        /* Draw 1: Terminal text with FX pipeline */
         vkCmdBindPipeline(vk_cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS, vk_liquid_pipeline);
         vkCmdBindDescriptorSets(vk_cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                 vk_liquid_pipe_layout, 0, 1, &vk_desc_set, 0, NULL);
@@ -3559,16 +5820,84 @@ static void vkt_render_frame(void)
         vkCmdPushConstants(vk_cmd_buf, vk_liquid_pipe_layout,
                            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                            0, sizeof(pc_data), pc_data);
-    } else {
+        vkCmdDrawIndexed(vk_cmd_buf, fx_split_quad * 6, 1, 0, 0, 0);
+
+        /* Draw 2: UI chrome (windows, timer) with normal pipeline + main font */
         vkCmdBindPipeline(vk_cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS, vk_pipeline);
         vkCmdBindDescriptorSets(vk_cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                 vk_pipe_layout, 0, 1, &vk_desc_set, 0, NULL);
+        {
+            int chrome_quads = pl_quad_start - fx_split_quad;
+            if (chrome_quads > 0)
+                vkCmdDrawIndexed(vk_cmd_buf, chrome_quads * 6, 1, fx_split_quad * 6, 0, 0);
+        }
+        /* Draw 3: P&L window with UI font atlas (or main font if UI font unavailable) */
+        {
+            int pl_quads = pl_quad_end - pl_quad_start;
+            if (pl_quads > 0) {
+                if (ui_font_ready)
+                    vkCmdBindDescriptorSets(vk_cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                            vk_pipe_layout, 0, 1, &ui_desc_set, 0, NULL);
+                vkCmdDrawIndexed(vk_cmd_buf, pl_quads * 6, 1, pl_quad_start * 6, 0, 0);
+            }
+        }
+        /* Draw 4: Context menu (back to main font, drawn last = on top) */
+        {
+            int menu_quads = quad_count - pl_quad_end;
+            if (menu_quads > 0) {
+                if (ui_font_ready) /* rebind main font */
+                    vkCmdBindDescriptorSets(vk_cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                            vk_pipe_layout, 0, 1, &vk_desc_set, 0, NULL);
+                vkCmdDrawIndexed(vk_cmd_buf, menu_quads * 6, 1, pl_quad_end * 6, 0, 0);
+            }
+        }
+    } else {
+        /* No FX or no split — single draw with appropriate pipeline */
+        if (fx_active) {
+            vkCmdBindPipeline(vk_cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS, vk_liquid_pipeline);
+            vkCmdBindDescriptorSets(vk_cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                    vk_liquid_pipe_layout, 0, 1, &vk_desc_set, 0, NULL);
+            float pc_data[6] = { fx_time,
+                                  fx_liquid_mode ? 1.0f : 0.0f,
+                                  fx_waves_mode ? 1.0f : 0.0f,
+                                  fx_scanline_mode ? 1.0f : 0.0f,
+                                  fx_fbm_mode ? 1.0f : 0.0f,
+                                  fx_sobel_mode ? 1.0f : 0.0f };
+            vkCmdPushConstants(vk_cmd_buf, vk_liquid_pipe_layout,
+                               VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                               0, sizeof(pc_data), pc_data);
+        } else {
+            vkCmdBindPipeline(vk_cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS, vk_pipeline);
+            vkCmdBindDescriptorSets(vk_cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                    vk_pipe_layout, 0, 1, &vk_desc_set, 0, NULL);
+        }
+        /* Draw terminal + UI chrome up to P&L */
+        if (pl_quad_start > 0)
+            vkCmdDrawIndexed(vk_cmd_buf, pl_quad_start * 6, 1, 0, 0, 0);
+        /* P&L with UI font */
+        {
+            int pl_quads = pl_quad_end - pl_quad_start;
+            if (pl_quads > 0) {
+                if (ui_font_ready) {
+                    vkCmdBindPipeline(vk_cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS, vk_pipeline);
+                    vkCmdBindDescriptorSets(vk_cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                            vk_pipe_layout, 0, 1, &ui_desc_set, 0, NULL);
+                }
+                vkCmdDrawIndexed(vk_cmd_buf, pl_quads * 6, 1, pl_quad_start * 6, 0, 0);
+            }
+        }
+        /* Menu quads (back to main font) */
+        {
+            int menu_quads = quad_count - pl_quad_end;
+            if (menu_quads > 0) {
+                if (ui_font_ready) {
+                    vkCmdBindDescriptorSets(vk_cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                            vk_pipe_layout, 0, 1, &vk_desc_set, 0, NULL);
+                }
+                vkCmdDrawIndexed(vk_cmd_buf, menu_quads * 6, 1, pl_quad_end * 6, 0, 0);
+            }
+        }
     }
-
-    VkDeviceSize offset = 0;
-    vkCmdBindVertexBuffers(vk_cmd_buf, 0, 1, &vk_vbuf, &offset);
-    vkCmdBindIndexBuffer(vk_cmd_buf, vk_ibuf, 0, VK_INDEX_TYPE_UINT16);
-    vkCmdDrawIndexed(vk_cmd_buf, quad_count * 6, 1, 0, 0, 0);
 
     vkCmdEndRenderPass(vk_cmd_buf);
     vkEndCommandBuffer(vk_cmd_buf);
@@ -3736,6 +6065,45 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
     case WM_CHAR:
         /* Suppress Ctrl+chars (already handled in WM_KEYDOWN) */
         if (wParam < 32 && wParam != '\r' && wParam != '\b') return 0;
+        /* Route to spell input dialog if open */
+        if (vrt_spell_input) {
+            if (wParam == '\r') {
+                /* Confirm */
+                for (int i = 0; i < 21 && vrt_spell_buf[i]; i++) vrt_sync_spell[i] = vrt_spell_buf[i];
+                vrt_sync_spell[vrt_spell_len] = '\0';
+                vrt_spell_input = 0;
+            } else if (wParam == '\b') {
+                if (vrt_spell_cursor > 0) {
+                    for (int i = vrt_spell_cursor - 1; i < vrt_spell_len; i++)
+                        vrt_spell_buf[i] = vrt_spell_buf[i + 1];
+                    vrt_spell_len--;
+                    vrt_spell_cursor--;
+                }
+            } else if (wParam == 27) {
+                vrt_spell_input = 0;
+            } else if (vrt_spell_len < 21) {
+                for (int i = vrt_spell_len; i > vrt_spell_cursor; i--)
+                    vrt_spell_buf[i] = vrt_spell_buf[i - 1];
+                vrt_spell_buf[vrt_spell_cursor] = (char)wParam;
+                vrt_spell_len++;
+                vrt_spell_cursor++;
+                vrt_spell_buf[vrt_spell_len] = '\0';
+            }
+            return 0;
+        }
+        /* Route to P&L search if focused */
+        if (pl_wnd_open && pl_focused) {
+            if (wParam == 27) { pl_focused = 0; }
+            else if (wParam == '\r') { pl_focused = 0; }
+            else if (wParam == '\b') {
+                if (pl_search_len > 0) pl_search[--pl_search_len] = 0;
+            } else if (pl_search_len < 62) {
+                pl_search[pl_search_len++] = (char)wParam;
+                pl_search[pl_search_len] = 0;
+                pl_scroll = 0;
+            }
+            return 0;
+        }
         /* Route to focused window first */
         if (vkw_key_char((unsigned int)wParam)) return 0;
         input_handle_key(wParam, 1);
@@ -3745,6 +6113,29 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         int my2 = mouse_ty((short)HIWORD(lParam));
         vkm_mouse_x = mx2;
         vkm_mouse_y = my2;
+        /* Paths & Loops window drag */
+        if (pl_dragging) {
+            pl_x = (float)mx2 - pl_drag_ox;
+            pl_y = (float)my2 - pl_drag_oy;
+            return 0;
+        }
+        /* Paths & Loops hover tracking */
+        if (pl_wnd_open && pl_hit(mx2, my2)) {
+            pl_hover_item = pl_item_at_y(my2);
+        } else {
+            pl_hover_item = -1;
+        }
+        /* Round timer drag */
+        if (vrt_dragging) {
+            vrt_x = (float)mx2 - vrt_drag_ox;
+            vrt_y = (float)my2 - vrt_drag_oy;
+            return 0;
+        }
+        /* Round timer context menu hover */
+        if (vrt_ctx_open) {
+            vrt_ctx_hover = vrt_ctx_hit(mx2, my2);
+            return 0;
+        }
         /* Window drag/resize takes priority */
         if (vkw_mouse_move(mx2, my2)) return 0;
         if (vkm_open) {
@@ -3752,9 +6143,9 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             int sh = vkm_hit_sub(mx2, my2);
             if (rh >= 0) {
                 vkm_hover = rh;
-                if (rh == VKM_ITEM_THEME) vkm_sub = VKM_SUB_THEME;
-                else if (rh == VKM_ITEM_FONT) vkm_sub = VKM_SUB_FONT;
-                else if (rh == VKM_ITEM_FX) vkm_sub = VKM_SUB_FX;
+                if (rh == VKM_ITEM_VISUAL) vkm_sub = VKM_SUB_VISUAL;
+                else if (rh == VKM_ITEM_WIDGETS) vkm_sub = VKM_SUB_WIDGETS;
+                else if (rh == VKM_ITEM_RECENT) vkm_sub = VKM_SUB_RECENT;
                 else vkm_sub = VKM_SUB_NONE;
                 vkm_sub_hover = -1;
             }
@@ -3765,20 +6156,177 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
     case WM_LBUTTONDOWN: {
         int mx = mouse_tx((short)LOWORD(lParam));
         int my = mouse_ty((short)HIWORD(lParam));
+        /* Round timer context menu click */
+        if (vrt_ctx_open) {
+            int ci = vrt_ctx_hit(mx, my);
+            vrt_ctx_open = 0;
+            if (ci == VRT_CTX_SPELL) { vrt_spell_input = 1; vrt_spell_len = 0; vrt_spell_buf[0] = '\0'; vrt_spell_cursor = 0;
+                for (int i = 0; vrt_sync_spell[i] && i < 21; i++) { vrt_spell_buf[i] = vrt_sync_spell[i]; vrt_spell_len = i + 1; }
+                vrt_spell_buf[vrt_spell_len] = '\0'; vrt_spell_cursor = vrt_spell_len; }
+            else if (ci == VRT_CTX_CAST) { vrt_perform_manual_sync(); }
+            else if (ci == VRT_CTX_SMALL) { vrt_size = 80; }
+            else if (ci == VRT_CTX_NORMAL) { vrt_size = 160; }
+            else if (ci == VRT_CTX_LARGE) { vrt_size = 280; }
+            else if (ci == VRT_CTX_RESET) { vrt_synced = 0; vrt_last_tick_ts = 0; vrt_round_num = 0; vrt_delta_text[0] = '\0'; }
+            else if (ci == VRT_CTX_HIDE) { vrt_visible = 0; }
+            return 0;
+        }
+        /* Spell input dialog clicks */
+        if (vrt_spell_input) {
+            float scx = vrt_x + vrt_size / 2.0f;
+            float scy = vrt_y + vrt_size / 2.0f + vrt_size / 2.0f + 10;
+            int dx = (int)(scx - 120), dy = (int)scy;
+            if (mx >= dx + 8 && mx <= dx + 60 && my >= dy + 50 && my <= dy + 70) {
+                /* OK */
+                for (int i = 0; i < 21 && vrt_spell_buf[i]; i++) vrt_sync_spell[i] = vrt_spell_buf[i];
+                vrt_sync_spell[vrt_spell_len] = '\0';
+                vrt_spell_input = 0;
+            } else if (mx >= dx + 70 && mx <= dx + 140 && my >= dy + 50 && my <= dy + 70) {
+                /* Cancel */
+                vrt_spell_input = 0;
+            } else if (mx >= dx + 150 && mx <= dx + 220 && my >= dy + 50 && my <= dy + 70) {
+                /* Clear */
+                vrt_spell_buf[0] = '\0'; vrt_spell_len = 0; vrt_spell_cursor = 0;
+                vrt_sync_spell[0] = '\0';
+            }
+            return 0;
+        }
+        /* Paths & Loops window interaction */
+        if (pl_wnd_open && pl_hit(mx, my)) {
+            int lx = mx - (int)pl_x, ly = my - (int)pl_y;
+            /* Close button */
+            if (lx >= (int)pl_w - 20 && ly < PL_TITLEBAR) {
+                pl_wnd_open = 0; return 0;
+            }
+            /* Titlebar drag */
+            if (ly < PL_TITLEBAR) {
+                pl_dragging = 1;
+                pl_drag_ox = (float)mx - pl_x;
+                pl_drag_oy = (float)my - pl_y;
+                return 0;
+            }
+            /* Tab click */
+            if (ly >= PL_TITLEBAR && ly < PL_TITLEBAR + PL_TAB_H) {
+                pl_tab = (lx < (int)pl_w / 2) ? 0 : 1;
+                pl_scroll = 0;
+                return 0;
+            }
+            /* Toolbar clicks */
+            if (ly >= PL_TITLEBAR + PL_TAB_H && ly < PL_TITLEBAR + PL_TAB_H + PL_TOOLBAR_H) {
+                /* Hidden checkbox (goto tab, right half) */
+                if (pl_tab == 0 && lx >= (int)pl_w / 2) {
+                    pl_show_hidden = !pl_show_hidden;
+                    return 0;
+                }
+                /* Walk/Run toggle (right edge) */
+                if (lx >= (int)pl_w - 70) {
+                    pl_run_mode = !pl_run_mode;
+                    return 0;
+                }
+                /* Search box focus */
+                pl_focused = 1;
+                return 0;
+            }
+            /* GO button click */
+            {
+                int bottom_h = PL_GO_H + PL_CH + 8;
+                int content_bottom = (int)(pl_y + pl_h) - bottom_h;
+                int go_y = content_bottom + 4;
+                int go_h = PL_GO_H - 8;
+                int go_w = 80;
+                int go_x = (int)pl_x + ((int)pl_w - go_w) / 2;
+                if (mx >= go_x && mx < go_x + go_w && my >= go_y && my < go_y + go_h) {
+                    pl_exec_selected();
+                    return 0;
+                }
+            }
+            /* Content area — item click (select, don't execute) */
+            {
+                int bottom_h = PL_GO_H + PL_CH + 8;
+                int content_bottom = (int)(pl_y + pl_h) - bottom_h;
+                if (my < content_bottom) {
+                    int item = pl_item_at_y(my);
+                    if (item >= 0) pl_click_item(item);
+                }
+            }
+            return 0;
+        }
+        /* Round timer drag start */
+        if (vrt_hit_circle(mx, my)) {
+            vrt_dragging = 1;
+            vrt_drag_ox = (float)mx - vrt_x;
+            vrt_drag_oy = (float)my - vrt_y;
+            return 0;
+        }
         if (!vkm_open) {
             vkw_mouse_down(mx, my); /* start drag/resize or focus window */
         }
         return 0;
     }
+    case WM_LBUTTONDBLCLK: {
+        int mx = mouse_tx((short)LOWORD(lParam));
+        int my = mouse_ty((short)HIWORD(lParam));
+        /* Double-click in P&L content area — execute immediately */
+        if (pl_wnd_open && pl_hit(mx, my)) {
+            int lx = mx - (int)pl_x, ly = my - (int)pl_y;
+            int toolbar_bottom = PL_TITLEBAR + PL_TAB_H + PL_TOOLBAR_H;
+            int bottom_h = PL_GO_H + PL_CH + 8;
+            int content_bottom = (int)pl_h - bottom_h;
+            if (ly >= toolbar_bottom && ly < content_bottom) {
+                int item = pl_item_at_y(my);
+                if (item >= 0) {
+                    pl_selected_item = item;
+                    pl_exec_item(item);
+                }
+            }
+            return 0;
+        }
+        break;
+    }
     case WM_LBUTTONUP: {
         int mx = mouse_tx((short)LOWORD(lParam));
         int my = mouse_ty((short)HIWORD(lParam));
+        if (pl_dragging) { pl_dragging = 0; return 0; }
+        if (vrt_dragging) { vrt_dragging = 0; return 0; }
         vkw_mouse_up(); /* end any drag/resize */
 
         if (!vkm_open) return 0;
 
         /* Check submenu click first */
         int si = vkm_hit_sub(mx, my);
+
+        /* Visual > submenu clicks — open 2nd-level submenus */
+        if (si >= 0 && vkm_sub == VKM_SUB_VISUAL) {
+            if (si == VKM_VIS_THEME) { vkm_sub = VKM_SUB_THEME; vkm_sub_hover = -1; }
+            else if (si == VKM_VIS_FONT) { vkm_sub = VKM_SUB_FONT; vkm_sub_hover = -1; }
+            else if (si == VKM_VIS_FX) { vkm_sub = VKM_SUB_FX; vkm_sub_hover = -1; }
+            return 0;
+        }
+        /* Widgets > submenu clicks — toggle widgets */
+        if (si >= 0 && vkm_sub == VKM_SUB_WIDGETS) {
+            if (si == VKM_WID_RTIMER) {
+                vrt_visible = !vrt_visible;
+                if (vrt_visible && vrt_x < 1 && vrt_y < 1) {
+                    vrt_x = (float)vk_sc_extent.width - vrt_size - 20;
+                    vrt_y = 60;
+                }
+            } else if (si == VKM_WID_CONVO) {
+                vkw_toggle_convo((int)vk_sc_extent.width, (int)vk_sc_extent.height);
+            }
+            vkm_open = 0;
+            vkm_sub = VKM_SUB_NONE;
+            return 0;
+        }
+        /* Recent > submenu clicks — goto that room */
+        if (si >= 0 && vkm_sub == VKM_SUB_RECENT) {
+            if (si < vkm_goto_count && vkm_goto_nums[si] > 0) {
+                /* TODO: trigger goto via memory write */
+            }
+            vkm_open = 0;
+            vkm_sub = VKM_SUB_NONE;
+            return 0;
+        }
+        /* Theme picker */
         if (si >= 0 && vkm_sub == VKM_SUB_THEME) {
             current_theme = si;
             apply_theme_palette(si);
@@ -3786,7 +6334,7 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             vkm_sub = VKM_SUB_NONE;
             return 0;
         }
-        /* Font submenu click */
+        /* Font picker */
         if (si >= 0 && vkm_sub == VKM_SUB_FONT) {
             pending_font_idx = (si == 0) ? -1 : si - 1;
             font_change_pending = 1;
@@ -3794,8 +6342,7 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             vkm_sub = VKM_SUB_NONE;
             return 0;
         }
-
-        /* FX submenu click */
+        /* FX toggles */
         if (si >= 0 && vkm_sub == VKM_SUB_FX) {
             if (si == VKM_FX_LIQUID) {
                 fx_liquid_mode = !fx_liquid_mode;
@@ -3831,13 +6378,21 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             vkw_toggle_console((int)vk_sc_extent.width, (int)vk_sc_extent.height);
             return 0;
         }
+        if (ri == VKM_ITEM_PATHS) {
+            vkm_open = 0;
+            vkm_sub = VKM_SUB_NONE;
+            pl_load_data();
+            pl_wnd_open = !pl_wnd_open;
+            pl_scroll = 0;
+            return 0;
+        }
         if (ri == VKM_ITEM_CLOSE) {
             vkm_open = 0;
             vkm_sub = VKM_SUB_NONE;
             vkt_hide();
             return 0;
         }
-        if (ri == VKM_ITEM_THEME || ri == VKM_ITEM_FONT || ri == VKM_ITEM_FX) {
+        if (ri == VKM_ITEM_VISUAL || ri == VKM_ITEM_WIDGETS || ri == VKM_ITEM_RECENT) {
             return 0;
         }
 
@@ -3847,13 +6402,25 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         return 0;
     }
     case WM_RBUTTONUP: {
+        int rmx = mouse_tx((short)LOWORD(lParam));
+        int rmy = mouse_ty((short)HIWORD(lParam));
+        /* Right-click on round timer → its own context menu */
+        if (vrt_hit_circle(rmx, rmy)) {
+            vrt_ctx_open = !vrt_ctx_open;
+            vrt_ctx_x = rmx;
+            vrt_ctx_y = rmy;
+            vrt_ctx_hover = -1;
+            return 0;
+        }
+        /* Close round timer context menu if open */
+        if (vrt_ctx_open) { vrt_ctx_open = 0; return 0; }
         /* Toggle Vulkan-rendered context menu at mouse position */
         if (vkm_open) {
             vkm_open = 0;
             vkm_sub = VKM_SUB_NONE;
         } else {
-            vkm_x = mouse_tx((short)LOWORD(lParam));
-            vkm_y = mouse_ty((short)HIWORD(lParam));
+            vkm_x = rmx;
+            vkm_y = rmy;
             vkm_open = 1;
             vkm_hover = -1;
             vkm_sub = VKM_SUB_NONE;
@@ -3862,6 +6429,35 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         return 0;
     }
     case WM_MOUSEWHEEL: {
+        /* Scroll Paths & Loops window */
+        if (pl_wnd_open) {
+            int pmx = mouse_tx((short)LOWORD(lParam));
+            int pmy = mouse_ty((short)HIWORD(lParam));
+            if (pl_hit(pmx, pmy)) {
+                int wd = (short)HIWORD(wParam);
+                pl_scroll += (wd > 0) ? -3 : 3;
+                if (pl_scroll < 0) pl_scroll = 0;
+                return 0;
+            }
+        }
+        /* Scroll wheel on round timer = resize */
+        if (vrt_visible) {
+            int wmx = mouse_tx((short)LOWORD(lParam));
+            int wmy = mouse_ty((short)HIWORD(lParam));
+            if (vrt_hit_circle(wmx, wmy)) {
+                int wd = (short)HIWORD(wParam);
+                float newsize = vrt_size + (wd > 0 ? 20.0f : -20.0f);
+                if (newsize < VRT_MIN_SIZE) newsize = VRT_MIN_SIZE;
+                if (newsize > VRT_MAX_SIZE) newsize = VRT_MAX_SIZE;
+                /* Recenter on resize */
+                float old_cx = vrt_x + vrt_size / 2.0f;
+                float old_cy = vrt_y + vrt_size / 2.0f;
+                vrt_size = newsize;
+                vrt_x = old_cx - newsize / 2.0f;
+                vrt_y = old_cy - newsize / 2.0f;
+                return 0;
+            }
+        }
         /* Scroll focused window */
         if (vkw_focus >= 0) {
             int delta = (short)HIWORD(wParam);
@@ -3906,9 +6502,11 @@ static DWORD WINAPI vkt_thread(LPVOID param)
     if (vkt_create_font_texture() != 0) return 1;
     if (vkt_create_buffers() != 0) return 1;
     if (vkt_create_descriptors() != 0) return 1;
+    vkt_init_ui_font();
 
     /* Register window class */
     WNDCLASSA wc = {0};
+    wc.style = CS_DBLCLKS;
     wc.lpfnWndProc = vkt_wndproc;
     wc.hInstance = hInst;
     wc.lpszClassName = "SlopVkTerminal";
@@ -4055,6 +6653,13 @@ static void vkt_cleanup_vulkan(void)
     if (vk_font_img) { vkDestroyImage(vk_dev, vk_font_img, NULL); vk_font_img = VK_NULL_HANDLE; }
     if (vk_font_mem) { vkFreeMemory(vk_dev, vk_font_mem, NULL); vk_font_mem = VK_NULL_HANDLE; }
 
+    /* UI font cleanup */
+    if (ui_font_sampler) { vkDestroySampler(vk_dev, ui_font_sampler, NULL); ui_font_sampler = VK_NULL_HANDLE; }
+    if (ui_font_view) { vkDestroyImageView(vk_dev, ui_font_view, NULL); ui_font_view = VK_NULL_HANDLE; }
+    if (ui_font_img) { vkDestroyImage(vk_dev, ui_font_img, NULL); ui_font_img = VK_NULL_HANDLE; }
+    if (ui_font_mem) { vkFreeMemory(vk_dev, ui_font_mem, NULL); ui_font_mem = VK_NULL_HANDLE; }
+    ui_font_ready = 0;
+
     if (vk_desc_pool) { vkDestroyDescriptorPool(vk_dev, vk_desc_pool, NULL); vk_desc_pool = VK_NULL_HANDLE; }
     if (vk_desc_layout) { vkDestroyDescriptorSetLayout(vk_dev, vk_desc_layout, NULL); vk_desc_layout = VK_NULL_HANDLE; }
 
@@ -4179,8 +6784,8 @@ static slop_plugin_t vkt_plugin = {
     .version     = "0.1.0",
     .init        = vkt_init,
     .shutdown    = vkt_shutdown,
-    .on_line     = NULL,
-    .on_round    = NULL,
+    .on_line     = vkt_on_line,
+    .on_round    = vrt_on_round,
     .on_wndproc  = vkt_on_wndproc,
     .on_data     = vkt_on_data,
 };
