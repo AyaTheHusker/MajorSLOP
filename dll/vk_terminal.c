@@ -114,7 +114,7 @@ static const ui_theme_t ui_themes[NUM_THEMES] = {
     {"Frostborn",      F3(8,14,22),    F3(200,224,240), F3(85,136,170),  F3(68,170,221)},
     {"Sandstorm",      F3(16,12,8),    F3(224,212,184), F3(138,122,86),  F3(204,170,68)},
     {"Crystal Cavern", F3(12,8,20),    F3(208,192,232), F3(119,102,170), F3(153,102,238)},
-    {"Afroman",        F3(8,8,18),     F3(232,224,240), F3(136,119,170), F3(204,34,68)},
+    {"Afroman",        F3(8,8,24),     F3(240,240,245), F3(140,160,210), F3(200,40,60)},
     {"Bog Lord",       F3(10,14,8),    F3(176,184,144), F3(96,104,64),   F3(119,136,51)},
 };
 
@@ -582,7 +582,9 @@ static int ttf_loaded[MAX_TTF_FONTS] = {0};
 /* Widgets submenu items */
 #define VKM_WID_RTIMER   0
 #define VKM_WID_CONVO    1
-#define VKM_WID_COUNT    2
+#define VKM_WID_STATUSBAR 2
+#define VKM_WID_EXPBAR   3
+#define VKM_WID_COUNT    4
 
 /* FX submenu items */
 #define VKM_FX_LIQUID    0
@@ -649,8 +651,8 @@ static void push_text(int px, int py, const char *str,
 #define VKW_TITLEBAR_H   24
 #define VKW_BORDER_W     1
 #define VKW_SHADOW_OFF   6
-#define VKW_CHAR_W       8
-#define VKW_CHAR_H       16
+#define VKW_CHAR_W       10
+#define VKW_CHAR_H       18
 #define VKW_PAD          4
 #define VKW_CLOSE_W      20     /* close button width */
 #define VKW_RESIZE_ZONE  8      /* pixels from edge = resize grab */
@@ -669,6 +671,8 @@ typedef struct {
 
     /* Text content (circular buffer) */
     char lines[VKW_MAX_LINES][VKW_LINE_LEN];
+    int  line_chan[VKW_MAX_LINES]; /* chat channel tag per line (-1=none, 0+=CHAT_*) */
+    int  line_split[VKW_MAX_LINES]; /* char offset where message text starts (after tag+name) */
     int line_head;              /* next write slot */
     int line_count;             /* total lines stored (max VKW_MAX_LINES) */
     int scroll;                 /* lines scrolled up from bottom */
@@ -726,18 +730,38 @@ static void convo_on_input(const char *text);
 #define CHAT_TELEPATH  3
 #define CHAT_AUCTION   4
 #define CHAT_SAY       5
-#define CHAT_NUM       6
+#define CHAT_YELL      6
+#define CHAT_NUM       7
 
 static const char *chat_chan_tags[] = {
-    "[Gos]", "[Broad]", "[Gang]", "[Tell]", "[Auct]", "[Say]"
+    "[Gos]", "[Broad]", "[Gang]", "[Tell]", "[Auct]", "[Say]", "[Yell]"
 };
 
-static int convo_out_channel = CHAT_GOSSIP;
+/* Per-channel colors: {tag_r, tag_g, tag_b, msg_r, msg_g, msg_b}
+ * These are base colors; theme accent is blended in at draw time. */
+static const float chat_chan_colors[][6] = {
+    /* GOSSIP   */ { 1.0f, 0.69f, 0.53f,  1.0f, 0.85f, 0.75f },
+    /* BROADCAST*/ { 1.0f, 0.93f, 0.27f,  1.0f, 0.96f, 0.70f },
+    /* GANGPATH */ { 0.67f, 0.53f, 0.27f,  0.85f, 0.75f, 0.55f },
+    /* TELEPATH */ { 0.87f, 0.53f, 0.80f,  0.93f, 0.75f, 0.90f },
+    /* AUCTION  */ { 0.80f, 0.80f, 0.27f,  0.90f, 0.90f, 0.60f },
+    /* SAY      */ { 0.53f, 0.53f, 0.87f,  0.75f, 0.75f, 0.93f },
+    /* YELL     */ { 1.0f, 0.40f, 0.40f,  1.0f, 0.70f, 0.60f },
+};
+
+static int convo_out_channel = CHAT_SAY;
 static char convo_tell_target[32] = {0};
+
+/* Outgoing telepath tracking — two-part: capture message from input,
+ * then match "--- Telepath Sent to FullName ---" within ~20 lines */
+static char  tell_pending_msg[256] = {0};  /* buffered message text */
+static int   tell_pending = 0;             /* 1 = waiting for confirmation */
+static int   tell_lines_waited = 0;        /* lines since we started waiting */
+#define TELL_MAX_WAIT 20                   /* discard if no confirm in N lines */
 
 static const char *chat_send_prefix[] = {
     "gossip ", "broadcast ", "gangpath ", "telepath ",
-    "auction ", "say "
+    "auction ", "say ", "yell "
 };
 
 /* Forward decls */
@@ -826,7 +850,7 @@ static void vkw_bring_to_front(int idx)
     vkw_order[vkw_count - 1] = idx;
 }
 
-static void vkw_print(int idx, const char *text)
+static void vkw_print_ex(int idx, const char *text, int chan, int split)
 {
     if (idx < 0 || idx >= VKW_MAX_WINDOWS || !vkw_windows[idx].active) return;
     vkw_window_t *w = &vkw_windows[idx];
@@ -839,12 +863,19 @@ static void vkw_print(int idx, const char *text)
         if (len >= VKW_LINE_LEN) len = VKW_LINE_LEN - 1;
         memcpy(w->lines[w->line_head], p, len);
         w->lines[w->line_head][len] = 0;
+        w->line_chan[w->line_head] = chan;
+        w->line_split[w->line_head] = split;
         w->line_head = (w->line_head + 1) % VKW_MAX_LINES;
         if (w->line_count < VKW_MAX_LINES) w->line_count++;
         p += len + (nl ? 1 : len); /* advance past newline or to end */
         if (!nl) break;
     }
     w->scroll = 0; /* auto-scroll to bottom */
+}
+
+static void vkw_print(int idx, const char *text)
+{
+    vkw_print_ex(idx, text, -1, 0);
 }
 
 static void vkw_clear(int idx)
@@ -978,9 +1009,30 @@ static void vkw_draw_one(vkw_window_t *w, int is_focused, int vp_w, int vp_h)
         char tmp[VKW_LINE_LEN];
         strncpy(tmp, w->lines[line_idx], max_chars);
         tmp[max_chars] = 0;
-        push_text(ix + VKW_PAD, ly, tmp,
-                  t->text[0] * 0.9f, t->text[1] * 0.9f, t->text[2] * 0.9f,
-                  vp_w, vp_h, cw, ch);
+
+        int chan = w->line_chan[line_idx];
+        int split = w->line_split[line_idx];
+        if (chan >= 0 && chan < CHAT_NUM && split > 0 && split < (int)strlen(tmp)) {
+            /* Draw tag+name portion in channel tag color */
+            const float *cc = chat_chan_colors[chan];
+            float tr0 = cc[0] * 0.5f + t->accent[0] * 0.5f;
+            float tg0 = cc[1] * 0.5f + t->accent[1] * 0.5f;
+            float tb0 = cc[2] * 0.5f + t->accent[2] * 0.5f;
+            /* Draw message portion in channel msg color */
+            float tr1 = cc[3] * 0.6f + t->text[0] * 0.4f;
+            float tg1 = cc[4] * 0.6f + t->text[1] * 0.4f;
+            float tb1 = cc[5] * 0.6f + t->text[2] * 0.4f;
+
+            char tag_part[VKW_LINE_LEN];
+            strncpy(tag_part, tmp, split);
+            tag_part[split] = 0;
+            push_text(ix + VKW_PAD, ly, tag_part, tr0, tg0, tb0, vp_w, vp_h, cw, ch);
+            push_text(ix + VKW_PAD + split * cw, ly, tmp + split, tr1, tg1, tb1, vp_w, vp_h, cw, ch);
+        } else {
+            push_text(ix + VKW_PAD, ly, tmp,
+                      t->text[0] * 0.9f, t->text[1] * 0.9f, t->text[2] * 0.9f,
+                      vp_w, vp_h, cw, ch);
+        }
     }
 
     /* Input line */
@@ -1167,12 +1219,7 @@ static int vkw_mouse_move(int mx, int my)
                 w->y = w->resize_sy + (w->resize_sh - new_h);
                 w->h = new_h;
             }
-            /* Scale font with window size (base: 640x400 at scale 1.0) */
-            float scale_w = w->w / 640.0f;
-            float scale_h = w->h / 400.0f;
-            w->font_scale = (scale_w < scale_h) ? scale_w : scale_h;
-            if (w->font_scale < 0.5f) w->font_scale = 0.5f;
-            if (w->font_scale > 3.0f) w->font_scale = 3.0f;
+            /* Fixed font size — don't scale with window, just show fewer lines */
             return 1;
         }
         if (w->sel_active) {
@@ -1393,8 +1440,6 @@ static void vkw_toggle_convo(int vp_w, int vp_h)
     vkw_convo_idx = vkw_create("Conversation", cx, cy, cw, ch, 1);
     if (vkw_convo_idx >= 0) {
         vkw_focus = vkw_convo_idx;
-        vkw_print(vkw_convo_idx, "--- Chat ---");
-        vkw_print(vkw_convo_idx, "Channel: /gos /tell <name> /broad /gang /auct /say");
         vkw_print(vkw_convo_idx, "");
     }
 }
@@ -1446,149 +1491,100 @@ static void convo_parse_line(const char *line)
     char buf[300];
     const char *s = clean;
 
-    /* "You gossip: msg" */
-    if (str_starts(s, "You gossip:")) {
-        wsprintfA(buf, "%s You: %s", chat_chan_tags[CHAT_GOSSIP], s + 12);
-        vkw_print(vkw_convo_idx, buf);
+    /* Get timestamp for display like MegaMUD does */
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    char ts[16];
+    int hr = st.wHour % 12; if (hr == 0) hr = 12;
+    wsprintfA(ts, "%d:%02d%s", hr, st.wMinute, st.wHour >= 12 ? "pm" : "am");
+
+    /* Detect channel and find where the message content starts (for coloring).
+     * Display the raw cleaned line as-is, just prepend timestamp. */
+    int chan = -1;
+    int split = 0; /* char offset in output buf where message text begins */
+
+    /* --- Telepath: two-part outgoing tracking --- */
+    if (str_starts(s, "--- Telepath Sent to ")) {
+        if (tell_pending && tell_pending_msg[0]) {
+            const char *name_start = s + 21;
+            const char *name_end = strstr(name_start, " ---");
+            if (name_end && name_end > name_start) {
+                int nlen = (int)(name_end - name_start);
+                char name[32]; if (nlen > 31) nlen = 31;
+                memcpy(name, name_start, nlen); name[nlen] = 0;
+                wsprintfA(buf, "%s You telepath %s: %s", ts, name, tell_pending_msg);
+                int sp = (int)strlen(ts) + 1;
+                vkw_print_ex(vkw_convo_idx, buf, CHAT_TELEPATH, sp);
+            }
+        }
+        tell_pending = 0;
+        tell_pending_msg[0] = 0;
+        tell_lines_waited = 0;
         return;
     }
-    /* "PlayerName gossips: msg" */
-    {
-        const char *g = strstr(s, " gossips:");
-        if (g && g > s && g < s + 30) {
-            int nlen = (int)(g - s);
-            char name[32]; if (nlen > 31) nlen = 31;
-            memcpy(name, s, nlen); name[nlen] = 0;
-            wsprintfA(buf, "%s %s: %s", chat_chan_tags[CHAT_GOSSIP], name, g + 10);
-            vkw_print(vkw_convo_idx, buf);
-            return;
+
+    /* Count lines while waiting for telepath confirmation */
+    if (tell_pending) {
+        tell_lines_waited++;
+        if (tell_lines_waited > TELL_MAX_WAIT) {
+            tell_pending = 0;
+            tell_pending_msg[0] = 0;
+            tell_lines_waited = 0;
         }
     }
-    /* "Broadcast from PlayerName \"msg\"" */
-    if (str_starts(s, "Broadcast from ")) {
-        wsprintfA(buf, "%s %s", chat_chan_tags[CHAT_BROADCAST], s + 15);
-        vkw_print(vkw_convo_idx, buf);
-        return;
-    }
-    /* "PlayerName telepaths to you: msg" */
-    {
-        const char *t = strstr(s, " telepaths to you:");
-        if (t && t > s && t < s + 30) {
-            int nlen = (int)(t - s);
-            char name[32]; if (nlen > 31) nlen = 31;
-            memcpy(name, s, nlen); name[nlen] = 0;
-            wsprintfA(buf, "%s %s: %s", chat_chan_tags[CHAT_TELEPATH], name, t + 19);
-            vkw_print(vkw_convo_idx, buf);
-            return;
-        }
-    }
-    /* "PlayerName telepaths: msg" (outgoing telepath echo) */
-    {
-        const char *t = strstr(s, " telepaths:");
-        if (t && t > s && t < s + 30) {
-            int nlen = (int)(t - s);
-            char name[32]; if (nlen > 31) nlen = 31;
-            memcpy(name, s, nlen); name[nlen] = 0;
-            wsprintfA(buf, "%s %s: %s", chat_chan_tags[CHAT_TELEPATH], name, t + 12);
-            vkw_print(vkw_convo_idx, buf);
-            return;
-        }
-    }
-    /* "You gangpath: msg" / "PlayerName gangpaths: msg" */
-    if (str_starts(s, "You gangpath:")) {
-        wsprintfA(buf, "%s You: %s", chat_chan_tags[CHAT_GANGPATH], s + 14);
-        vkw_print(vkw_convo_idx, buf);
-        return;
-    }
-    {
-        const char *g = strstr(s, " gangpaths:");
-        if (g && g > s && g < s + 30) {
-            int nlen = (int)(g - s);
-            char name[32]; if (nlen > 31) nlen = 31;
-            memcpy(name, s, nlen); name[nlen] = 0;
-            wsprintfA(buf, "%s %s: %s", chat_chan_tags[CHAT_GANGPATH], name, g + 12);
-            vkw_print(vkw_convo_idx, buf);
-            return;
-        }
-    }
-    /* "You auction: msg" / "PlayerName auctions: msg" */
-    if (str_starts(s, "You auction:")) {
-        wsprintfA(buf, "%s You: %s", chat_chan_tags[CHAT_AUCTION], s + 13);
-        vkw_print(vkw_convo_idx, buf);
-        return;
-    }
-    {
-        const char *a = strstr(s, " auctions:");
-        if (a && a > s && a < s + 30) {
-            int nlen = (int)(a - s);
-            char name[32]; if (nlen > 31) nlen = 31;
-            memcpy(name, s, nlen); name[nlen] = 0;
-            wsprintfA(buf, "%s %s: %s", chat_chan_tags[CHAT_AUCTION], name, a + 11);
-            vkw_print(vkw_convo_idx, buf);
-            return;
-        }
-    }
-    /* 'You say "msg"' / 'PlayerName says "msg"' */
-    if (str_starts(s, "You say \"")) {
-        wsprintfA(buf, "%s You: %s", chat_chan_tags[CHAT_SAY], s + 9);
-        vkw_print(vkw_convo_idx, buf);
-        return;
-    }
-    {
-        const char *a = strstr(s, " says \"");
-        if (a && a > s && a < s + 30) {
-            int nlen = (int)(a - s);
-            char name[32]; if (nlen > 31) nlen = 31;
-            memcpy(name, s, nlen); name[nlen] = 0;
-            wsprintfA(buf, "%s %s: %s", chat_chan_tags[CHAT_SAY], name, a + 7);
-            vkw_print(vkw_convo_idx, buf);
-            return;
-        }
-    }
+
+    /* Match channels — just identify, don't reformat */
+    if (str_starts(s, "You gossip:") || strstr(s, " gossips:"))
+        chan = CHAT_GOSSIP;
+    else if (str_starts(s, "Broadcast from "))
+        chan = CHAT_BROADCAST;
+    else if (strstr(s, " telepaths to you:") || strstr(s, " telepaths:"))
+        chan = CHAT_TELEPATH;
+    else if (str_starts(s, "You gangpath:") || strstr(s, " gangpaths:"))
+        chan = CHAT_GANGPATH;
+    else if (str_starts(s, "You auction:") || strstr(s, " auctions:"))
+        chan = CHAT_AUCTION;
+    else if (str_starts(s, "You say \"") || strstr(s, " says \"") ||
+             strstr(s, " says (to "))
+        chan = CHAT_SAY;
+    else if (str_starts(s, "You yell \"") || strstr(s, " yells \"") ||
+             strstr(s, " yells from "))
+        chan = CHAT_YELL;
+
+    if (chan < 0) return; /* not a chat line */
+
+    /* Format: "timestamp raw_line" — just like MegaMUD's convo window */
+    wsprintfA(buf, "%s %s", ts, s);
+    split = (int)strlen(ts) + 1; /* color split after timestamp */
+    vkw_print_ex(vkw_convo_idx, buf, chan, split);
 }
 
-/* Handle conversation window input — send to MUD via WM_CHAR to MMANSI */
+/* Handle conversation window input — send raw text to MUD via WM_CHAR to MMANSI.
+ * No channel system — whatever you type goes straight to the MUD as-is. */
 static void convo_on_input(const char *text)
 {
     if (!text || !text[0]) return;
 
-    /* Channel switch commands */
-    if (str_starts(text, "/gos")) { convo_out_channel = CHAT_GOSSIP; vkw_print(vkw_convo_idx, "Channel: Gossip"); return; }
-    if (str_starts(text, "/broad")) { convo_out_channel = CHAT_BROADCAST; vkw_print(vkw_convo_idx, "Channel: Broadcast"); return; }
-    if (str_starts(text, "/gang")) { convo_out_channel = CHAT_GANGPATH; vkw_print(vkw_convo_idx, "Channel: Gangpath"); return; }
-    if (str_starts(text, "/auct")) { convo_out_channel = CHAT_AUCTION; vkw_print(vkw_convo_idx, "Channel: Auction"); return; }
-    if (str_starts(text, "/say")) { convo_out_channel = CHAT_SAY; vkw_print(vkw_convo_idx, "Channel: Say"); return; }
-    if (str_starts(text, "/tell ")) {
-        convo_out_channel = CHAT_TELEPATH;
-        /* Extract target name */
-        const char *name = text + 6;
-        while (*name == ' ') name++;
-        int i = 0;
-        while (name[i] && name[i] != ' ' && i < 31) {
-            convo_tell_target[i] = name[i]; i++;
+    /* Capture outgoing telepath for two-part tracking */
+    if (text[0] == '/') {
+        const char *p = text + 1;
+        if (*p == ' ') p++;
+        while (*p && *p != ' ') p++;
+        if (*p == ' ' && *(p + 1)) {
+            strncpy(tell_pending_msg, p + 1, sizeof(tell_pending_msg) - 1);
+            tell_pending_msg[sizeof(tell_pending_msg) - 1] = 0;
+            tell_pending = 1;
+            tell_lines_waited = 0;
         }
-        convo_tell_target[i] = 0;
-        char msg[64];
-        wsprintfA(msg, "Channel: Tell -> %s", convo_tell_target);
-        vkw_print(vkw_convo_idx, msg);
-        return;
     }
 
-    /* Build command string and send to MUD */
-    char cmd[300];
-    if (convo_out_channel == CHAT_TELEPATH && convo_tell_target[0]) {
-        wsprintfA(cmd, "telepath %s %s", convo_tell_target, text);
-    } else {
-        wsprintfA(cmd, "%s%s", chat_send_prefix[convo_out_channel], text);
-    }
-
-    /* Send via WM_CHAR to MMANSI */
+    /* Send exactly what was typed to MMANSI */
     HWND mw = FindWindowA("MMMAIN", NULL);
     if (!mw) return;
     HWND ansi = FindWindowExA(mw, NULL, "MMANSI", NULL);
     HWND target = ansi ? ansi : mw;
-    for (int i = 0; cmd[i]; i++)
-        PostMessageA(target, WM_CHAR, (WPARAM)(unsigned char)cmd[i], 0);
+    for (int i = 0; text[i]; i++)
+        PostMessageA(target, WM_CHAR, (WPARAM)(unsigned char)text[i], 0);
     PostMessageA(target, WM_CHAR, (WPARAM)'\r', 0);
 }
 
@@ -2078,26 +2074,17 @@ static void pl_load_data(void)
                        pl_room_count, pl_room_cat_count, pl_path_count, pl_loop_cat_count);
 }
 
-/* Execute goto via Python eval */
+/* Execute goto via fake_remote */
 static void pl_do_goto(const char *room_name)
 {
-    mmudpy_queue_eval_fn fn = vkt_resolve_eval();
-    if (!fn) return;
-    char code[400];
-    wsprintfA(code,
-        "import urllib.request,json\n"
-        "r=urllib.request.urlopen(urllib.request.Request("
-        "'http://127.0.0.1:8000/api/mem/goto',"
-        "data=json.dumps({'room':'%s','run':%s}).encode(),"
-        "method='POST',headers={'Content-Type':'application/json'}))\n"
-        "d=json.loads(r.read())\n"
-        "print('Goto:',d.get('room','?'),'ok' if d.get('ok') else d.get('error','fail'))",
-        room_name, pl_run_mode ? "True" : "False");
-    fn(code, 0);
+    if (!api || !api->fake_remote) return;
+    char cmd[128];
+    _snprintf(cmd, sizeof(cmd), "goto %s", room_name);
+    cmd[sizeof(cmd) - 1] = '\0';
+    api->fake_remote(cmd);
 
     /* Add to recent goto list */
     if (vkm_goto_count < VKM_GOTO_MAX) {
-        /* Shift down */
         for (int i = vkm_goto_count; i > 0; i--) {
             memcpy(vkm_goto_names[i], vkm_goto_names[i-1], 64);
             vkm_goto_nums[i] = vkm_goto_nums[i-1];
@@ -2116,19 +2103,11 @@ static void pl_do_goto(const char *room_name)
 
 static void pl_do_loop(const char *file)
 {
-    mmudpy_queue_eval_fn fn = vkt_resolve_eval();
-    if (!fn) return;
-    char code[400];
-    wsprintfA(code,
-        "import urllib.request,json\n"
-        "r=urllib.request.urlopen(urllib.request.Request("
-        "'http://127.0.0.1:8000/api/mem/loop',"
-        "data=json.dumps({'file':'%s'}).encode(),"
-        "method='POST',headers={'Content-Type':'application/json'}))\n"
-        "d=json.loads(r.read())\n"
-        "print('Loop:',d.get('file','?'),'ok' if d.get('ok') else d.get('error','fail'))",
-        file);
-    fn(code, 0);
+    if (!api || !api->fake_remote) return;
+    char cmd[128];
+    _snprintf(cmd, sizeof(cmd), "loop %s", file);
+    cmd[sizeof(cmd) - 1] = '\0';
+    api->fake_remote(cmd);
 }
 
 /* ---- Exported functions for Python API ---- */
@@ -2331,6 +2310,68 @@ static uint32_t ui_atlas_w = 256, ui_atlas_h = 512;
 static int ui_font_ready = 0;
 static int pl_quad_start = 0;  /* index in quad buffer where P&L quads begin */
 static int pl_quad_end = 0;    /* index where P&L quads end (menu quads follow) */
+
+/* ---- Status Bar Widget ---- */
+#define VSB_BAR_H      22     /* bar height in pixels */
+#define VSB_CHAR_W     10     /* character width for status text */
+#define VSB_CHAR_H     18     /* character height for status text */
+#define VSB_PAD         6     /* horizontal padding inside sections */
+#define VSB_SEP_W       2     /* divider width between sections */
+#define VSB_STATUSBAR_ID 107  /* MegaMUD status bar control ID */
+
+/* Memory offsets for reading MegaMUD state */
+#define VSB_OFF_CUR_HP     0x53D4
+#define VSB_OFF_MAX_HP     0x53DC
+#define VSB_OFF_CUR_MANA   0x53E0
+#define VSB_OFF_MAX_MANA   0x53E8
+#define VSB_OFF_IN_COMBAT  0x5698
+#define VSB_OFF_IS_RESTING 0x5678
+#define VSB_OFF_IS_MEDIT   0x567C
+#define VSB_OFF_CUR_STEP   0x5898
+#define VSB_OFF_TOTAL_STEPS 0x5894
+#define VSB_OFF_PATHING    0x5664
+#define VSB_OFF_LOOPING    0x5668
+#define VSB_OFF_ROAMING    0x566C
+#define VSB_OFF_COMBAT_TGT 0x552C
+
+static int  vsb_visible = 0;
+static int  vsb_quad_start = 0;  /* quad range for status bar (uses UI font) */
+static int  vsb_quad_end = 0;
+
+/* Cached status data — updated periodically */
+static char vsb_path_name[128] = "";
+static int  vsb_cur_step = 0, vsb_total_steps = 0;
+static int  vsb_cur_hp = 0, vsb_max_hp = 0;
+static int  vsb_cur_mana = 0, vsb_max_mana = 0;
+static int  vsb_in_combat = 0;
+static int  vsb_is_resting = 0;
+static int  vsb_is_medit = 0;
+static int  vsb_pathing = 0;
+static int  vsb_looping = 0;
+static int  vsb_roaming = 0;
+static char vsb_target[64] = "";
+static char vsb_status_text[128] = ""; /* derived status label */
+static DWORD vsb_last_read = 0;       /* tick of last status read */
+
+/* ---- Exp Bar Widget ---- */
+#define VXB_BAR_H      20     /* bar height in pixels */
+#define VXB_SEG_COUNT  20     /* number of segments */
+#define VXB_SEG_GAP     1     /* gap between segments */
+#define VXB_PAD         2     /* horizontal padding */
+#define VXB_OFF_EXP_LO  0x53B0
+#define VXB_OFF_EXP_HI  0x53B4
+#define VXB_OFF_NEED_LO 0x53B8
+#define VXB_OFF_NEED_HI 0x53BC
+#define VXB_OFF_LEVEL   0x53D0
+
+static int  vxb_visible = 0;
+static long long vxb_exp = 0;
+static long long vxb_needed = 0;
+static int  vxb_level = 0;
+static float vxb_percent = 0.0f;
+static DWORD vxb_last_read = 0;
+static float vxb_flash = 0.0f;   /* flash timer for XP gain */
+static long long vxb_prev_exp = 0; /* previous exp for gain detection */
 
 /* Vertex + index buffers */
 static VkBuffer vk_vbuf = VK_NULL_HANDLE;
@@ -3908,6 +3949,12 @@ static void vkm_draw(int vp_w, int vp_h)
                     int cv = (vkw_convo_idx >= 0 && vkw_windows[vkw_convo_idx].active);
                     label = cv ? "\x04 Conversation" : "  Conversation";
                     is_active = cv;
+                } else if (i == VKM_WID_STATUSBAR) {
+                    label = vsb_visible ? "\x04 Status Bar" : "  Status Bar";
+                    is_active = vsb_visible;
+                } else if (i == VKM_WID_EXPBAR) {
+                    label = vxb_visible ? "\x04 Exp Bar" : "  Exp Bar";
+                    is_active = vxb_visible;
                 }
             } else if (vkm_sub == VKM_SUB_RECENT) {
                 if (vkm_goto_count == 0) {
@@ -4220,6 +4267,362 @@ static int draw_box_char(unsigned char cp437,
     return 0;
 }
 
+/* ---- Status Bar: read MegaMUD state ---- */
+#ifndef SB_GETTEXTA
+#define SB_GETTEXTA 0x0402
+#endif
+#ifndef SB_GETPARTS
+#define SB_GETPARTS 0x0406
+#endif
+
+static void vsb_read_status(void)
+{
+    DWORD now = GetTickCount();
+    if (now - vsb_last_read < 250) return; /* throttle reads to 4/sec */
+    vsb_last_read = now;
+
+    if (!api) return;
+    unsigned int sbase = api->get_struct_base();
+    if (!sbase) return;
+
+    /* Read memory offsets */
+    vsb_cur_hp = api->read_struct_i32(VSB_OFF_CUR_HP);
+    vsb_max_hp = api->read_struct_i32(VSB_OFF_MAX_HP);
+    vsb_cur_mana = api->read_struct_i32(VSB_OFF_CUR_MANA);
+    vsb_max_mana = api->read_struct_i32(VSB_OFF_MAX_MANA);
+    vsb_in_combat = api->read_struct_i32(VSB_OFF_IN_COMBAT);
+    vsb_is_resting = api->read_struct_i32(VSB_OFF_IS_RESTING);
+    vsb_is_medit = api->read_struct_i32(VSB_OFF_IS_MEDIT);
+    vsb_cur_step = api->read_struct_i32(VSB_OFF_CUR_STEP);
+    vsb_total_steps = api->read_struct_i32(VSB_OFF_TOTAL_STEPS);
+    vsb_pathing = api->read_struct_i32(VSB_OFF_PATHING);
+    vsb_looping = api->read_struct_i32(VSB_OFF_LOOPING);
+    vsb_roaming = api->read_struct_i32(VSB_OFF_ROAMING);
+
+    /* Read combat target string from struct */
+    {
+        unsigned char *base = (unsigned char *)(uintptr_t)sbase;
+        unsigned char *tgt = base + VSB_OFF_COMBAT_TGT;
+        /* MegaMUD strings have a size prefix byte, then chars */
+        int tlen = tgt[0];
+        if (tlen > 0 && tlen < 60) {
+            memcpy(vsb_target, tgt + 1, tlen);
+            vsb_target[tlen] = '\0';
+        } else {
+            vsb_target[0] = '\0';
+        }
+    }
+
+    /* Read status bar part 0 (path name) from MegaMUD's statusbar control */
+    {
+        HWND mw = api->get_mmmain_hwnd();
+        if (mw) {
+            HWND sb = GetDlgItem(mw, VSB_STATUSBAR_ID);
+            if (sb) {
+                char buf[128] = {0};
+                SendMessageA(sb, SB_GETTEXTA, 0, (LPARAM)buf);
+                buf[127] = '\0';
+                /* Strip any " | Map:" suffix we may have added */
+                char *pipe = strstr(buf, " | Map:");
+                if (pipe) *pipe = '\0';
+                strncpy(vsb_path_name, buf, sizeof(vsb_path_name) - 1);
+                vsb_path_name[sizeof(vsb_path_name) - 1] = '\0';
+            }
+        }
+    }
+
+    /* Derive status text */
+    if (vsb_in_combat) {
+        if (vsb_target[0])
+            _snprintf(vsb_status_text, sizeof(vsb_status_text), "Combat: %s", vsb_target);
+        else
+            _snprintf(vsb_status_text, sizeof(vsb_status_text), "In Combat");
+    } else if (vsb_is_resting && vsb_is_medit) {
+        _snprintf(vsb_status_text, sizeof(vsb_status_text), "Meditating");
+    } else if (vsb_is_resting) {
+        _snprintf(vsb_status_text, sizeof(vsb_status_text), "Resting");
+    } else if (vsb_is_medit) {
+        _snprintf(vsb_status_text, sizeof(vsb_status_text), "Meditating");
+    } else if (vsb_roaming) {
+        _snprintf(vsb_status_text, sizeof(vsb_status_text), "Roaming");
+    } else if (vsb_looping) {
+        _snprintf(vsb_status_text, sizeof(vsb_status_text), "Looping");
+    } else if (vsb_pathing) {
+        _snprintf(vsb_status_text, sizeof(vsb_status_text), "Walking");
+    } else {
+        _snprintf(vsb_status_text, sizeof(vsb_status_text), "Idle");
+    }
+    vsb_status_text[sizeof(vsb_status_text) - 1] = '\0';
+}
+
+/* ---- Status Bar: draw ---- */
+static void vsb_draw(int vp_w, int vp_h)
+{
+    if (!vsb_visible) return;
+
+    vsb_read_status();
+
+    const ui_theme_t *t = &ui_themes[current_theme];
+
+    /* Use UI font if available, else main font */
+    void (*psolid)(float, float, float, float, float, float, float, float, int, int) =
+        ui_font_ready ? push_solid_ui : push_solid;
+    void (*ptext)(int, int, const char *, float, float, float, int, int, int, int) =
+        ui_font_ready ? push_text_ui : push_text;
+    int cw = VSB_CHAR_W, ch = VSB_CHAR_H;
+
+    /* Bar background — slightly lighter than theme bg, full width */
+    psolid(0, 0, (float)vp_w, (float)VSB_BAR_H,
+           t->bg[0] + 0.06f, t->bg[1] + 0.06f, t->bg[2] + 0.06f, 0.95f,
+           vp_w, vp_h);
+
+    /* Bottom border line */
+    psolid(0, (float)(VSB_BAR_H - 1), (float)vp_w, (float)VSB_BAR_H,
+           t->accent[0], t->accent[1], t->accent[2], 0.6f,
+           vp_w, vp_h);
+
+    int tx = VSB_PAD;
+    int ty = (VSB_BAR_H - ch) / 2;
+    char buf[128];
+
+    /* Helper: draw a labeled section and advance tx */
+    #define VSB_SECTION(label_str, value_str, label_r, label_g, label_b, val_r, val_g, val_b) \
+        do { \
+            ptext(tx, ty, label_str, label_r, label_g, label_b, vp_w, vp_h, cw, ch); \
+            tx += (int)strlen(label_str) * cw; \
+            ptext(tx, ty, value_str, val_r, val_g, val_b, vp_w, vp_h, cw, ch); \
+            tx += (int)strlen(value_str) * cw + VSB_PAD; \
+            /* divider */ \
+            psolid((float)tx, 3.0f, (float)(tx + VSB_SEP_W), (float)(VSB_BAR_H - 3), \
+                   t->text[0], t->text[1], t->text[2], 0.2f, vp_w, vp_h); \
+            tx += VSB_SEP_W + VSB_PAD; \
+        } while(0)
+
+    /* Dim label color */
+    float lr = t->dim[0], lg = t->dim[1], lb = t->dim[2];
+    /* Bright value color */
+    float vr = t->text[0], vg = t->text[1], vb = t->text[2];
+
+    /* Section: Path */
+    if (vsb_path_name[0]) {
+        _snprintf(buf, sizeof(buf), "%s", vsb_path_name);
+        buf[sizeof(buf) - 1] = '\0';
+        VSB_SECTION("Path: ", buf, lr, lg, lb, vr, vg, vb);
+    }
+
+    /* Section: Step */
+    if (vsb_pathing && vsb_total_steps > 0) {
+        _snprintf(buf, sizeof(buf), "%d/%d", vsb_cur_step, vsb_total_steps);
+        buf[sizeof(buf) - 1] = '\0';
+        VSB_SECTION("Step: ", buf, lr, lg, lb, vr, vg, vb);
+    }
+
+    /* Section: HP */
+    if (vsb_max_hp > 0) {
+        _snprintf(buf, sizeof(buf), "%d/%d", vsb_cur_hp, vsb_max_hp);
+        buf[sizeof(buf) - 1] = '\0';
+        float hp_ratio = (float)vsb_cur_hp / (float)vsb_max_hp;
+        float hr = hp_ratio > 0.5f ? vr : (hp_ratio > 0.25f ? 1.0f : 1.0f);
+        float hg = hp_ratio > 0.5f ? vg : (hp_ratio > 0.25f ? 0.8f : 0.2f);
+        float hb = hp_ratio > 0.5f ? vb : (hp_ratio > 0.25f ? 0.0f : 0.2f);
+        VSB_SECTION("HP: ", buf, lr, lg, lb, hr, hg, hb);
+    }
+
+    /* Section: Mana */
+    if (vsb_max_mana > 0) {
+        _snprintf(buf, sizeof(buf), "%d/%d", vsb_cur_mana, vsb_max_mana);
+        buf[sizeof(buf) - 1] = '\0';
+        float mn_ratio = (float)vsb_cur_mana / (float)vsb_max_mana;
+        float mr = mn_ratio > 0.5f ? 0.4f : (mn_ratio > 0.25f ? 1.0f : 1.0f);
+        float mg = mn_ratio > 0.5f ? 0.6f : (mn_ratio > 0.25f ? 0.5f : 0.2f);
+        float mb = mn_ratio > 0.5f ? 1.0f : (mn_ratio > 0.25f ? 0.0f : 0.2f);
+        VSB_SECTION("Mana: ", buf, lr, lg, lb, mr, mg, mb);
+    }
+
+    /* Section: Status */
+    {
+        /* Color-code status */
+        float sr = vr, sg = vg, sb = vb;
+        if (vsb_in_combat)       { sr = 1.0f; sg = 0.3f; sb = 0.3f; }
+        else if (vsb_is_resting) { sr = 0.3f; sg = 1.0f; sb = 0.3f; }
+        else if (vsb_is_medit)   { sr = 0.5f; sg = 0.5f; sb = 1.0f; }
+        else if (vsb_roaming)    { sr = 1.0f; sg = 0.8f; sb = 0.2f; }
+        else if (vsb_looping)    { sr = 0.8f; sg = 0.6f; sb = 1.0f; }
+        else if (vsb_pathing)    { sr = 0.6f; sg = 0.9f; sb = 1.0f; }
+        VSB_SECTION("Status: ", vsb_status_text, lr, lg, lb, sr, sg, sb);
+    }
+
+    #undef VSB_SECTION
+}
+
+/* ---- Exp Bar: read status ---- */
+static void vxb_read_status(void)
+{
+    DWORD now = GetTickCount();
+    if (now - vxb_last_read < 500) return; /* throttle to 2/sec */
+    vxb_last_read = now;
+
+    if (!api) return;
+    unsigned int sbase = api->get_struct_base();
+    if (!sbase) return;
+
+    int exp_lo  = api->read_struct_i32(VXB_OFF_EXP_LO);
+    int exp_hi  = api->read_struct_i32(VXB_OFF_EXP_HI);
+    int need_lo = api->read_struct_i32(VXB_OFF_NEED_LO);
+    int need_hi = api->read_struct_i32(VXB_OFF_NEED_HI);
+    vxb_level   = api->read_struct_i32(VXB_OFF_LEVEL);
+
+    vxb_exp    = ((long long)(unsigned int)exp_hi << 32) | (unsigned int)exp_lo;
+    vxb_needed = ((long long)(unsigned int)need_hi << 32) | (unsigned int)need_lo;
+
+    /* Detect XP gain for flash */
+    if (vxb_exp > vxb_prev_exp && vxb_prev_exp > 0) {
+        vxb_flash = 1.0f;
+    }
+    vxb_prev_exp = vxb_exp;
+
+    /* Decay flash */
+    if (vxb_flash > 0.0f) vxb_flash -= 0.03f;
+    if (vxb_flash < 0.0f) vxb_flash = 0.0f;
+
+    /* Calculate percentage: exp / (exp + needed) * 100 */
+    long long total = vxb_exp + vxb_needed;
+    if (total > 0)
+        vxb_percent = (float)((double)vxb_exp / (double)total * 100.0);
+    else
+        vxb_percent = 0.0f;
+}
+
+/* ---- Exp Bar: draw ---- */
+static void vxb_draw(int vp_w, int vp_h)
+{
+    if (!vxb_visible) return;
+
+    vxb_read_status();
+
+    const ui_theme_t *t = &ui_themes[current_theme];
+
+    void (*psolid)(float, float, float, float, float, float, float, float, int, int) =
+        ui_font_ready ? push_solid_ui : push_solid;
+    void (*ptext)(int, int, const char *, float, float, float, int, int, int, int) =
+        ui_font_ready ? push_text_ui : push_text;
+    int cw = VSB_CHAR_W, ch = VSB_CHAR_H;
+
+    /* Bar sits just above the input bar */
+    float bar_top = (float)(vp_h - INPUT_BAR_H - VXB_BAR_H);
+    float bar_bot = (float)(vp_h - INPUT_BAR_H);
+
+    /* Background — darker than theme bg */
+    psolid(0, bar_top, (float)vp_w, bar_bot,
+           t->bg[0] * 0.6f, t->bg[1] * 0.6f, t->bg[2] * 0.6f, 0.95f,
+           vp_w, vp_h);
+
+    /* Top border line — accent color */
+    psolid(0, bar_top, (float)vp_w, bar_top + 1.0f,
+           t->accent[0], t->accent[1], t->accent[2], 0.5f,
+           vp_w, vp_h);
+
+    /* Draw 20 segments */
+    int seg_area_w = vp_w - 2 * VXB_PAD;
+    float seg_w = (float)(seg_area_w - (VXB_SEG_COUNT - 1) * VXB_SEG_GAP) / (float)VXB_SEG_COUNT;
+    int filled = (int)(vxb_percent / 5.0f);
+    float partial = (vxb_percent - filled * 5.0f) / 5.0f;
+    if (filled > VXB_SEG_COUNT) filled = VXB_SEG_COUNT;
+    int overflow = (vxb_percent >= 100.0f);
+
+    float seg_top = bar_top + 3.0f;
+    float seg_bot = bar_bot - 3.0f;
+
+    for (int i = 0; i < VXB_SEG_COUNT; i++) {
+        float sx0 = VXB_PAD + i * (seg_w + VXB_SEG_GAP);
+        float sx1 = sx0 + seg_w;
+
+        /* Segment background (empty) */
+        psolid(sx0, seg_top, sx1, seg_bot,
+               t->bg[0] + 0.03f, t->bg[1] + 0.03f, t->bg[2] + 0.03f, 0.8f,
+               vp_w, vp_h);
+
+        float fill = 0.0f;
+        if (i < filled) fill = 1.0f;
+        else if (i == filled) fill = partial;
+
+        if (fill > 0.0f) {
+            float fx1 = sx0 + seg_w * fill;
+
+            /* Gradient: blend accent toward a brighter version across the bar */
+            float grad = (float)i / (float)(VXB_SEG_COUNT - 1);
+            float fr, fg, fb;
+            if (overflow) {
+                /* Gold glow for overflow (ready to train) */
+                fr = 1.0f;
+                fg = 0.84f + 0.16f * grad;
+                fb = 0.0f;
+            } else {
+                /* Theme accent -> brighter accent */
+                fr = t->accent[0] * (1.0f - grad * 0.3f) + grad * 0.3f;
+                fg = t->accent[1] * (1.0f - grad * 0.3f) + grad * 0.3f;
+                fb = t->accent[2] * (1.0f - grad * 0.3f) + grad * 0.3f;
+            }
+
+            /* XP gain flash — brighten all filled segments */
+            if (vxb_flash > 0.0f) {
+                fr = fr + (1.0f - fr) * vxb_flash * 0.5f;
+                fg = fg + (1.0f - fg) * vxb_flash * 0.5f;
+                fb = fb + (1.0f - fb) * vxb_flash * 0.5f;
+            }
+
+            /* Filled portion */
+            psolid(sx0, seg_top, fx1, seg_bot,
+                   fr, fg, fb, 0.95f,
+                   vp_w, vp_h);
+
+            /* Subtle highlight on top edge of filled segment */
+            psolid(sx0, seg_top, fx1, seg_top + 1.0f,
+                   fr + 0.15f, fg + 0.15f, fb + 0.15f, 0.6f,
+                   vp_w, vp_h);
+        }
+    }
+
+    /* Info text overlay centered on bar */
+    char info[128];
+    if (overflow) {
+        _snprintf(info, sizeof(info), "Level %d \xC4 READY TO TRAIN!", vxb_level);
+    } else if (vxb_needed > 0) {
+        /* Format needed with commas */
+        char needed_str[32];
+        if (vxb_needed >= 1000000000LL)
+            _snprintf(needed_str, sizeof(needed_str), "%lld,%03lld,%03lld,%03lld",
+                     vxb_needed / 1000000000LL, (vxb_needed / 1000000LL) % 1000,
+                     (vxb_needed / 1000LL) % 1000, vxb_needed % 1000);
+        else if (vxb_needed >= 1000000LL)
+            _snprintf(needed_str, sizeof(needed_str), "%lld,%03lld,%03lld",
+                     vxb_needed / 1000000LL, (vxb_needed / 1000LL) % 1000, vxb_needed % 1000);
+        else if (vxb_needed >= 1000LL)
+            _snprintf(needed_str, sizeof(needed_str), "%lld,%03lld",
+                     vxb_needed / 1000LL, vxb_needed % 1000);
+        else
+            _snprintf(needed_str, sizeof(needed_str), "%lld", vxb_needed);
+        _snprintf(info, sizeof(info), "Level %d \xC4 %.1f%% \xC4 %s to next",
+                 vxb_level, vxb_percent, needed_str);
+    } else {
+        _snprintf(info, sizeof(info), "Level %d \xC4 %.1f%%", vxb_level, vxb_percent);
+    }
+    info[sizeof(info) - 1] = '\0';
+
+    int text_w = (int)strlen(info) * cw;
+    int text_x = (vp_w - text_w) / 2;
+    int text_y = (int)bar_top + (VXB_BAR_H - ch) / 2;
+
+    /* Shadow */
+    ptext(text_x + 1, text_y + 1, info, 0.0f, 0.0f, 0.0f, vp_w, vp_h, cw, ch);
+    /* Text */
+    if (overflow) {
+        ptext(text_x, text_y, info, 1.0f, 0.9f, 0.2f, vp_w, vp_h, cw, ch);
+    } else {
+        ptext(text_x, text_y, info, t->text[0], t->text[1], t->text[2], vp_w, vp_h, cw, ch);
+    }
+}
+
 static void vkt_build_vertices(void)
 {
     quad_count = 0;
@@ -4227,8 +4630,8 @@ static void vkt_build_vertices(void)
 
     int vp_w = (int)vk_sc_extent.width;
     int vp_h = (int)vk_sc_extent.height;
-    int top_pad = 4;
-    int bot_pad = 4;
+    int top_pad = vsb_visible ? VSB_BAR_H : 4;
+    int bot_pad = vxb_visible ? VXB_BAR_H + 4 : 4;
     int term_h = vp_h - INPUT_BAR_H - top_pad - bot_pad;
 
     /* Maintain 1:2 (w:h) CP437 aspect ratio per character.
@@ -4408,8 +4811,10 @@ static void vkt_build_vertices(void)
     /* Draw round timer widget */
     vrt_draw(vp_w, vp_h);
 
-    /* Draw paths & loops window (may use UI font — tracked separately) */
+    /* Draw UI-font elements (status bar + P&L window) — tracked separately */
     pl_quad_start = quad_count;
+    vsb_draw(vp_w, vp_h);
+    vxb_draw(vp_w, vp_h);
     pl_draw(vp_w, vp_h);
     pl_quad_end = quad_count;
 
@@ -4450,6 +4855,23 @@ static void input_send(void)
         input_len = 0;
         input_cursor = 0;
         return;
+    }
+
+    /* Capture outgoing telepath from main input: /name message or / name message */
+    if (input_buf[0] == '/') {
+        const char *p = input_buf + 1;
+        if (*p == ' ') p++; /* skip optional space after / */
+        /* Skip the abbreviated name */
+        while (*p && *p != ' ') p++;
+        if (*p == ' ') {
+            p++; /* skip space between name and message */
+            if (*p) {
+                strncpy(tell_pending_msg, p, sizeof(tell_pending_msg) - 1);
+                tell_pending_msg[sizeof(tell_pending_msg) - 1] = 0;
+                tell_pending = 1;
+                tell_lines_waited = 0;
+            }
+        }
     }
 
     /* Send to MMANSI */
@@ -6312,6 +6734,10 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 }
             } else if (si == VKM_WID_CONVO) {
                 vkw_toggle_convo((int)vk_sc_extent.width, (int)vk_sc_extent.height);
+            } else if (si == VKM_WID_STATUSBAR) {
+                vsb_visible = !vsb_visible;
+            } else if (si == VKM_WID_EXPBAR) {
+                vxb_visible = !vxb_visible;
             }
             vkm_open = 0;
             vkm_sub = VKM_SUB_NONE;
