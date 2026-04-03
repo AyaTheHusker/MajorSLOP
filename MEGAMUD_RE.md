@@ -325,9 +325,117 @@ Gated by AUTO_CASH (0x4D14) and AUTO_GET (0x4D18).
 | Offset | Size | Name | Description |
 |---|---|---|---|
 | 0x563C | i32 | CONNECTED | Non-zero if connected to BBS |
+| 0x5640 | i32 | CONNECT_UNK | Cleared to 0 on connect |
 | 0x5644 | i32 | IN_GAME | Non-zero if in the game world |
+| 0x5648 | i32 | CONNECT_STATE | Connection state (checked on timer tick) |
 | 0x564C | i32 | GO_FLAG | **WRITABLE** — master go/stop toggle. 1=go, 0=stop. StopGo button (WM_COMMAND 0x0803) toggles this flag. Must be 1 for any path to execute. When starting a loop/goto while resting, must send StopGo to kick movement. |
 | 0x565C | i32 | FIX_STEPS | |
+| 0x5664 | i32 | PATHING | Non-zero if currently walking a path |
+| 0x5788 | i32 | CONNECT_FLAG2 | Cleared on hangup |
+| 0x5824 | i32 | CONNECT_FLAG3 | Cleared on connect |
+| 0x8A74 | i32 | HANGUP_PENDING | Set to 1 on hangup, 0 on connect |
+| 0x8A78 | i32 | REDIAL_ACTIVE | Set to 0 on hangup, checked on connect (shows warning if was redialing) |
+| 0x8A7C | i32 | REDIAL_COUNT | Cleared on connect |
+| 0x8AB8 | i32 | CONFIRM_HANGUP | If 0 and 0x97CC==0x63, skip hangup confirmation dialog |
+| 0x8AC0 | i32 | CONNECT_FLAG4 | Cleared on connect |
+
+### Connection Functions (from Ghidra)
+
+| VA | Name | Signature | Description |
+|---|---|---|---|
+| 0x0041C480 | VA_DISCONNECT | void(struct, 0) | Disconnect from BBS. Called during hangup. |
+| 0x0041CBB0 | VA_CLEAR_GAME | void(struct, 0) | Clear in-game state. Called after disconnect. Sets IN_GAME=0. |
+| 0x0047A030 | VA_SET_MODE | void(struct, mode) | Set connection mode. mode=1 for connect, mode=0xB for hangup. |
+| 0x004455B0 | VA_UPDATE_ROAM | void(struct) | Update auto-roam state. Called after connect/disconnect. |
+| 0x0043F500 | VA_CONNECT | void(struct) | **Initiate connection to BBS.** Called at end of connect sequence. |
+| 0x0040E8D0 | VA_TOOLBAR_809 | void(struct, 1) | Handler for WM_COMMAND 0x0809 (unknown toolbar button). |
+
+### WM_COMMAND IDs (Toolbar / Menu)
+
+All commands dispatched through WndProc at 0x00447050. Struct is obtained via `GetWindowLongA(hWnd, 4)`.
+Send via `SendMessageA(mmmain_hwnd, WM_COMMAND, cmd_id, 0)`.
+
+**Lower range (direct comparison in WndProc):**
+
+| ID | Name | Description |
+|---|---|---|
+| 0x012B | CMD_UNKNOWN_12B | Calls FUN_0x414A90 |
+| 0x0474 | CMD_UNKNOWN_474 | Sets struct+0x574C=-1, calls FUN_0x488A10 + FUN_0x41CE60 |
+| 0x0490 | CMD_UNKNOWN_490 | Sets struct+0x5690=0, struct+0x5694=1, calls FUN_0x488A10 + FUN_0x41CE60 |
+| 0x04B1 | CMD_UNKNOWN_4B1 | Sets struct+0x3194=0, calls FUN_0x488A10 + FUN_0x41CE60 |
+| 0x0585 | CMD_UNKNOWN_585 | Sets struct+0x5754=1 (if struct+0x5678==0), calls FUN_0x488A10 + FUN_0x41CE60 |
+| 0x05A1 | CMD_UNKNOWN_5A1 | Sets struct+0x5688=0, struct+0x5760=1, calls FUN_0x488A10 + FUN_0x41CE60 |
+| 0x05A9 | CMD_UNKNOWN_5A9 | Sets struct+0x5744=-1, calls FUN_0x488A10 + FUN_0x41CE60 |
+| 0x05C3 | CMD_UNKNOWN_5C3 | Sets struct+0x5748=-1, calls FUN_0x488A10 + FUN_0x41CE60 |
+| 0x06C8 | CMD_UNKNOWN_6C8 | Pushes string ptr 0x5088CC, calls FUN_0x465D20 |
+| 0x07D0 | CMD_UNKNOWN_7D0 | Calls FUN_0x402020 |
+
+**Jump table range (0x07D1-0x089D via table at 0x448524):**
+
+| ID | Name | Description |
+|---|---|---|
+| 0x07D1 | CMD_TIMER_TICK | Timer handler |
+| 0x07D2 | CMD_CHECK_MOVE | Checks struct+0x5660 (movement state) |
+| 0x07D3 | CMD_AUTO_TOGGLE | Auto-combat/toggle handler (reads 0x4D00-0x4D28) |
+| 0x07D4 | CMD_CONNECT_HANGUP | **Phone button (connect/hangup toggle).** If CONNECTED: prompts "Are you sure you wish to hangup?", disconnects. If not connected: initiates connection. |
+| 0x07D5 | CMD_UNKNOWN_7D5 | Calls FUN_0x487E69 |
+| 0x07EA | CMD_UNKNOWN_7EA | Same handler as 0x07DA |
+| 0x07EB | CMD_UNKNOWN_7EB | Path/config handler |
+| 0x07EC | CMD_UNKNOWN_7EC | Path/config handler |
+| 0x07ED | CMD_UNKNOWN_7ED | Unknown |
+| 0x07EE | CMD_UNKNOWN_7EE | Unknown |
+| 0x07F0 | CMD_SAVE_INI | Calls INI save (FUN_0x435E90) + INI load (FUN_0x4387E0) |
+| 0x07F1 | CMD_SAVE_INI2 | Similar to 0x07F0 with additional FUN_0x430A20 |
+| 0x0800 | CMD_UNKNOWN_800 | Toggle handler for struct+0x150-0x168 flags |
+| 0x0801 | CMD_UNKNOWN_801 | Toggle handler |
+| 0x0802 | CMD_UNKNOWN_802 | Toggle handler |
+| 0x0803 | CMD_STOPGO | **StopGo button.** Toggles GO_FLAG (0x564C). The primary go/stop control. |
+| 0x0804 | CMD_UNKNOWN_804 | Toggle handler |
+| 0x0805 | CMD_UNKNOWN_805 | Toggle handler |
+| 0x0806 | CMD_UNKNOWN_806 | Toggle handler |
+| 0x0807 | CMD_UNKNOWN_807 | Unknown |
+| 0x0808 | CMD_UNKNOWN_808 | Unknown |
+| 0x0809 | CMD_UNKNOWN_809 | Calls FUN_0x40E8D0(struct, 1) |
+| 0x080A | CMD_UNKNOWN_80A | Sets struct+0x576C=1, struct+0x5774=0 |
+| 0x080B | CMD_UNKNOWN_80B | Calls FUN_0x471B80 |
+| 0x080C | CMD_STAT_DUMP | Calls FUN_0x48A7C0 (stat dump function) |
+| 0x080F | CMD_UNKNOWN_80F | Calls FUN_0x443490 |
+| 0x0810-0x0813 | CMD_UNKNOWN_810 | Group of 4 handlers |
+| 0x0815-0x081E | CMD_AUTO_SWITCHES | **Auto-switch toggles** (10 sequential handlers — AutoCombat through AutoTrack) |
+| 0x081F | CMD_UNKNOWN_81F | Unknown |
+| 0x0820 | CMD_UNKNOWN_820 | Unknown |
+| 0x0871 | CMD_UNKNOWN_871 | Unknown |
+| 0x0872 | CMD_UNKNOWN_872 | Auto-toggle related (checks 0x4D00, IN_GAME) |
+| 0x0873 | CMD_UNKNOWN_873 | Unknown |
+| 0x08A6 | CMD_UNKNOWN_8A6 | Checks struct+0x565C (FIX_STEPS) |
+
+### Connect/Hangup Sequence (bypass confirmation)
+
+**To disconnect (hangup) without confirmation:**
+```c
+// All values WRITABLE at struct_base + offset
+write_i32(0x8A78, 0);    // REDIAL_ACTIVE = 0
+write_i32(0x8A74, 1);    // HANGUP_PENDING = 1
+write_i32(0x5664, 0);    // PATHING = 0
+write_i32(0x5788, 0);    // CONNECT_FLAG2 = 0
+// Then call VA_DISCONNECT, VA_CLEAR_GAME, VA_SET_MODE(0xB), VA_UPDATE_ROAM
+// Or simply: SendMessageA(mmmain, WM_COMMAND, 0x07D4, 0) with CONFIRM_HANGUP(0x8AB8)=0
+```
+
+**To connect:**
+```c
+write_i32(0x5824, 0);    // CONNECT_FLAG3 = 0
+write_i32(0x8A74, 0);    // HANGUP_PENDING = 0
+write_i32(0x8A78, 0);    // REDIAL_ACTIVE = 0
+write_i32(0x8AC0, 0);    // CONNECT_FLAG4 = 0
+write_i32(0x54B0, 0);    // Clear path state
+write_i32(0x8A7C, 0);    // REDIAL_COUNT = 0
+write_i32(0x5640, 0);    // CONNECT_UNK = 0
+write_i32(0x5638, 0);    // Unknown
+write_i32(0x5788, 0);    // CONNECT_FLAG2 = 0
+// Then call VA_SET_MODE(1), VA_UPDATE_ROAM, VA_CONNECT
+// Or simply: SendMessageA(mmmain, WM_COMMAND, 0x07D4, 0) when not connected
+```
 
 ### Pathing / Loop Control
 

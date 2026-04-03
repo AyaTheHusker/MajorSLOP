@@ -146,6 +146,10 @@ int main(int argc, char **argv)
                 px = grid_x + x_off + (int)col;
                 py = grid_y + y_off + (int)row;
 
+                /* Clamp to cell bounds with 1px padding — prevent glyph overflow
+                 * and bilinear filter bleed into neighboring cells */
+                if (px <= grid_x || px >= grid_x + cell_w - 1) continue;
+                if (py <= grid_y || py >= grid_y + cell_h - 1) continue;
                 if (px < 0 || px >= atlas_w || py < 0 || py >= atlas_h) continue;
 
                 unsigned char val;

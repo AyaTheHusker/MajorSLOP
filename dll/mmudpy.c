@@ -1,5 +1,5 @@
 /*
- * mmudpy.dll — MajorSLOP Plugin: Embedded Python (MMUDPy)
+ * mmudpy.dll - MajorSLOP Plugin: Embedded Python (MMUDPy)
  * ========================================================
  *
  * Embeds 32-bit Python 3.12 directly inside MegaMUD via the plugin system.
@@ -112,7 +112,7 @@ static char *cmd_history[MAX_HISTORY];
 static int history_count = 0;
 static int history_idx = 0;
 
-/* Line callback buffer — multiple readers, each gets all lines */
+/* Line callback buffer - multiple readers, each gets all lines */
 #define MAX_LINE_BUF 256
 #define MAX_LINE_READERS 8
 static char *line_buffer[MAX_LINE_BUF];
@@ -188,7 +188,7 @@ static void con_flush(void)
     LeaveCriticalSection(&con_ring_lock);
 }
 
-/* Thread-safe console append — queues if called from another thread */
+/* Thread-safe console append - queues if called from another thread */
 static void con_append(const char *text)
 {
     if (!con_output) return;
@@ -341,7 +341,7 @@ static void particle_remove(int idx)
     }
 }
 
-/* Tick all active particles — called from console thread timer */
+/* Tick all active particles - called from console thread timer */
 static void particles_tick(void)
 {
     for (int i = particle_count - 1; i >= 0; i--) {
@@ -493,7 +493,7 @@ static LRESULT CALLBACK float_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
         HBITMAP bmp = CreateCompatibleBitmap(hdc_win, w, h);
         HBITMAP old_bmp = (HBITMAP)SelectObject(hdc, bmp);
 
-        /* Fill background with the color key — this becomes transparent */
+        /* Fill background with the color key - this becomes transparent */
         HBRUSH bg = CreateSolidBrush(RGB(1, 1, 1));
         FillRect(hdc, &rc, bg);
         DeleteObject(bg);
@@ -536,7 +536,7 @@ static LRESULT CALLBACK float_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
             fe->font_face[0] ? fe->font_face : "Consolas");
         HFONT old = (HFONT)SelectObject(hdc, font);
 
-        /* Outer glow — draw text at multiple offsets in glow color */
+        /* Outer glow - draw text at multiple offsets in glow color */
         if (fe->glow_size > 0) {
             SetTextColor(hdc, fe->glow_col);
             for (int dy = -fe->glow_size; dy <= fe->glow_size; dy++) {
@@ -557,7 +557,7 @@ static LRESULT CALLBACK float_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
             DrawTextA(hdc, fe->text, -1, &sr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         }
 
-        /* Main text — gradient if colors differ */
+        /* Main text - gradient if colors differ */
         if (fe->color_top == fe->color_bot) {
             /* Solid color */
             SetTextColor(hdc, fe->color_top);
@@ -745,7 +745,7 @@ static LRESULT CALLBACK float_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
         case FLOAT_EXIT_SHATTER: {
             /* Full opacity until exit phase, then shatter */
             if (dying && fe->tick == exit_start) {
-                /* Trigger shatter — spawn particles, kill immediately */
+                /* Trigger shatter - spawn particles, kill immediately */
                 spawn_particles(fe);
                 done = 1;
             }
@@ -830,7 +830,7 @@ static LRESULT CALLBACK float_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
 }
 
 /*
- * float_text_ex — full-featured floating text
+ * float_text_ex - full-featured floating text
  *
  * x,y: position relative to MMMAIN window (-1,-1 = center)
  * font_size: height in pixels (0 = default 36)
@@ -1122,13 +1122,70 @@ __declspec(dllexport) int mmudpy_fake_remote(const char *cmd)
     return api->fake_remote(cmd);
 }
 
+/* Connect/hangup — sends WM_COMMAND 0x07D4 (phone button) to MMMAIN.
+ * For hangup: first disable confirmation by setting CONFIRM_HANGUP=0 (0x8AB8). */
+/* Inject a MegaMUD-style blue status line into the Vulkan terminal */
+static void inject_status(const char *msg)
+{
+    if (!api || !api->inject_server_data) return;
+    /* MegaMUD style: bright white on blue background */
+    char buf[512];
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    int len = wsprintfA(buf,
+        "\r\n\x1b[1;37;44m[%s (%04d-%02d-%02d %02d:%02d:%02d)]\x1b[0m\r\n",
+        msg, st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+    api->inject_server_data(buf, len);
+}
+
+__declspec(dllexport) int mmudpy_connect(void)
+{
+    if (!api || !api->get_mmmain_hwnd || !api->get_struct_base) return -1;
+    unsigned int base = api->get_struct_base();
+    if (!base) return -1;
+    int connected = api->read_struct_i32(0x563C);
+    if (connected) return 0;
+    HWND mmmain = api->get_mmmain_hwnd();
+    if (!mmmain) return -1;
+    SendMessageA(mmmain, WM_COMMAND, 0x07D4, 0);
+    inject_status("Connecting...");
+    return 0;
+}
+
+__declspec(dllexport) int mmudpy_hangup(void)
+{
+    if (!api || !api->get_mmmain_hwnd || !api->get_struct_base) return -1;
+    unsigned int base = api->get_struct_base();
+    if (!base) return -1;
+    int connected = api->read_struct_i32(0x563C);
+    if (!connected) return 0;
+    *(int *)(base + 0x8AB8) = 0;
+    HWND mmmain = api->get_mmmain_hwnd();
+    if (!mmmain) return -1;
+    SendMessageA(mmmain, WM_COMMAND, 0x07D4, 0);
+    inject_status("Session ended");
+    return 0;
+}
+
+__declspec(dllexport) int mmudpy_is_connected(void)
+{
+    if (!api || !api->read_struct_i32) return 0;
+    return api->read_struct_i32(0x563C) != 0;
+}
+
+__declspec(dllexport) int mmudpy_is_in_game(void)
+{
+    if (!api || !api->read_struct_i32) return 0;
+    return api->read_struct_i32(0x5644) != 0;
+}
+
 /* ---- Eval queue: vk_terminal submits Python code, Python thread processes ---- */
 #define EVAL_BUF_SZ 8192
 static CRITICAL_SECTION eval_lock;
 static char eval_code[EVAL_BUF_SZ];
 static int eval_target = 0;    /* 0=terminal, >0=vkw window id */
 static volatile int eval_pending = 0;
-static void eval_pump(void);  /* forward decl — processes queued eval from vk_terminal */
+static void eval_pump(void);  /* forward decl - processes queued eval from vk_terminal */
 
 __declspec(dllexport) void mmudpy_queue_eval(const char *code, int target)
 {
@@ -1205,7 +1262,7 @@ __declspec(dllexport) void mmudpy_debug_counts(int *on_line, int *got, int *empt
 }
 
 /*
- * mmudpy_exec — Run arbitrary Python code in the MMUDPy interpreter.
+ * mmudpy_exec - Run arbitrary Python code in the MMUDPy interpreter.
  * Other plugin DLLs can call this to inject Python objects, help topics,
  * commands, or anything else into the console environment.
  *
@@ -1281,7 +1338,7 @@ __declspec(dllexport) void mmudpy_float_text_ex(const char *text,
     EnterCriticalSection(&float_queue_lock);
     int next = (float_queue_head + 1) % FLOAT_QUEUE_MAX;
     if (next == float_queue_tail) {
-        /* Full — drop oldest */
+        /* Full - drop oldest */
         float_queue_tail = (float_queue_tail + 1) % FLOAT_QUEUE_MAX;
     }
     float_text_params_t *p = &float_queue[float_queue_head];
@@ -1313,7 +1370,7 @@ __declspec(dllexport) void mmudpy_set_query_result(int val)
     script_query_result = val;
 }
 
-/* Ask Python if a script is loaded — posts to console thread for safety */
+/* Ask Python if a script is loaded - posts to console thread for safety */
 /* (WM_PYEXEC and WM_FLOAT defined near top of file) */
 
 static int is_script_loaded(const char *name)
@@ -1343,7 +1400,7 @@ static void py_exec(const char *code)
 {
     if (!py_ready || !pPyRun_SimpleString) return;
 
-    /* Acquire the GIL — we released it before the message loop */
+    /* Acquire the GIL - we released it before the message loop */
     int gil = 0;
     if (pPyGILState_Ensure) {
         gil = pPyGILState_Ensure();
@@ -1359,7 +1416,7 @@ static void py_exec(const char *code)
     pPyErr_Clear();
     PyObject *compiled = pPy_CompileString(code, "<console>", Py_eval_input);
     if (compiled) {
-        /* It's an expression — eval it */
+        /* It's an expression - eval it */
         PyObject *result = pPyRun_String(code, Py_eval_input, main_dict, main_dict);
         if (result) {
             /* Print repr if not None */
@@ -1378,7 +1435,7 @@ static void py_exec(const char *code)
         }
         pPy_DecRef(compiled);
     } else {
-        /* Not an expression — clear the error and try as exec */
+        /* Not an expression - clear the error and try as exec */
         pPyErr_Clear();
         pPyRun_SimpleString(code);
     }
@@ -1569,7 +1626,7 @@ static void create_console_window(HINSTANCE hInst)
         CW_USEDEFAULT, CW_USEDEFAULT, 900, 620,
         parent, NULL, hInst, NULL);
 
-    /* Output — multiline read-only edit */
+    /* Output - multiline read-only edit */
     con_output = CreateWindowExA(
         0, "EDIT", "",
         WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL,
@@ -1579,7 +1636,7 @@ static void create_console_window(HINSTANCE hInst)
     /* Dark background for output */
     /* We'll set colors in WM_CTLCOLORSTATIC/WM_CTLCOLOREDIT via subclass */
 
-    /* Input — single line */
+    /* Input - single line */
     con_input = CreateWindowExA(
         0, "EDIT", "",
         WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
@@ -1600,7 +1657,7 @@ static void create_console_window(HINSTANCE hInst)
     /* Subclass input for Enter/Up/Down */
     orig_input_proc = (WNDPROC)SetWindowLongA(con_input, GWL_WNDPROC, (LONG)input_subclass);
 
-    /* Start hidden — user opens via Plugins > MMUDPy > Show/Hide Console */
+    /* Start hidden - user opens via Plugins > MMUDPy > Show/Hide Console */
     ShowWindow(con_hwnd, SW_HIDE);
 
     /* Create pie pattern brush for edit background */
@@ -1611,7 +1668,7 @@ static void create_console_window(HINSTANCE hInst)
 
 static void draw_pie_slice(HDC hdc, int cx, int cy, int radius)
 {
-    /* Chocolate pie slice — subtle on dark background */
+    /* Chocolate pie slice - subtle on dark background */
     int r = radius;
 
     /* Pie filling (dark chocolate, just slightly lighter than bg) */
@@ -1745,6 +1802,14 @@ static const char *py_bootstrap =
     "    _dll.mmudpy_inject_server.argtypes = [ctypes.c_char_p, ctypes.c_int]\n"
     "    _dll.mmudpy_fake_remote.restype = ctypes.c_int\n"
     "    _dll.mmudpy_fake_remote.argtypes = [ctypes.c_char_p]\n"
+    "    _dll.mmudpy_connect.restype = ctypes.c_int\n"
+    "    _dll.mmudpy_connect.argtypes = []\n"
+    "    _dll.mmudpy_hangup.restype = ctypes.c_int\n"
+    "    _dll.mmudpy_hangup.argtypes = []\n"
+    "    _dll.mmudpy_is_connected.restype = ctypes.c_int\n"
+    "    _dll.mmudpy_is_connected.argtypes = []\n"
+    "    _dll.mmudpy_is_in_game.restype = ctypes.c_int\n"
+    "    _dll.mmudpy_is_in_game.argtypes = []\n"
     "    _dll.mmudpy_line_register.restype = ctypes.c_int\n"
     "    _dll.mmudpy_line_register.argtypes = []\n"
     "    _dll.mmudpy_line_unregister.restype = None\n"
@@ -1961,6 +2026,20 @@ static const char *py_bootstrap =
     "    def room_name(self):\n"
     "        '''Current room name.'''\n"
     "        return self.read_string(OFF.ROOM_NAME, 80)\n"
+    "\n"
+    "    # --- Connection ---\n"
+    "    def connect(self):\n"
+    "        '''Connect to BBS. No-op if already connected.'''\n"
+    "        return _dll.mmudpy_connect() == 0\n"
+    "    def hangup(self):\n"
+    "        '''Hangup (disconnect). Bypasses confirmation. No-op if not connected.'''\n"
+    "        return _dll.mmudpy_hangup() == 0\n"
+    "    def is_connected(self):\n"
+    "        '''True if connected to BBS.'''\n"
+    "        return _dll.mmudpy_is_connected() != 0\n"
+    "    def is_in_game(self):\n"
+    "        '''True if in the game world.'''\n"
+    "        return _dll.mmudpy_is_in_game() != 0\n"
     "\n"
     "    # --- State flags ---\n"
     "    def in_combat(self):\n"
@@ -2225,6 +2304,10 @@ static const char *py_bootstrap =
     "        lines.append('  mud.is_poisoned()  mud.is_held()       mud.is_stunned()')\n"
     "        lines.append('  mud.is_blinded()   mud.is_confused()   mud.is_looping()')\n"
     "        lines.append('')\n"
+    "        lines.append('--- Connection ---')\n"
+    "        lines.append('  mud.connect()      mud.hangup()         mud.is_connected()')\n"
+    "        lines.append('  mud.is_in_game()')\n"
+    "        lines.append('')\n"
     "        lines.append('--- Commands ---')\n"
     "        lines.append('  mud.command(\"say hello\")   mud.text(\"partial\")')\n"
     "        lines.append('')\n"
@@ -2269,13 +2352,13 @@ static const char *py_bootstrap =
     "        return '\\n'.join(lines)\n"
     "\n"
     "class _Remote:\n"
-    "    '''Execute MegaMUD @commands directly — no telepath, no response.\n"
+    "    '''Execute MegaMUD @commands directly - no telepath, no response.\n"
     "    Calls the exact same internal functions as the real @commands.\n"
     "    Usage: mud.remote.loop(\"ancient crypt\")'''\n"
     "    def _call(self, cmd):\n"
     "        rv = _dll.mmudpy_fake_remote(cmd.encode('utf-8'))\n"
     "        if rv != 0:\n"
-    "            print(f'remote: {cmd} — failed')\n"
+    "            print(f'remote: {cmd} - failed')\n"
     "        return rv == 0\n"
     "    def stop(self):\n"
     "        '''Stop current path/movement.'''\n"
@@ -2297,12 +2380,12 @@ static const char *py_bootstrap =
     "        return self._call('reset')\n"
     "    def __repr__(self):\n"
     "        return ('MegaMUD Remote Commands (no telepath):\\n'\n"
-    "                '  mud.remote.stop()              — stop movement\\n'\n"
-    "                '  mud.remote.rego()              — resume movement\\n'\n"
-    "                '  mud.remote.loop(\"name\")        — start loop\\n'\n"
-    "                '  mud.remote.goto(\"room\")        — go to room\\n'\n"
-    "                '  mud.remote.roam(True/False)    — auto-roam on/off\\n'\n"
-    "                '  mud.remote.reset()             — reset flags/stats')\n"
+    "                '  mud.remote.stop()              - stop movement\\n'\n"
+    "                '  mud.remote.rego()              - resume movement\\n'\n"
+    "                '  mud.remote.loop(\"name\")        - start loop\\n'\n"
+    "                '  mud.remote.goto(\"room\")        - go to room\\n'\n"
+    "                '  mud.remote.roam(True/False)    - auto-roam on/off\\n'\n"
+    "                '  mud.remote.reset()             - reset flags/stats')\n"
     "\n"
     "mud = _MudAPI()\n"
     "mud.remote = _Remote()\n"
@@ -2319,12 +2402,13 @@ static const char *py_bootstrap =
     "        'room': 'mud.room_name() -> current room name\\nmud.read_i32(OFF.ROOM_EXITS) for exit flags\\nmud.read_i32(OFF.ROOM_DARKNESS) for darkness flag',\n"
     "        'player': 'mud.player_name() / mud.level()\\nmud.strength() / mud.agility() / etc.\\nmud.read_string(OFF.PLAYER_GANG, 32) for gang name',\n"
     "        'state': 'mud.is_resting() / mud.is_meditating() / mud.is_sneaking()\\nmud.is_hiding() / mud.is_fleeing() / mud.is_looping()\\nmud.is_poisoned() / mud.is_held() / mud.is_stunned()',\n"
+    "        'connection': 'mud.connect()       - connect to BBS\\nmud.hangup()        - disconnect (bypasses confirmation)\\nmud.is_connected()  - True if connected\\nmud.is_in_game()    - True if in game world',\n"
     "        'commands': 'mud.command(\"say hello\") -> types + Enter\\nmud.text(\"partial\") -> types without Enter\\nWorks just like typing in MegaMUD.',\n"
     "        'memory': 'mud.read_i32(OFF.X) / mud.write_i32(OFF.X, val)\\nmud.read_i16() / mud.write_i16()\\nmud.read_string(OFF.X, maxlen) / mud.write_string(OFF.X, text, maxlen)\\nAll offsets in OFF class, type OFF to see them.',\n"
     "        'scripts': 'mud.scripts() -> list all scripts\\nmud.load(\"name\") -> load and run\\nmud.stop(\"name\") -> stop a running script\\nmud.edit(\"name\") -> show script source\\nmud.save(\"name\", code) -> save new script\\nmud.delete(\"name\") -> remove script\\n\\nScripts have start()/stop() functions.\\nLoad from menu: Plugins > MMUDPy > script name',\n"
     "        'offsets': 'Type OFF to see all game struct offsets.\\nUse with mud.read_i32(OFF.X) / mud.write_i32(OFF.X, val).\\nAll offsets are read/write.',\n"
-    "        'remote': 'mud.remote — direct MegaMUD @commands (no telepath):\\n  mud.remote.stop()              — stop movement\\n  mud.remote.rego()              — resume movement\\n  mud.remote.loop(\"name\")        — start loop\\n  mud.remote.goto(\"room\")        — go to room\\n  mud.remote.roam(True/False)    — auto-roam on/off\\n  mud.remote.reset()             — reset flags/stats\\n\\nType mud.remote to see the list.',\n"
-    "        'toggles': 'Automation toggles — call with no arg to toggle, True/False to set:\\n  mud.autocombat()  mud.autonuke()   mud.autoheal()\\n  mud.autobless()   mud.autolight()  mud.autocash()\\n  mud.autoget()     mud.autosearch() mud.autosneak()\\n  mud.autohide()    mud.autotrack()  mud.autotrain()\\n\\nReturns the new state (True/False).\\nExample: mud.autocombat(False)  — turn off auto-combat',\n"
+    "        'remote': 'mud.remote - direct MegaMUD @commands (no telepath):\\n  mud.remote.stop()              - stop movement\\n  mud.remote.rego()              - resume movement\\n  mud.remote.loop(\"name\")        - start loop\\n  mud.remote.goto(\"room\")        - go to room\\n  mud.remote.roam(True/False)    - auto-roam on/off\\n  mud.remote.reset()             - reset flags/stats\\n\\nType mud.remote to see the list.',\n"
+    "        'toggles': 'Automation toggles - call with no arg to toggle, True/False to set:\\n  mud.autocombat()  mud.autonuke()   mud.autoheal()\\n  mud.autobless()   mud.autolight()  mud.autocash()\\n  mud.autoget()     mud.autosearch() mud.autosneak()\\n  mud.autohide()    mud.autotrack()  mud.autotrain()\\n\\nReturns the new state (True/False).\\nExample: mud.autocombat(False)  - turn off auto-combat',\n"
     "    }\n"
     "    # Plugins can register topics via: help.__wrapped_topics__['name'] = 'text'\n"
     "    if hasattr(help, '__wrapped_topics__'):\n"
@@ -2333,7 +2417,7 @@ static const char *py_bootstrap =
     "        print('=== MMUDPy Help ===')\n"
     "        print('Type help(\"topic\") for details on:')\n"
     "        # Show core topics first, then any plugin-registered ones\n"
-    "        core = ['hp', 'mana', 'combat', 'room', 'player', 'state', 'commands', 'memory', 'scripts', 'offsets', 'toggles', 'remote']\n"
+    "        core = ['hp', 'mana', 'combat', 'room', 'player', 'state', 'connection', 'commands', 'memory', 'scripts', 'offsets', 'toggles', 'remote']\n"
     "        plugin_topics = [k for k in sorted(topics.keys()) if k not in core]\n"
     "        print('  ' + ', '.join(core))\n"
     "        if plugin_topics:\n"
@@ -2469,13 +2553,13 @@ static int load_python(void)
                 /* Skip mmudpy.dll itself */
                 if (_stricmp(fd.cFileName, "mmudpy.dll") == 0) continue;
 
-                /* Use full path — GetModuleHandleA(filename) fails for
+                /* Use full path - GetModuleHandleA(filename) fails for
                    DLLs loaded from subdirectories on Wine */
                 char full_dll[MAX_PATH];
                 sprintf(full_dll, "%s%s", plugins_dir, fd.cFileName);
                 HMODULE hMod = GetModuleHandleA(full_dll);
                 if (!hMod) {
-                    /* Try LoadLibrary — returns existing handle if already loaded */
+                    /* Try LoadLibrary - returns existing handle if already loaded */
                     hMod = LoadLibraryA(full_dll);
                 }
                 if (!hMod) continue;
@@ -2535,7 +2619,7 @@ static int load_python(void)
                         dll_var, c->c_func, restype,
                         dll_var, c->c_func, argtypes);
 
-                    /* Build lambda — handle string encoding for 's' args */
+                    /* Build lambda - handle string encoding for 's' args */
                     int has_str = (strchr(c->arg_types, 's') != NULL);
                     if (c->arg_types[0] == '\0') {
                         /* No args */
@@ -2543,7 +2627,7 @@ static int load_python(void)
                             "mud.%s = lambda: %s.%s()\n",
                             c->py_name, dll_var, c->c_func);
                     } else if (!has_str) {
-                        /* All numeric — simple passthrough */
+                        /* All numeric - simple passthrough */
                         char params[128] = "";
                         int plen = 0;
                         int argn = 0;
@@ -2555,7 +2639,7 @@ static int load_python(void)
                             "mud.%s = lambda %s: %s.%s(%s)\n",
                             c->py_name, params, dll_var, c->c_func, params);
                     } else {
-                        /* Has string args — need encoding */
+                        /* Has string args - need encoding */
                         char params[128] = "";
                         char call[256] = "";
                         int plen = 0, clen = 0, argn = 0;
@@ -2641,7 +2725,7 @@ static DWORD WINAPI console_thread(LPVOID param)
     return 0;
 }
 
-/* ---- Eval pump — processes queued Python from vk_terminal ---- */
+/* ---- Eval pump - processes queued Python from vk_terminal ---- */
 /* Called from the console window's 50ms timer so it works even offline */
 
 static void eval_pump(void)
@@ -2727,7 +2811,7 @@ static void mmudpy_on_line(const char *line)
     dbg_on_line_count++;
     if (dbg_on_line_count <= 5)
         dbg("[on_line] #%d: %.60s\n", dbg_on_line_count, line);
-    /* Buffer lines for Python scripts to poll — all readers share the buffer */
+    /* Buffer lines for Python scripts to poll - all readers share the buffer */
     EnterCriticalSection(&line_lock);
     int next = (line_buf_head + 1) % MAX_LINE_BUF;
 
@@ -3090,7 +3174,7 @@ static int mmudpy_on_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     if (msg == WM_COMMAND) {
         WORD id = LOWORD(wParam);
 
-        /* Show/Hide Console — IDM_PLUGIN_BASE + plugin_idx*10 + 0
+        /* Show/Hide Console - IDM_PLUGIN_BASE + plugin_idx*10 + 0
          * We respond to any ID in our plugin range for show/hide */
         if (id == menu_base) {
             if (con_hwnd) {
@@ -3105,7 +3189,7 @@ static int mmudpy_on_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             return 1;
         }
 
-        /* Script Manager — IDM_PLUGIN_BASE + plugin_idx*10 + 1 */
+        /* Script Manager - IDM_PLUGIN_BASE + plugin_idx*10 + 1 */
         if (id == menu_base + 1) {
             show_script_manager(hwnd);
             return 1;

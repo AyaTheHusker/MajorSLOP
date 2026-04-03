@@ -2,8 +2,8 @@
  * gl_term_render.h — Cross-platform GL terminal renderer
  * =======================================================
  *
- * Shared header for Windows DLL and Linux native terminal.
- * Defines shared memory layout, render API, and constants.
+ * Shared between Windows DLL plugin and Linux native app.
+ * Uses embedded CP437 8x16 bitmap font — no platform font deps.
  */
 
 #ifndef GL_TERM_RENDER_H
@@ -15,21 +15,30 @@
 
 #define TERM_ROWS        60
 #define TERM_COLS        132
-#define TERM_STRIDE      0x84   /* MMANSI row stride in bytes */
+#define TERM_STRIDE      0x84
 #define MMANSI_TEXT_OFF  0x62
 #define MMANSI_ATTR_OFF  0x1F52
 
+/* Font atlas: 16x16 grid of 8x16 glyphs → 128x256 texture */
+#define FONT_GRID        16
+#define GLYPH_W          8
+#define GLYPH_H          16
+#define ATLAS_W          (FONT_GRID * GLYPH_W)   /* 128 */
+#define ATLAS_H          (FONT_GRID * GLYPH_H)   /* 256 */
+
+#define INPUT_BAR_H      20   /* pixels for input bar */
+
 /* ---- Shared memory layout ---- */
 
-#define SHM_NAME         "/mmansi_buf"
-#define SHM_CMD_NAME     "/mmansi_cmd"
-#define SHM_MAGIC        0x4D4D414Eu  /* "MMAN" */
+#define SHM_PATH         "/tmp/mmansi_buf"
+#define SHM_CMD_PATH     "/tmp/mmansi_cmd"
+#define SHM_MAGIC        0x4D4D414Eu
 
 typedef struct {
-    uint32_t magic;                    /* SHM_MAGIC */
-    uint32_t seq;                      /* incremented each write */
-    uint32_t rows;                     /* 60 */
-    uint32_t cols;                     /* 132 */
+    uint32_t magic;
+    uint32_t seq;
+    uint32_t rows;
+    uint32_t cols;
     uint8_t  text[TERM_ROWS][TERM_COLS];
     uint8_t  attr[TERM_ROWS][TERM_COLS];
     uint8_t  cursor_row;
@@ -38,29 +47,28 @@ typedef struct {
     uint8_t  _pad;
 } mmansi_shm_t;
 
-/* Command channel: Linux → DLL */
 typedef struct {
     uint32_t         magic;
-    volatile uint32_t write_seq;       /* writer increments */
-    volatile uint32_t read_seq;        /* reader sets = write_seq when consumed */
-    uint8_t          mode;             /* 0 = split, 1 = raw */
-    uint8_t          raw_key;          /* single keystroke in raw mode */
+    volatile uint32_t write_seq;
+    volatile uint32_t read_seq;
+    uint8_t          mode;          /* 0 = split, 1 = raw */
+    uint8_t          raw_key;
     uint8_t          raw_key_pending;
     uint8_t          _pad;
-    char             cmd[512];         /* null-terminated command */
+    char             cmd[512];
 } mmansi_cmd_t;
 
-/* ---- Color / theme types ---- */
+/* ---- Color / theme ---- */
 
 typedef struct { float r, g, b; } rgb_t;
 
 #define GLTR_NUM_THEMES  5
 
-/* ---- Render API (platform-agnostic, needs current GL context) ---- */
+/* ---- Render API ---- */
 
 void        gltr_init(void);
 void        gltr_shutdown(void);
-void        gltr_set_viewport(int w, int h);
+void        gltr_set_viewport(int w, int h, int input_bar_h);
 void        gltr_render(const uint8_t text[TERM_ROWS][TERM_COLS],
                         const uint8_t attr[TERM_ROWS][TERM_COLS]);
 void        gltr_render_input_bar(const char *text, int cursor_pos,
