@@ -723,6 +723,16 @@ static int vkw_backscroll_idx = -1;
 /* Forward decl for convo input handler */
 static void convo_on_input(const char *text);
 
+/* Floating window right-click context menu */
+#define VKW_CTX_FONT_UP    0
+#define VKW_CTX_FONT_DN    1
+#define VKW_CTX_FONT_RST   2
+#define VKW_CTX_COUNT      3
+static int  vkw_ctx_open = 0;
+static int  vkw_ctx_wnd = -1;   /* which window index */
+static int  vkw_ctx_x = 0, vkw_ctx_y = 0;
+static int  vkw_ctx_hover = -1;
+
 /* Chat channel types */
 #define CHAT_GOSSIP    0
 #define CHAT_BROADCAST 1
@@ -1071,6 +1081,46 @@ static void vkw_draw_all(int vp_w, int vp_h)
         int idx = vkw_order[i];
         if (vkw_windows[idx].active) {
             vkw_draw_one(&vkw_windows[idx], (idx == vkw_focus), vp_w, vp_h);
+        }
+    }
+
+    /* Floating window context menu (drawn on top) */
+    if (vkw_ctx_open && vkw_ctx_wnd >= 0) {
+        const ui_theme_t *t = &ui_themes[current_theme];
+        int mcw = 10, mch = 18;
+        int item_h = mch + 6;
+        int mw = 14 * mcw + 12;  /* width for labels */
+        int mh = VKW_CTX_COUNT * item_h + 4;
+        int mx0 = vkw_ctx_x, my0 = vkw_ctx_y;
+
+        /* Keep on screen */
+        if (mx0 + mw > vp_w) mx0 = vp_w - mw;
+        if (my0 + mh > vp_h) my0 = vp_h - mh;
+
+        /* Shadow */
+        push_solid(mx0 + 3, my0 + 3, mx0 + mw + 3, my0 + mh + 3,
+                   0, 0, 0, 0.4f, vp_w, vp_h);
+        /* Background */
+        push_solid(mx0, my0, mx0 + mw, my0 + mh,
+                   t->bg[0] + 0.08f, t->bg[1] + 0.08f, t->bg[2] + 0.08f, 0.95f,
+                   vp_w, vp_h);
+        /* Border */
+        push_solid(mx0, my0, mx0 + mw, my0 + 1, t->accent[0], t->accent[1], t->accent[2], 0.5f, vp_w, vp_h);
+        push_solid(mx0, my0 + mh - 1, mx0 + mw, my0 + mh, t->accent[0], t->accent[1], t->accent[2], 0.5f, vp_w, vp_h);
+        push_solid(mx0, my0, mx0 + 1, my0 + mh, t->accent[0], t->accent[1], t->accent[2], 0.5f, vp_w, vp_h);
+        push_solid(mx0 + mw - 1, my0, mx0 + mw, my0 + mh, t->accent[0], t->accent[1], t->accent[2], 0.5f, vp_w, vp_h);
+
+        const char *labels[VKW_CTX_COUNT] = {
+            "Font Bigger  +", "Font Smaller -", "Font Reset"
+        };
+        for (int i = 0; i < VKW_CTX_COUNT; i++) {
+            int iy = my0 + 2 + i * item_h;
+            if (i == vkw_ctx_hover) {
+                push_solid(mx0 + 1, iy, mx0 + mw - 1, iy + item_h,
+                           t->accent[0], t->accent[1], t->accent[2], 0.2f, vp_w, vp_h);
+            }
+            push_text(mx0 + 6, iy + (item_h - mch) / 2, labels[i],
+                      t->text[0], t->text[1], t->text[2], vp_w, vp_h, mcw, mch);
         }
     }
 }
@@ -2105,7 +2155,11 @@ static void pl_do_loop(const char *file)
 {
     if (!api || !api->fake_remote) return;
     char cmd[128];
-    _snprintf(cmd, sizeof(cmd), "loop %s", file);
+    /* fake_remote needs the .mp extension to match */
+    if (strstr(file, ".mp") || strstr(file, ".MP"))
+        _snprintf(cmd, sizeof(cmd), "loop %s", file);
+    else
+        _snprintf(cmd, sizeof(cmd), "loop %s.mp", file);
     cmd[sizeof(cmd) - 1] = '\0';
     api->fake_remote(cmd);
 }
@@ -6553,6 +6607,20 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             vrt_y = (float)my2 - vrt_drag_oy;
             return 0;
         }
+        /* Floating window context menu hover */
+        if (vkw_ctx_open) {
+            int mcw2 = 10, mch2 = 18;
+            int item_h2 = mch2 + 6;
+            int cmw2 = 14 * mcw2 + 12;
+            int cmh2 = VKW_CTX_COUNT * item_h2 + 4;
+            int cx2 = vkw_ctx_x, cy2 = vkw_ctx_y;
+            if (cx2 + cmw2 > (int)vk_sc_extent.width) cx2 = (int)vk_sc_extent.width - cmw2;
+            if (cy2 + cmh2 > (int)vk_sc_extent.height) cy2 = (int)vk_sc_extent.height - cmh2;
+            if (mx2 >= cx2 && mx2 < cx2 + cmw2 && my2 >= cy2 && my2 < cy2 + cmh2)
+                vkw_ctx_hover = (my2 - cy2 - 2) / item_h2;
+            else
+                vkw_ctx_hover = -1;
+        }
         /* Round timer context menu hover */
         if (vrt_ctx_open) {
             vrt_ctx_hover = vrt_ctx_hit(mx2, my2);
@@ -6578,6 +6646,33 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
     case WM_LBUTTONDOWN: {
         int mx = mouse_tx((short)LOWORD(lParam));
         int my = mouse_ty((short)HIWORD(lParam));
+        /* Floating window context menu click */
+        if (vkw_ctx_open) {
+            int mcw = 10, mch = 18;
+            int item_h = mch + 6;
+            int cmw = 14 * mcw + 12;
+            int cmh = VKW_CTX_COUNT * item_h + 4;
+            int cx0 = vkw_ctx_x, cy0 = vkw_ctx_y;
+            if (cx0 + cmw > (int)vk_sc_extent.width) cx0 = (int)vk_sc_extent.width - cmw;
+            if (cy0 + cmh > (int)vk_sc_extent.height) cy0 = (int)vk_sc_extent.height - cmh;
+            if (mx >= cx0 && mx < cx0 + cmw && my >= cy0 && my < cy0 + cmh) {
+                int ci = (my - cy0 - 2) / item_h;
+                if (ci >= 0 && ci < VKW_CTX_COUNT && vkw_ctx_wnd >= 0) {
+                    vkw_window_t *tw = &vkw_windows[vkw_ctx_wnd];
+                    if (ci == VKW_CTX_FONT_UP) {
+                        tw->font_scale += 0.15f;
+                        if (tw->font_scale > 3.0f) tw->font_scale = 3.0f;
+                    } else if (ci == VKW_CTX_FONT_DN) {
+                        tw->font_scale -= 0.15f;
+                        if (tw->font_scale < 0.5f) tw->font_scale = 0.5f;
+                    } else if (ci == VKW_CTX_FONT_RST) {
+                        tw->font_scale = 1.0f;
+                    }
+                }
+            }
+            vkw_ctx_open = 0;
+            return 0;
+        }
         /* Round timer context menu click */
         if (vrt_ctx_open) {
             int ci = vrt_ctx_hit(mx, my);
@@ -6830,6 +6925,24 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
     case WM_RBUTTONUP: {
         int rmx = mouse_tx((short)LOWORD(lParam));
         int rmy = mouse_ty((short)HIWORD(lParam));
+        /* Right-click on floating window → font size context menu */
+        {
+            int wnd = vkw_hit_test(rmx, rmy);
+            if (wnd >= 0) {
+                if (vkw_ctx_open && vkw_ctx_wnd == wnd) {
+                    vkw_ctx_open = 0;
+                } else {
+                    vkw_ctx_open = 1;
+                    vkw_ctx_wnd = wnd;
+                    vkw_ctx_x = rmx;
+                    vkw_ctx_y = rmy;
+                    vkw_ctx_hover = -1;
+                }
+                return 0;
+            }
+        }
+        /* Close window context menu if clicking elsewhere */
+        if (vkw_ctx_open) { vkw_ctx_open = 0; }
         /* Right-click on round timer → its own context menu */
         if (vrt_hit_circle(rmx, rmy)) {
             vrt_ctx_open = !vrt_ctx_open;

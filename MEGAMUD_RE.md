@@ -1035,6 +1035,11 @@ Each entry in the room database array:
 
 ## Loop Entry Struct (array at struct+0x2C60)
 
+**IMPORTANT:** Loop/path filenames always include the `.mp` extension. When calling
+`fake_remote("loop <name>")` or `mud.remote.loop("<name>")`, the `.mp` extension is
+REQUIRED or the lookup will fail. Example: `mud.remote.loop('mustfull.mp')` works,
+`mud.remote.loop('MUSTFULL')` does NOT.
+
 Each entry in the loop database array:
 
 | Offset | Size | Type | Description |

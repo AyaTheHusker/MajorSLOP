@@ -2247,6 +2247,9 @@ static void inject_server_data_impl(const char *data, int len)
 #define OFF_FR_ROOM_COUNT 0x2C18   /* int32: number of room entries */
 #define OFF_FR_ROOM_ARRAY 0x2C20   /* ptr: array of room entry pointers */
 #define OFF_FR_LOOP_DEST  0x5930   /* char[]: loop destination buffer */
+#define OFF_FR_ON_ENTRY   0x54B4   /* int32: 0=nothing, 1=resume loop, 2=auto-roam */
+#define OFF_FR_MODE       0x54BC   /* int32: 11=idle, 14=walking, 15=looping, 16=roaming */
+#define OFF_FR_STEPS_REM  0x54D8   /* int32: steps remaining in current path */
 #define OFF_FR_MMMAIN_HWND 0x0C   /* HWND: MMMAIN window handle in struct */
 #define MEGAMUD_CMD_STOPGO 0x0803  /* WM_COMMAND ID for stop/go toggle */
 
@@ -2341,6 +2344,11 @@ static int fake_remote_impl(const char *cmd)
 
             if (fm || dm) {
                 ((fn_vi)VA_STOP_PATH)(sb);
+                /* Fully clear old state before starting new loop */
+                *(int *)(sbp + OFF_FR_LOOPING) = 0;
+                *(int *)(sbp + OFF_FR_ON_ENTRY) = 0;
+                *(int *)(sbp + OFF_FR_PATHING) = 0;
+                *(int *)(sbp + OFF_FR_GO_FLAG) = 0;
                 ((fn_vpi)VA_PREP_LOOP)(sbp, (int)(sbp + OFF_FR_LOOP_DEST));
                 ((fn_vicpi)VA_LOAD_PATH)(sb, (char *)(sbp + OFF_FR_LOOP_DEST),
                                          (void *)entry, 0);
@@ -2394,10 +2402,11 @@ static int fake_remote_impl(const char *cmd)
 
             if (m1 || m2) {
                 ((fn_vi)VA_STOP_PATH)(sb);
-                /* Clear loop state so MegaMUD doesn't resume the old loop
-                 * after reaching the goto destination. Real @goto has this
-                 * bug too — LOOPING flag persists. We fix it here. */
+                /* Fully clear all loop/path state before goto */
                 *(int *)(sbp + OFF_FR_LOOPING) = 0;
+                *(int *)(sbp + OFF_FR_ON_ENTRY) = 0;  /* don't resume loop on arrival */
+                *(int *)(sbp + OFF_FR_PATHING) = 0;
+                *(int *)(sbp + OFF_FR_GO_FLAG) = 0;
                 void *dest = *(void **)(entry + 0x44);
                 int rv = ((fn_iippi)VA_START_PATH)(sb, dest, 0);
                 if (rv == 0) {
