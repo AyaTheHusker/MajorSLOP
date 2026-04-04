@@ -57,6 +57,7 @@ static mr_beat_t  mr_beat_snap;
 static CRITICAL_SECTION mr_beat_lock;
 static mr_meta_t  mr_meta;
 static CRITICAL_SECTION mr_meta_lock;
+static CRITICAL_SECTION mr_close_lock;
 
 static mr_entry_t   mr_playlist[MR_MAX_PLAYLIST];
 static int mr_pl_count = 0;

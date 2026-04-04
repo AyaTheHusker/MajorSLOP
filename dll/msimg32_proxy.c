@@ -1546,6 +1546,7 @@ static void rt_show_context_menu(HWND hwnd, int x, int y)
 }
 
 static WNDPROC orig_mmmain_proc = NULL;
+static WNDPROC orig_mmansi_proc = NULL;
 static volatile int slop_in_menu = 0;  /* set while our menu is open */
 
 static void slop_update_menu_state(void)
@@ -1554,6 +1555,16 @@ static void slop_update_menu_state(void)
     /* Update round timer toggle text */
     ModifyMenuA(slop_menu, IDM_SLOP_ROUNDTIMER, MF_BYCOMMAND | MF_STRING,
                 IDM_SLOP_ROUNDTIMER, rt_visible ? "Hide Round Timer" : "Show Round Timer");
+}
+
+static LRESULT CALLBACK slop_mmansi_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+{
+    /* Forward WM_KEYDOWN to plugins for hotkeys (F11 etc.) */
+    if (msg == WM_KEYDOWN) {
+        if (plugins_on_wndproc(hwnd, msg, wParam, lParam))
+            return 0;
+    }
+    return CallWindowProcA(orig_mmansi_proc, hwnd, msg, wParam, lParam);
 }
 
 static LRESULT CALLBACK slop_mmmain_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
@@ -1610,6 +1621,11 @@ static LRESULT CALLBACK slop_mmmain_proc(HWND hwnd, UINT msg, WPARAM wParam, LPA
     if (msg == WM_TIMER) {
         plugins_on_wndproc(hwnd, msg, wParam, lParam);
     }
+    /* Forward WM_KEYDOWN to plugins for hotkeys (e.g. F11) */
+    if (msg == WM_KEYDOWN) {
+        if (plugins_on_wndproc(hwnd, msg, wParam, lParam))
+            return 0;
+    }
     return CallWindowProcA(orig_mmmain_proc, hwnd, msg, wParam, lParam);
 }
 
@@ -1646,6 +1662,14 @@ static void inject_menu(HWND main_wnd)
     /* Subclass to catch our menu commands (before plugin load so callbacks work) */
     if (!orig_mmmain_proc) {
         orig_mmmain_proc = (WNDPROC)SetWindowLongA(main_wnd, GWL_WNDPROC, (LONG)slop_mmmain_proc);
+    }
+    /* Subclass MMANSI for keyboard hotkeys (F11 etc.) — keys go here, not MMMAIN */
+    {
+        HWND ansi = FindWindowExA(main_wnd, NULL, "MMANSI", NULL);
+        if (ansi && !orig_mmansi_proc) {
+            orig_mmansi_proc = (WNDPROC)SetWindowLongA(ansi, GWL_WNDPROC, (LONG)slop_mmansi_proc);
+            logmsg("[mudplugin] MMANSI subclassed for hotkeys\n");
+        }
     }
 
     slop_menu_owner = main_wnd;

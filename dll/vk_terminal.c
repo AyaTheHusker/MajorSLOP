@@ -628,10 +628,11 @@ static int ttf_loaded[MAX_TTF_FONTS] = {0};
 #define VKM_ITEM_CONSOLE 3
 #define VKM_ITEM_PATHS   4   /* Paths & Loops — opens VKW window */
 #define VKM_ITEM_RECENT  5   /* Recent > last 10 goto destinations */
-#define VKM_ITEM_EXTRAS  6   /* Settings > (Sound, Color, Viz) */
-#define VKM_ITEM_SEP2    7
-#define VKM_ITEM_CLOSE   8
-#define VKM_ROOT_COUNT   9
+#define VKM_ITEM_EXTRAS  6   /* Settings > (Sound, Color, HideMM) */
+#define VKM_ITEM_XTRA2   7   /* Extras > (Visualizations) */
+#define VKM_ITEM_SEP2    8
+#define VKM_ITEM_CLOSE   9
+#define VKM_ROOT_COUNT   10
 
 /* Submenu types */
 #define VKM_SUB_NONE     0
@@ -672,12 +673,20 @@ static int ttf_loaded[MAX_TTF_FONTS] = {0};
 #define VKM_EXT_COLOR    1   /* Color/Brightness */
 #define VKM_EXT_SEP1     2   /* separator */
 #define VKM_EXT_HIDEMM   3   /* Hide/Show MegaMUD */
-#define VKM_EXT_SEP2B    4   /* separator */
-#define VKM_EXT_BLADES   5   /* Pixel Blades */
-#define VKM_EXT_CBALLS   6   /* Cannon Balls */
-#define VKM_EXT_MATRIX   7   /* Matrix Rain */
-#define VKM_EXT_ASTEROIDS 8  /* Asteroids */
-#define VKM_EXT_COUNT    9
+#define VKM_EXT_COUNT    4
+
+/* Extras submenu items */
+#define VKM_SUB_XTRA2    8
+#define VKM_X2_VIZ       0   /* Visualizations > */
+#define VKM_X2_COUNT     1
+
+/* Visualizations 3rd-level submenu */
+#define VKM_SUB_VIZ      9
+#define VKM_VIZ_BLADES   0
+#define VKM_VIZ_CBALLS   1
+#define VKM_VIZ_MATRIX   2
+#define VKM_VIZ_ASTEROIDS 3
+#define VKM_VIZ_COUNT    4
 
 static int megamud_hidden = 0; /* 1 = MegaMUD windows hidden, VK-only mode */
 static int snd_wnd_idx = -1;  /* Sound Settings window index (forward decl) */
@@ -702,6 +711,11 @@ static int vkm_hover = -1;        /* hovered root item */
 static int vkm_sub = VKM_SUB_NONE;/* which submenu is expanded */
 static int vkm_sub_hover = -1;    /* hovered submenu item */
 static int vkm_mouse_x = 0, vkm_mouse_y = 0;
+static int vkm_hover_drill = -1;  /* sub item being hovered for drill-in */
+static DWORD vkm_hover_tick = 0;  /* when hover started on that item */
+static int vkm_hover_root = -1;   /* root item being hovered for sub-open */
+static DWORD vkm_hover_root_tick = 0;
+#define VKM_HOVER_DELAY_MS 500    /* ms to wait before auto-drilling into submenu */
 
 /* Recent GOTO destinations (rotating list, newest first) */
 #define VKM_GOTO_MAX 10
@@ -1227,19 +1241,30 @@ static void vkw_draw_one(vkw_window_t *w, int is_focused, int vp_w, int vp_h)
     push_solid(ix, iy, ix + iw, iy + ih,
                t->bg[0], t->bg[1], t->bg[2], op, vp_w, vp_h);
 
-    /* Title bar */
-    float tb_r = t->bg[0] + 0.06f, tb_g = t->bg[1] + 0.06f, tb_b = t->bg[2] + 0.06f;
-    if (is_focused) {
-        tb_r = t->bg[0] * 0.5f + t->accent[0] * 0.3f + 0.05f;
-        tb_g = t->bg[1] * 0.5f + t->accent[1] * 0.3f + 0.05f;
-        tb_b = t->bg[2] * 0.5f + t->accent[2] * 0.3f + 0.05f;
+    /* Title bar — glossy gradient style matching MUDRadio/Player Stats */
+    float acr = t->accent[0], acg = t->accent[1], acb = t->accent[2];
+    float bgr = t->bg[0], bgg = t->bg[1], bgb = t->bg[2];
+    float tb_r = acr * 0.25f + bgr * 0.5f;
+    float tb_g = acg * 0.25f + bgg * 0.5f;
+    float tb_b = acb * 0.25f + bgb * 0.5f;
+    if (!is_focused) {
+        tb_r = bgr + 0.06f; tb_g = bgg + 0.06f; tb_b = bgb + 0.06f;
     }
-    push_solid(ix, iy, ix + iw, iy + titlebar_h,
-               tb_r, tb_g, tb_b, op, vp_w, vp_h);
+    int tb_y0 = iy + 2, tb_y1 = iy + titlebar_h;
+    /* Title bar background */
+    push_solid(ix + 2, tb_y0, ix + iw - 2, tb_y1,
+               tb_r, tb_g, tb_b, 0.95f * op, vp_w, vp_h);
+    /* Gloss highlight (top half) */
+    push_solid(ix + 2, tb_y0, ix + iw - 2, tb_y0 + titlebar_h / 2,
+               1.0f, 1.0f, 1.0f, 0.06f * op, vp_w, vp_h);
+    /* Bottom edge accent line */
+    push_solid(ix + 2, tb_y1 - 1, ix + iw - 2, tb_y1,
+               acr, acg, acb, 0.5f * op, vp_w, vp_h);
 
-    /* Title text */
-    push_text(ix + VKW_PAD, iy + (titlebar_h - ch) / 2,
-              w->title, t->text[0], t->text[1], t->text[2],
+    /* Title text with drop shadow */
+    int ttx = ix + VKW_PAD, tty = tb_y0 + (titlebar_h - 2 - ch) / 2;
+    push_text(ttx + 1, tty + 1, w->title, 0.0f, 0.0f, 0.0f, vp_w, vp_h, cw, ch);
+    push_text(ttx, tty, w->title, t->text[0], t->text[1], t->text[2],
               vp_w, vp_h, cw, ch);
 
     /* Close button [X] */
@@ -3141,6 +3166,8 @@ static int vkm_sub_count(void)
     if (vkm_sub == VKM_SUB_FONT) return NUM_TTF_FONTS + 1; /* +1 for bitmap */
     if (vkm_sub == VKM_SUB_FX) return vk_experimental ? VKM_FX_COUNT : (VKM_FX_COUNT - 1);
     if (vkm_sub == VKM_SUB_EXTRAS) return VKM_EXT_COUNT;
+    if (vkm_sub == VKM_SUB_XTRA2) return VKM_X2_COUNT;
+    if (vkm_sub == VKM_SUB_VIZ) return VKM_VIZ_COUNT;
     return 0;
 }
 
@@ -3165,26 +3192,43 @@ static int vkm_hit_root(int mx, int my)
 static void vkm_get_sub_rect(int *out_sx, int *out_sy)
 {
     int parent;
-    if (vkm_sub == VKM_SUB_VISUAL || vkm_sub == VKM_SUB_THEME ||
-        vkm_sub == VKM_SUB_FONT || vkm_sub == VKM_SUB_FX)
+    int is_3rd_level = 0; /* 3rd-level submenus nest to the right of 2nd-level */
+
+    if (vkm_sub == VKM_SUB_VISUAL)
         parent = VKM_ITEM_VISUAL;
-    else if (vkm_sub == VKM_SUB_WIDGETS)
+    else if (vkm_sub == VKM_SUB_THEME || vkm_sub == VKM_SUB_FONT || vkm_sub == VKM_SUB_FX) {
+        parent = VKM_ITEM_VISUAL;
+        is_3rd_level = 1;
+    } else if (vkm_sub == VKM_SUB_WIDGETS)
         parent = VKM_ITEM_WIDGETS;
     else if (vkm_sub == VKM_SUB_RECENT)
         parent = VKM_ITEM_RECENT;
     else if (vkm_sub == VKM_SUB_EXTRAS)
         parent = VKM_ITEM_EXTRAS;
-    else
+    else if (vkm_sub == VKM_SUB_XTRA2)
+        parent = VKM_ITEM_XTRA2;
+    else if (vkm_sub == VKM_SUB_VIZ) {
+        parent = VKM_ITEM_XTRA2;
+        is_3rd_level = 1;
+    } else
         parent = VKM_ITEM_VISUAL;
+
     int parent_y, parent_h;
     vkm_get_root_item_rect(parent, &parent_y, &parent_h);
     int sx = vkm_x + VKM_ROOT_W - 1;
     int sy = parent_y;
+    if (is_3rd_level) sx += VKM_SUB_W - 1; /* offset further right */
     int sh = vkm_sub_height();
     /* Clamp to screen — must match draw code exactly */
     int vp_w = (int)vk_sc_extent.width, vp_h = (int)vk_sc_extent.height;
     if (sy + sh > vp_h) sy = vp_h - sh;
-    if (sx + VKM_SUB_W > vp_w) sx = vkm_x - VKM_SUB_W + 1;
+    if (sx + VKM_SUB_W > vp_w) {
+        if (is_3rd_level)
+            sx = vkm_x + VKM_ROOT_W - 1 - VKM_SUB_W + 1; /* flip 3rd-level to left of 2nd-level */
+        else
+            sx = vkm_x - VKM_SUB_W + 1; /* flip 2nd-level to left of root */
+        if (sx < 0) sx = 0;
+    }
     *out_sx = sx;
     *out_sy = sy;
 }
@@ -3355,26 +3399,42 @@ static void vrt_draw(int vp_w, int vp_h)
         }
     }
 
-    /* ---- Beveled torus background ---- */
-    /* Layer 1: outermost ring — bright edge highlight (top-left lit) */
-    vrt_push_arc(cx, cy, R * 0.88f, R * 0.95f, 0, 2.0f*(float)M_PI,
-                 t->bg[0]*1.8f+0.08f, t->bg[1]*1.8f+0.08f, t->bg[2]*1.8f+0.08f,
-                 t->bg[0]*0.5f, t->bg[1]*0.5f, t->bg[2]*0.5f,
-                 0.7f, 96, vp_w, vp_h);
-    /* Layer 2: main ring body */
-    vrt_push_arc(cx, cy, R * 0.60f, R * 0.89f, 0, 2.0f*(float)M_PI,
-                 t->bg[0]*0.7f+0.04f, t->bg[1]*0.7f+0.04f, t->bg[2]*0.7f+0.04f,
-                 t->bg[0]*0.7f+0.04f, t->bg[1]*0.7f+0.04f, t->bg[2]*0.7f+0.04f,
-                 0.92f, 96, vp_w, vp_h);
-    /* Layer 3: inner ring shadow (gives inset depth) */
+    /* ---- Glossy acrylic torus background ---- */
+    float acr = t->accent[0], acg = t->accent[1], acb = t->accent[2];
+    float rbg0 = t->bg[0], rbg1 = t->bg[1], rbg2 = t->bg[2];
+    /* Layer 1: outermost rim — bright highlight sweeping top-left to dark bottom-right */
+    vrt_push_arc(cx, cy, R * 0.90f, R * 0.96f, 0, 2.0f*(float)M_PI,
+                 rbg0*1.6f+acr*0.3f+0.10f, rbg1*1.6f+acg*0.3f+0.10f, rbg2*1.6f+acb*0.3f+0.10f,
+                 rbg0*0.4f, rbg1*0.4f, rbg2*0.4f,
+                 0.8f, 96, vp_w, vp_h);
+    /* Layer 2: main ring body — accent-tinted like title bars */
+    {
+        float mr = acr * 0.20f + rbg0 * 0.55f;
+        float mg = acg * 0.20f + rbg1 * 0.55f;
+        float mb = acb * 0.20f + rbg2 * 0.55f;
+        vrt_push_arc(cx, cy, R * 0.60f, R * 0.91f, 0, 2.0f*(float)M_PI,
+                     mr, mg, mb, mr, mg, mb,
+                     0.94f, 96, vp_w, vp_h);
+    }
+    /* Layer 3: gloss highlight — top half of ring gets a white sheen */
+    vrt_push_arc(cx, cy, R * 0.60f, R * 0.91f,
+                 (float)M_PI * 0.15f, (float)M_PI * 0.85f,
+                 1.0f, 1.0f, 1.0f,
+                 1.0f, 1.0f, 1.0f,
+                 0.07f, 48, vp_w, vp_h);
+    /* Layer 4: inner ring shadow (inset depth) */
     vrt_push_arc(cx, cy, R * 0.56f, R * 0.63f, 0, 2.0f*(float)M_PI,
-                 t->bg[0]*0.3f, t->bg[1]*0.3f, t->bg[2]*0.3f,
-                 t->bg[0]*1.2f+0.06f, t->bg[1]*1.2f+0.06f, t->bg[2]*1.2f+0.06f,
-                 0.5f, 96, vp_w, vp_h);
+                 rbg0*0.25f, rbg1*0.25f, rbg2*0.25f,
+                 rbg0*1.0f+acr*0.15f+0.04f, rbg1*1.0f+acg*0.15f+0.04f, rbg2*1.0f+acb*0.15f+0.04f,
+                 0.6f, 96, vp_w, vp_h);
+    /* Layer 5: accent edge line on outer rim */
+    vrt_push_arc(cx, cy, R * 0.89f, R * 0.91f, 0, 2.0f*(float)M_PI,
+                 acr, acg, acb, acr*0.5f, acg*0.5f, acb*0.5f,
+                 0.45f, 96, vp_w, vp_h);
     /* Center fill — dark glass */
     vrt_push_circle(cx, cy, R * 0.58f,
-                    t->bg[0]*0.35f, t->bg[1]*0.35f, t->bg[2]*0.35f,
-                    0.92f, 64, vp_w, vp_h);
+                    rbg0*0.30f, rbg1*0.30f, rbg2*0.30f,
+                    0.94f, 64, vp_w, vp_h);
 
     /* ---- Tick marks (thin lines) ---- */
     {
@@ -4371,7 +4431,7 @@ static void vkm_draw(int vp_w, int vp_h)
     const char *root_labels[VKM_ROOT_COUNT] = {
         "Visual  \x10", "Widgets  \x10", "",
         "Console", "Paths & Loops", "Recent  \x10",
-        "Settings  \x10",
+        "Settings  \x10", "Extras  \x10",
         "", "Close  (F11)"
     };
 
@@ -4397,7 +4457,8 @@ static void vkm_draw(int vp_w, int vp_h)
         if ((i == VKM_ITEM_VISUAL && (vkm_sub == VKM_SUB_VISUAL || vkm_sub == VKM_SUB_THEME || vkm_sub == VKM_SUB_FONT || vkm_sub == VKM_SUB_FX)) ||
             (i == VKM_ITEM_WIDGETS && vkm_sub == VKM_SUB_WIDGETS) ||
             (i == VKM_ITEM_RECENT && vkm_sub == VKM_SUB_RECENT) ||
-            (i == VKM_ITEM_EXTRAS && vkm_sub == VKM_SUB_EXTRAS)) {
+            (i == VKM_ITEM_EXTRAS && vkm_sub == VKM_SUB_EXTRAS) ||
+            (i == VKM_ITEM_XTRA2 && (vkm_sub == VKM_SUB_XTRA2 || vkm_sub == VKM_SUB_VIZ))) {
             tr = t->accent[0]; tg = t->accent[1]; tb = t->accent[2];
         }
         push_text(vkm_x + VKM_PAD, iy + (ih - ch) / 2,
@@ -4487,18 +4548,22 @@ static void vkm_draw(int vp_w, int vp_h)
                 } else if (i == VKM_EXT_HIDEMM) {
                     label = megamud_hidden ? "Show MegaMUD" : "Hide MegaMUD";
                     is_active = megamud_hidden;
-                } else if (i == VKM_EXT_SEP2B) {
-                    label = "\xC4\xC4\xC4 Visualizations \xC4\xC4\xC4";
-                } else if (i == VKM_EXT_BLADES) {
+                }
+            } else if (vkm_sub == VKM_SUB_XTRA2) {
+                if (i == VKM_X2_VIZ) {
+                    label = "Visualizations  \x10"; has_arrow = 1;
+                }
+            } else if (vkm_sub == VKM_SUB_VIZ) {
+                if (i == VKM_VIZ_BLADES) {
                     label = "Pixel Blades";
                     is_active = (viz_mode == VIZ_BLADES);
-                } else if (i == VKM_EXT_CBALLS) {
+                } else if (i == VKM_VIZ_CBALLS) {
                     label = "Cannon Balls";
                     is_active = (viz_mode == VIZ_CANNONBALLS);
-                } else if (i == VKM_EXT_MATRIX) {
+                } else if (i == VKM_VIZ_MATRIX) {
                     label = "Matrix Rain";
                     is_active = (viz_mode == VIZ_MATRIX);
-                } else if (i == VKM_EXT_ASTEROIDS) {
+                } else if (i == VKM_VIZ_ASTEROIDS) {
                     label = "Asteroids";
                     is_active = (viz_mode == VIZ_ASTEROIDS);
                 }
@@ -7197,14 +7262,64 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             int sh = vkm_hit_sub(mx2, my2);
             if (rh >= 0) {
                 vkm_hover = rh;
-                if (rh == VKM_ITEM_VISUAL) vkm_sub = VKM_SUB_VISUAL;
-                else if (rh == VKM_ITEM_WIDGETS) vkm_sub = VKM_SUB_WIDGETS;
-                else if (rh == VKM_ITEM_RECENT) vkm_sub = VKM_SUB_RECENT;
-                else if (rh == VKM_ITEM_EXTRAS) vkm_sub = VKM_SUB_EXTRAS;
-                else vkm_sub = VKM_SUB_NONE;
-                vkm_sub_hover = -1;
+                /* Determine target sub for this root item */
+                int target_sub = VKM_SUB_NONE;
+                if (rh == VKM_ITEM_VISUAL) target_sub = VKM_SUB_VISUAL;
+                else if (rh == VKM_ITEM_WIDGETS) target_sub = VKM_SUB_WIDGETS;
+                else if (rh == VKM_ITEM_RECENT) target_sub = VKM_SUB_RECENT;
+                else if (rh == VKM_ITEM_EXTRAS) target_sub = VKM_SUB_EXTRAS;
+                else if (rh == VKM_ITEM_XTRA2) target_sub = VKM_SUB_XTRA2;
+
+                if (target_sub == VKM_SUB_NONE) {
+                    /* Non-submenu item: close sub immediately */
+                    vkm_sub = VKM_SUB_NONE;
+                    vkm_hover_root = -1;
+                } else if (vkm_sub == target_sub) {
+                    /* Already on this sub, nothing to do */
+                    vkm_hover_root = rh;
+                } else {
+                    /* Delayed hover: wait before switching submenu */
+                    if (vkm_hover_root != rh) {
+                        vkm_hover_root = rh;
+                        vkm_hover_root_tick = GetTickCount();
+                    } else if ((GetTickCount() - vkm_hover_root_tick) >= VKM_HOVER_DELAY_MS) {
+                        vkm_sub = target_sub;
+                        vkm_sub_hover = -1;
+                    }
+                }
+            } else {
+                vkm_hover_root = -1;
             }
-            if (sh >= 0) vkm_sub_hover = sh;
+            if (sh >= 0) {
+                vkm_sub_hover = sh;
+                /* Delayed hover-to-open: track which arrow item is hovered, drill after delay */
+                int is_drill_item = 0;
+                if (vkm_sub == VKM_SUB_VISUAL && (sh == VKM_VIS_THEME || sh == VKM_VIS_FONT || sh == VKM_VIS_FX))
+                    is_drill_item = 1;
+                if (vkm_sub == VKM_SUB_XTRA2 && sh == VKM_X2_VIZ)
+                    is_drill_item = 1;
+
+                if (is_drill_item) {
+                    if (vkm_hover_drill != sh) {
+                        vkm_hover_drill = sh;
+                        vkm_hover_tick = GetTickCount();
+                    } else if ((GetTickCount() - vkm_hover_tick) >= VKM_HOVER_DELAY_MS) {
+                        /* Sustained hover — drill in */
+                        if (vkm_sub == VKM_SUB_VISUAL) {
+                            if (sh == VKM_VIS_THEME) vkm_sub = VKM_SUB_THEME;
+                            else if (sh == VKM_VIS_FONT) vkm_sub = VKM_SUB_FONT;
+                            else if (sh == VKM_VIS_FX) vkm_sub = VKM_SUB_FX;
+                        } else if (vkm_sub == VKM_SUB_XTRA2) {
+                            if (sh == VKM_X2_VIZ) vkm_sub = VKM_SUB_VIZ;
+                        }
+                        vkm_hover_drill = -1;
+                    }
+                } else {
+                    vkm_hover_drill = -1;
+                }
+            } else {
+                vkm_hover_drill = -1;
+            }
         }
         return 0;
     }
@@ -7519,20 +7634,36 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                         SetFocus(vkt_hwnd);
                     } else {
                         ShowWindow(mmmain_hwnd, SW_SHOW);
+                        RedrawWindow(mmmain_hwnd, NULL, NULL,
+                                     RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW | RDW_ERASE | RDW_FRAME);
                     }
                 }
                 if (api) api->log("[vk_terminal] MegaMUD %s\n",
                                   megamud_hidden ? "HIDDEN" : "SHOWN");
-            } else if (si == VKM_EXT_BLADES) {
+            }
+            vkm_open = 0;
+            vkm_sub = VKM_SUB_NONE;
+            return 0;
+        }
+
+        /* Extras > submenu click — opens Visualizations 3rd-level */
+        if (si >= 0 && vkm_sub == VKM_SUB_XTRA2) {
+            if (si == VKM_X2_VIZ) { vkm_sub = VKM_SUB_VIZ; vkm_sub_hover = -1; }
+            return 0;
+        }
+
+        /* Visualizations submenu click */
+        if (si >= 0 && vkm_sub == VKM_SUB_VIZ) {
+            if (si == VKM_VIZ_BLADES) {
                 viz_mode = (viz_mode == VIZ_BLADES) ? VIZ_NONE : VIZ_BLADES;
                 if (viz_mode == VIZ_BLADES) viz_init();
-            } else if (si == VKM_EXT_CBALLS) {
+            } else if (si == VKM_VIZ_CBALLS) {
                 viz_mode = (viz_mode == VIZ_CANNONBALLS) ? VIZ_NONE : VIZ_CANNONBALLS;
                 if (viz_mode == VIZ_CANNONBALLS) viz_init();
-            } else if (si == VKM_EXT_MATRIX) {
+            } else if (si == VKM_VIZ_MATRIX) {
                 viz_mode = (viz_mode == VIZ_MATRIX) ? VIZ_NONE : VIZ_MATRIX;
                 if (viz_mode == VIZ_MATRIX) viz_init();
-            } else if (si == VKM_EXT_ASTEROIDS) {
+            } else if (si == VKM_VIZ_ASTEROIDS) {
                 viz_mode = (viz_mode == VIZ_ASTEROIDS) ? VIZ_NONE : VIZ_ASTEROIDS;
                 if (viz_mode == VIZ_ASTEROIDS) viz_init();
             }
@@ -7563,7 +7694,15 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             vkt_hide();
             return 0;
         }
-        if (ri == VKM_ITEM_VISUAL || ri == VKM_ITEM_WIDGETS || ri == VKM_ITEM_RECENT || ri == VKM_ITEM_EXTRAS) {
+        if (ri == VKM_ITEM_VISUAL || ri == VKM_ITEM_WIDGETS || ri == VKM_ITEM_RECENT || ri == VKM_ITEM_EXTRAS || ri == VKM_ITEM_XTRA2) {
+            /* Click instantly opens submenu (bypass hover delay) */
+            if (ri == VKM_ITEM_VISUAL) vkm_sub = VKM_SUB_VISUAL;
+            else if (ri == VKM_ITEM_WIDGETS) vkm_sub = VKM_SUB_WIDGETS;
+            else if (ri == VKM_ITEM_RECENT) vkm_sub = VKM_SUB_RECENT;
+            else if (ri == VKM_ITEM_EXTRAS) vkm_sub = VKM_SUB_EXTRAS;
+            else if (ri == VKM_ITEM_XTRA2) vkm_sub = VKM_SUB_XTRA2;
+            vkm_sub_hover = -1;
+            vkm_hover_root = ri;
             return 0;
         }
 
@@ -7723,8 +7862,15 @@ static DWORD WINAPI vkt_thread(LPVOID param)
                 if (vk_surface) { vkDestroySurfaceKHR(vk_inst, vk_surface, NULL); vk_surface = VK_NULL_HANDLE; }
                 DestroyWindow(vkt_hwnd);
                 vkt_hwnd = NULL;
-                /* Return focus to MegaMUD */
+                /* Restore and focus MegaMUD */
                 if (mmmain_hwnd) {
+                    if (megamud_hidden) {
+                        ShowWindow(mmmain_hwnd, SW_SHOW);
+                        megamud_hidden = 0;
+                        /* Force full redraw of MegaMUD and all children (toolbar, icons) */
+                        RedrawWindow(mmmain_hwnd, NULL, NULL,
+                                     RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW | RDW_ERASE | RDW_FRAME);
+                    }
                     SetForegroundWindow(mmmain_hwnd);
                     if (mmansi_hwnd) SetFocus(mmansi_hwnd);
                 }
@@ -7798,6 +7944,20 @@ static DWORD WINAPI vkt_thread(LPVOID param)
                 continue;
             }
 
+            /* Close MegaMUD owned popup windows (Conversations etc.) to prevent focus stealing */
+            if (mmmain_hwnd) {
+                HWND popup = GetWindow(GetDesktopWindow(), GW_CHILD);
+                while (popup) {
+                    HWND next = GetWindow(popup, GW_HWNDNEXT);
+                    if (GetWindow(popup, GW_OWNER) == mmmain_hwnd && IsWindowVisible(popup)) {
+                        SendMessageA(popup, WM_CLOSE, 0, 0);
+                    }
+                    popup = next;
+                }
+                /* Hide MegaMUD main window */
+                ShowWindow(mmmain_hwnd, SW_HIDE);
+                megamud_hidden = 1;
+            }
             ShowWindow(vkt_hwnd, SW_SHOW);
             SetForegroundWindow(vkt_hwnd);
             SetFocus(vkt_hwnd);
@@ -8669,12 +8829,24 @@ static void clr_draw(int vp_w, int vp_h) {
     push_solid((int)(x0 + pw - 1), (int)y0, (int)(x0 + pw), (int)(y0 + clr_h),
                t->accent[0], t->accent[1], t->accent[2], 0.6f, vp_w, vp_h);
 
-    /* Titlebar */
-    push_solid((int)x0, (int)y0, (int)(x0 + pw), (int)(y0 + titlebar_h),
-               t->accent[0] * 0.3f, t->accent[1] * 0.3f, t->accent[2] * 0.3f,
-               0.8f, vp_w, vp_h);
+    /* Titlebar — glossy gradient */
+    {
+        float acr = t->accent[0], acg = t->accent[1], acb = t->accent[2];
+        float tbr = acr * 0.25f + t->bg[0] * 0.5f;
+        float tbg = acg * 0.25f + t->bg[1] * 0.5f;
+        float tbb = acb * 0.25f + t->bg[2] * 0.5f;
+        int ty0 = (int)y0 + 2, ty1 = (int)y0 + titlebar_h;
+        push_solid((int)x0 + 2, ty0, (int)(x0 + pw) - 2, ty1,
+                   tbr, tbg, tbb, 0.95f, vp_w, vp_h);
+        push_solid((int)x0 + 2, ty0, (int)(x0 + pw) - 2, ty0 + titlebar_h / 2,
+                   1.0f, 1.0f, 1.0f, 0.06f, vp_w, vp_h);
+        push_solid((int)x0 + 2, ty1 - 1, (int)(x0 + pw) - 2, ty1,
+                   acr, acg, acb, 0.5f, vp_w, vp_h);
+    }
+    push_text((int)(x0 + 6) + 1, (int)(y0 + 4) + 1, "Color / Brightness",
+              0.0f, 0.0f, 0.0f, vp_w, vp_h, cw, ch);
     push_text((int)(x0 + 6), (int)(y0 + 4), "Color / Brightness",
-              t->accent[0], t->accent[1], t->accent[2], vp_w, vp_h, cw, ch);
+              t->text[0], t->text[1], t->text[2], vp_w, vp_h, cw, ch);
     /* Close X */
     push_text((int)(x0 + pw - 16), (int)(y0 + 4), "X",
               t->text[0] * 0.6f, t->text[1] * 0.6f, t->text[2] * 0.6f, vp_w, vp_h, cw, ch);

@@ -309,6 +309,11 @@ static void mr_do_search(const char *query) {
     else mr_searching = 0;
 }
 
+/* ---- FAAD2 AAC decoder ---- */
+#define NEAACDECAPI   /* strip dllexport — static link, don't export AAC symbols */
+#include "neaacdec.h"
+#undef NEAACDECAPI
+
 /* ---- miniaudio-based audio output + MP3 decoding ---- */
 #define MA_NO_ENCODING
 #define MA_NO_GENERATION
@@ -455,9 +460,279 @@ static int mr_open_audio(void) {
     return 1;
 }
 
+/* ==== AAC (ADTS) custom decoding backend for miniaudio via FAAD2 ==== */
+
+#define AAC_INBUF_SZ  (8192 * 4)   /* read-ahead buffer for ADTS frames */
+#define AAC_PCMBUF_SZ (4096 * 2)   /* decoded PCM float buffer (stereo frames) */
+
+typedef struct {
+    ma_data_source_base ds_base;   /* MUST be first — miniaudio casts to this */
+    /* Stream I/O callbacks (from miniaudio) */
+    ma_read_proc  onRead;
+    ma_seek_proc  onSeek;
+    ma_tell_proc  onTell;
+    void         *pReadSeekTellUserData;
+    /* FAAD2 state */
+    NeAACDecHandle hDec;
+    unsigned long  aac_sr;
+    unsigned char  aac_ch;
+    int            inited;
+    /* ADTS raw byte buffer */
+    unsigned char  inbuf[AAC_INBUF_SZ];
+    int            inbuf_fill;       /* bytes available */
+    /* Decoded PCM output ring */
+    float          pcmbuf[AAC_PCMBUF_SZ];
+    int            pcm_frames;       /* total frames in pcmbuf */
+    int            pcm_pos;          /* read position in frames */
+} mr_aac_dec_t;
+
+/* Find ADTS sync word (0xFFF) in buffer, return offset or -1 */
+static int mr_aac_find_sync(const unsigned char *buf, int len) {
+    for (int i = 0; i < len - 1; i++) {
+        if (buf[i] == 0xFF && (buf[i+1] & 0xF0) == 0xF0) return i;
+    }
+    return -1;
+}
+
+/* Get ADTS frame length from header (13 bits across bytes 3-5) */
+static int mr_aac_frame_len(const unsigned char *hdr) {
+    return ((int)(hdr[3] & 0x03) << 11) | ((int)hdr[4] << 3) | ((int)(hdr[5] >> 5) & 0x07);
+}
+
+/* Pull more raw bytes from the stream into inbuf */
+static int mr_aac_fill_inbuf(mr_aac_dec_t *d) {
+    if (d->inbuf_fill >= AAC_INBUF_SZ) return d->inbuf_fill;
+    int want = AAC_INBUF_SZ - d->inbuf_fill;
+    size_t got = 0;
+    ma_result rc = d->onRead(d->pReadSeekTellUserData, d->inbuf + d->inbuf_fill, want, &got);
+    if (got > 0) d->inbuf_fill += (int)got;
+    return d->inbuf_fill;
+}
+
+/* Shift consumed bytes out of inbuf */
+static void mr_aac_consume(mr_aac_dec_t *d, int bytes) {
+    if (bytes <= 0) return;
+    if (bytes >= d->inbuf_fill) { d->inbuf_fill = 0; return; }
+    memmove(d->inbuf, d->inbuf + bytes, d->inbuf_fill - bytes);
+    d->inbuf_fill -= bytes;
+}
+
+/* Decode one ADTS frame, put float32 stereo PCM into pcmbuf. Returns frames decoded. */
+static int mr_aac_decode_frame(mr_aac_dec_t *d) {
+    /* Ensure we have enough data */
+    mr_aac_fill_inbuf(d);
+    if (d->inbuf_fill < 7) return 0; /* need at least ADTS header */
+
+    /* Find sync */
+    int sync = mr_aac_find_sync(d->inbuf, d->inbuf_fill);
+    if (sync < 0) { d->inbuf_fill = 0; return 0; }
+    if (sync > 0) mr_aac_consume(d, sync);
+    if (d->inbuf_fill < 7) return 0;
+
+    int flen = mr_aac_frame_len(d->inbuf);
+    if (flen < 7 || flen > AAC_INBUF_SZ) { mr_aac_consume(d, 1); return 0; }
+    if (d->inbuf_fill < flen) {
+        mr_aac_fill_inbuf(d);
+        if (d->inbuf_fill < flen) return 0; /* not enough data yet */
+    }
+
+    /* Init FAAD2 on first valid frame */
+    if (!d->inited) {
+        long rc = NeAACDecInit(d->hDec, d->inbuf, d->inbuf_fill, &d->aac_sr, &d->aac_ch);
+        if (rc < 0) { mr_aac_consume(d, 1); return 0; }
+        /* NeAACDecInit returns bytes consumed for init */
+        d->inited = 1;
+        /* Don't consume here — the frame is still valid, decode it */
+    }
+
+    NeAACDecFrameInfo info;
+    void *samples = NeAACDecDecode(d->hDec, &info, d->inbuf, flen);
+    mr_aac_consume(d, (info.bytesconsumed > 0) ? (int)info.bytesconsumed : flen);
+
+    if (info.error || !samples || info.samples == 0) return 0;
+
+    /* Convert to float32 stereo into pcmbuf */
+    int out_frames = info.samples / info.channels;
+    if (out_frames > AAC_PCMBUF_SZ / 2) out_frames = AAC_PCMBUF_SZ / 2;
+    float *src = (float *)samples;
+
+    if (info.channels == 1) {
+        /* Mono → stereo */
+        for (int i = 0; i < out_frames; i++) {
+            d->pcmbuf[i*2]   = src[i];
+            d->pcmbuf[i*2+1] = src[i];
+        }
+    } else if (info.channels == 2) {
+        memcpy(d->pcmbuf, src, out_frames * 2 * sizeof(float));
+    } else {
+        /* Downmix to stereo: just take first two channels */
+        for (int i = 0; i < out_frames; i++) {
+            d->pcmbuf[i*2]   = src[i * info.channels];
+            d->pcmbuf[i*2+1] = src[i * info.channels + 1];
+        }
+    }
+    d->pcm_frames = out_frames;
+    d->pcm_pos = 0;
+    return out_frames;
+}
+
+/* ---- ma_data_source vtable for AAC ---- */
+
+static ma_result mr_aac_ds_read(ma_data_source *pDS, void *pFramesOut, ma_uint64 frameCount, ma_uint64 *pFramesRead) {
+    mr_aac_dec_t *d = (mr_aac_dec_t *)pDS;
+    float *out = (float *)pFramesOut;
+    ma_uint64 total = 0;
+
+    while (total < frameCount) {
+        /* Drain pcmbuf first */
+        int avail = d->pcm_frames - d->pcm_pos;
+        if (avail > 0) {
+            int want = (int)(frameCount - total);
+            if (want > avail) want = avail;
+            memcpy(out + total * 2, d->pcmbuf + d->pcm_pos * 2, want * 2 * sizeof(float));
+            d->pcm_pos += want;
+            total += want;
+        } else {
+            /* Decode next frame */
+            if (mr_aac_decode_frame(d) <= 0) break;
+        }
+    }
+    *pFramesRead = total;
+    return (total > 0) ? MA_SUCCESS : MA_AT_END;
+}
+
+static ma_result mr_aac_ds_seek(ma_data_source *pDS, ma_uint64 frameIndex) {
+    (void)pDS; (void)frameIndex;
+    return MA_SUCCESS; /* streams can't seek */
+}
+
+static ma_result mr_aac_ds_get_format(ma_data_source *pDS, ma_format *pFormat, ma_uint32 *pChannels, ma_uint32 *pSampleRate, ma_channel *pChannelMap, size_t channelMapCap) {
+    mr_aac_dec_t *d = (mr_aac_dec_t *)pDS;
+    if (pFormat) *pFormat = ma_format_f32;
+    if (pChannels) *pChannels = 2; /* always stereo output */
+    if (pSampleRate) *pSampleRate = d->aac_sr ? d->aac_sr : 44100;
+    if (pChannelMap) {
+        if (channelMapCap >= 2) {
+            pChannelMap[0] = MA_CHANNEL_FRONT_LEFT;
+            pChannelMap[1] = MA_CHANNEL_FRONT_RIGHT;
+        }
+    }
+    return MA_SUCCESS;
+}
+
+static ma_result mr_aac_ds_get_cursor(ma_data_source *pDS, ma_uint64 *pCursor) {
+    (void)pDS; *pCursor = 0; return MA_SUCCESS;
+}
+
+static ma_result mr_aac_ds_get_length(ma_data_source *pDS, ma_uint64 *pLength) {
+    (void)pDS; *pLength = 0; return MA_SUCCESS; /* unknown length for streams */
+}
+
+static ma_data_source_vtable mr_aac_ds_vtable = {
+    mr_aac_ds_read,
+    mr_aac_ds_seek,
+    mr_aac_ds_get_format,
+    mr_aac_ds_get_cursor,
+    mr_aac_ds_get_length,
+    NULL, /* onSetLooping */
+    0     /* flags */
+};
+
+/* ---- miniaudio decoding backend vtable ---- */
+
+static ma_result mr_aac_backend_init(
+    void *pUserData,
+    ma_read_proc onRead, ma_seek_proc onSeek, ma_tell_proc onTell,
+    void *pReadSeekTellUserData,
+    const ma_decoding_backend_config *pConfig,
+    const ma_allocation_callbacks *pAllocationCallbacks,
+    ma_data_source **ppBackend)
+{
+    (void)pUserData; (void)pConfig;
+    mr_aac_dec_t *d = (mr_aac_dec_t *)ma_malloc(sizeof(mr_aac_dec_t), pAllocationCallbacks);
+    if (!d) return MA_OUT_OF_MEMORY;
+    memset(d, 0, sizeof(*d));
+
+    /* Init data source base */
+    ma_data_source_config ds_cfg = ma_data_source_config_init();
+    ds_cfg.vtable = &mr_aac_ds_vtable;
+    ma_result rc = ma_data_source_init(&ds_cfg, &d->ds_base);
+    if (rc != MA_SUCCESS) { ma_free(d, pAllocationCallbacks); return rc; }
+
+    d->onRead = onRead;
+    d->onSeek = onSeek;
+    d->onTell = onTell;
+    d->pReadSeekTellUserData = pReadSeekTellUserData;
+
+    /* Open FAAD2 decoder */
+    d->hDec = NeAACDecOpen();
+    if (!d->hDec) { ma_free(d, pAllocationCallbacks); return MA_ERROR; }
+
+    /* Configure for float output */
+    NeAACDecConfigurationPtr cfg = NeAACDecGetCurrentConfiguration(d->hDec);
+    cfg->outputFormat = FAAD_FMT_FLOAT;
+    cfg->defSampleRate = 44100;
+    cfg->defObjectType = LC;
+    cfg->downMatrix = 0;
+    NeAACDecSetConfiguration(d->hDec, cfg);
+
+    /* Read initial data and verify it's ADTS */
+    mr_aac_fill_inbuf(d);
+    int sync = mr_aac_find_sync(d->inbuf, d->inbuf_fill);
+    if (sync < 0) {
+        /* Not AAC — let miniaudio try other decoders */
+        NeAACDecClose(d->hDec);
+        ma_data_source_uninit(&d->ds_base);
+        ma_free(d, pAllocationCallbacks);
+        return MA_INVALID_FILE;
+    }
+    if (sync > 0) mr_aac_consume(d, sync);
+
+    /* Init FAAD2 with the ADTS header */
+    long init_rc = NeAACDecInit(d->hDec, d->inbuf, d->inbuf_fill, &d->aac_sr, &d->aac_ch);
+    if (init_rc < 0) {
+        FILE *ef = fopen("C:\\MegaMUD\\radio_error.txt", "a");
+        if (ef) { fprintf(ef, "AAC: NeAACDecInit failed rc=%ld\n", init_rc); fclose(ef); }
+        NeAACDecClose(d->hDec);
+        ma_data_source_uninit(&d->ds_base);
+        ma_free(d, pAllocationCallbacks);
+        return MA_INVALID_FILE;
+    }
+    d->inited = 1;
+
+    {
+        FILE *ef = fopen("C:\\MegaMUD\\radio_error.txt", "a");
+        if (ef) { fprintf(ef, "AAC: init OK sr=%lu ch=%u\n", d->aac_sr, d->aac_ch); fclose(ef); }
+    }
+
+    *ppBackend = (ma_data_source *)d;
+    return MA_SUCCESS;
+}
+
+static void mr_aac_backend_uninit(void *pUserData, ma_data_source *pBackend, const ma_allocation_callbacks *pAllocationCallbacks) {
+    (void)pUserData;
+    mr_aac_dec_t *d = (mr_aac_dec_t *)pBackend;
+    if (d->hDec) NeAACDecClose(d->hDec);
+    ma_data_source_uninit(&d->ds_base);
+    ma_free(d, pAllocationCallbacks);
+}
+
+static ma_decoding_backend_vtable mr_aac_backend_vtable = {
+    mr_aac_backend_init,
+    NULL, /* onInitFile */
+    NULL, /* onInitFileW */
+    NULL, /* onInitMemory */
+    mr_aac_backend_uninit
+};
+
+/* ==== End AAC backend ==== */
+
 static int mr_open_decoder(void) {
+    ma_decoding_backend_vtable *custom_backends[] = { &mr_aac_backend_vtable };
     ma_decoder_config dec_cfg = ma_decoder_config_init(ma_format_f32, 2, MR_SAMPLE_RATE);
-    dec_cfg.encodingFormat = ma_encoding_format_mp3;
+    dec_cfg.ppCustomBackendVTables = custom_backends;
+    dec_cfg.customBackendCount = 1;
+    /* Let miniaudio try built-in decoders first (mp3/flac/wav/vorbis), then our AAC backend */
     ma_result rc = ma_decoder_init(mr_ma_read_cb, mr_ma_seek_cb, NULL, &dec_cfg, &mr_ma_dec);
     if (rc != MA_SUCCESS) {
         FILE *f = fopen("C:\\MegaMUD\\radio_error.txt", "a");
@@ -472,6 +747,7 @@ static int mr_open_decoder(void) {
 }
 
 static void mr_close_audio(void) {
+    EnterCriticalSection(&mr_close_lock);
     FILE *f = fopen("C:\\MegaMUD\\radio_error.txt", "a");
     if (f) fprintf(f, "close_audio: dec_ready=%d dev_started=%d dec_inited=%d\n",
                    mr_ma_dec_ready, mr_ma_dev_started, mr_dec_inited);
@@ -498,6 +774,7 @@ static void mr_close_audio(void) {
     }
 
     if (f) { fprintf(f, "close_audio: OK\n"); fclose(f); }
+    LeaveCriticalSection(&mr_close_lock);
 }
 
 /* ---- Audio Thread ---- */
@@ -580,6 +857,16 @@ static DWORD WINAPI mr_net_thread_fn(LPVOID arg) {
                     mi += 12;
                     while (*mi == ' ') mi++;
                     icy_metaint = atoi(mi);
+                }
+                /* Log content-type for format debugging */
+                const char *ct = strstr(hdrs_lower, "content-type:");
+                if (ct && mr_dbg) {
+                    ct += 13;
+                    while (*ct == ' ') ct++;
+                    char ct_val[128]; int j = 0;
+                    while (ct[j] && ct[j] != '\r' && ct[j] != '\n' && j < 127) { ct_val[j] = ct[j]; j++; }
+                    ct_val[j] = 0;
+                    fprintf(mr_dbg, "content-type: %s\n", ct_val); fflush(mr_dbg);
                 }
             }
         }
@@ -1154,6 +1441,7 @@ __declspec(dllexport) const char *mr_cmd_status(void) {
 static void mr_init(void) {
     InitializeCriticalSection(&mr_beat_lock);
     InitializeCriticalSection(&mr_meta_lock);
+    InitializeCriticalSection(&mr_close_lock);
     memset(&mr_beat, 0, sizeof(mr_beat));
     memset(&mr_beat_snap, 0, sizeof(mr_beat_snap));
     memset(&mr_meta, 0, sizeof(mr_meta));
@@ -1174,5 +1462,6 @@ static void mr_shutdown(void) {
     if (mr_fft_cfg) { kiss_fftr_free(mr_fft_cfg); mr_fft_cfg = NULL; }
     DeleteCriticalSection(&mr_beat_lock);
     DeleteCriticalSection(&mr_meta_lock);
+    DeleteCriticalSection(&mr_close_lock);
     if (mr_wininet) { FreeLibrary(mr_wininet); mr_wininet = NULL; }
 }

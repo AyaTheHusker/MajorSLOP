@@ -104,7 +104,13 @@ typedef struct {
 
 static viz_rain_t viz_rain[VIZ_MAX_RAIN];
 
-/* Asteroids ship */
+/* Asteroids ship flight styles */
+#define VIZ_FLY_HUNTER   0   /* cyan: aggressive bee-line to text, fast turns */
+#define VIZ_FLY_ORBIT    1   /* pink: circles around targets, strafing runs */
+#define VIZ_FLY_ZIGZAG   2   /* green: fast zigzag sweeps across the screen */
+#define VIZ_FLY_DRIFT    3   /* gold: slow floaty drift, sudden dash on beat */
+#define VIZ_FLY_PATROL   4   /* purple: smooth figure-8 patrol pattern */
+
 typedef struct {
     float x, y, vx, vy;
     float angle;         /* heading in radians */
@@ -114,6 +120,12 @@ typedef struct {
     float wander_t;      /* time until next direction change */
     float tx, ty;        /* current target position */
     float cr, cg, cb;    /* ship color */
+    int   style;         /* flight pattern style */
+    float style_phase;   /* per-ship phase accumulator for patterns */
+    float dash_timer;    /* for drift style: time until next dash */
+    float orbit_angle;   /* for orbit style: current orbit angle */
+    float orbit_radius;  /* for orbit style: orbit distance */
+    float zig_dir;       /* for zigzag: current sweep direction */
 } viz_ship_t;
 
 #define VIZ_MAX_SHIPS 5
@@ -583,71 +595,211 @@ static void viz_update_matrix(float dt, float cw, float ch, float x_off,
 /* Weapon types: 0=normal laser, 1=spread shot (6 orbs), 2=beam (thick line cut),
  * 3=cluster missiles */
 
+/* Pick a random text cell as a target */
+static void viz_ship_pick_target(viz_ship_t *s, float cw, float ch, float x_off, float top_pad_px) {
+    int attempts = 20;
+    while (attempts-- > 0) {
+        int tr = rand() % TERM_ROWS;
+        int tc = rand() % TERM_COLS;
+        unsigned char byte = ansi_term.grid[tr][tc].ch;
+        if (byte != 0 && byte != 32 && !viz_cells[tr][tc].shattered) {
+            s->tx = x_off + tc * cw + cw * 0.5f;
+            s->ty = top_pad_px + tr * ch + ch * 0.5f;
+            return;
+        }
+    }
+    /* Fallback: random screen position */
+    s->tx = x_off + viz_randf_range(0.1f, 0.9f) * TERM_COLS * cw;
+    s->ty = top_pad_px + viz_randf_range(0.1f, 0.9f) * TERM_ROWS * ch;
+}
+
 static void viz_update_one_ship(viz_ship_t *s, float dt, float cw, float ch,
                                  float x_off, float top_pad_px, float vp_w, float vp_h)
 {
+    int si = (int)(s - viz_ships);
+
     /* Initialize if needed */
     if (s->x == 0 && s->y == 0) {
-        s->x = viz_randf_range(50, vp_w - 50);
-        s->y = viz_randf_range(50, vp_h - 50);
+        /* Spawn at different screen edges so they don't start together */
+        switch (si % 4) {
+            case 0: s->x = viz_randf_range(20, 80); s->y = viz_randf_range(50, vp_h - 50); break;
+            case 1: s->x = vp_w - viz_randf_range(20, 80); s->y = viz_randf_range(50, vp_h - 50); break;
+            case 2: s->x = viz_randf_range(50, vp_w - 50); s->y = viz_randf_range(20, 80); break;
+            case 3: s->x = viz_randf_range(50, vp_w - 50); s->y = vp_h - viz_randf_range(20, 80); break;
+        }
         s->angle = viz_randf() * 6.28f;
-        s->wander_t = 0;
-        /* Assign unique color if not set */
-        if (s->cr == 0 && s->cg == 0 && s->cb == 0) {
-            /* Distinct bright colors per ship index */
-            static const float ship_colors[][3] = {
-                {0.0f, 1.0f, 1.0f},   /* cyan */
-                {1.0f, 0.3f, 0.8f},   /* magenta/pink */
-                {0.3f, 1.0f, 0.3f},   /* green */
-                {1.0f, 0.7f, 0.1f},   /* orange/gold */
-                {0.5f, 0.4f, 1.0f},   /* purple/blue */
-            };
-            int ci = (int)((s - viz_ships) % 5); /* index in array */
-            s->cr = ship_colors[ci][0];
-            s->cg = ship_colors[ci][1];
-            s->cb = ship_colors[ci][2];
-        }
+        s->wander_t = viz_randf_range(0.5f, 2.0f); /* stagger initial target pick */
+        s->style = si % 5;
+        s->style_phase = viz_randf() * 6.28f; /* random starting phase */
+        s->dash_timer = viz_randf_range(2.0f, 5.0f);
+        s->orbit_angle = viz_randf() * 6.28f;
+        s->orbit_radius = viz_randf_range(60, 140);
+        s->zig_dir = (si % 2) ? 1.0f : -1.0f;
+
+        /* Distinct bright colors per ship */
+        static const float ship_colors[][3] = {
+            {0.0f, 1.0f, 1.0f},   /* cyan — hunter */
+            {1.0f, 0.3f, 0.8f},   /* magenta — orbiter */
+            {0.3f, 1.0f, 0.3f},   /* green — zigzag */
+            {1.0f, 0.7f, 0.1f},   /* gold — drifter */
+            {0.5f, 0.4f, 1.0f},   /* purple — patrol */
+        };
+        s->cr = ship_colors[s->style][0];
+        s->cg = ship_colors[s->style][1];
+        s->cb = ship_colors[s->style][2];
     }
 
-    /* Wander AI */
-    s->wander_t -= dt;
-    if (s->wander_t <= 0) {
-        int attempts = 20;
-        while (attempts-- > 0) {
-            int tr = rand() % TERM_ROWS;
-            int tc = rand() % TERM_COLS;
-            unsigned char byte = ansi_term.grid[tr][tc].ch;
-            if (byte != 0 && byte != 32 && !viz_cells[tr][tc].shattered) {
-                s->tx = x_off + tc * cw + cw * 0.5f;
-                s->ty = top_pad_px + tr * ch + ch * 0.5f;
-                break;
-            }
+    s->style_phase += dt;
+    float dx, dy, ta, ad, dist;
+    float thrust_amount, steer_rate, drag;
+
+    switch (s->style) {
+
+    case VIZ_FLY_HUNTER:
+        /* Aggressive hunter: fast turns, bee-lines to text, quick retarget */
+        s->wander_t -= dt;
+        if (s->wander_t <= 0) {
+            viz_ship_pick_target(s, cw, ch, x_off, top_pad_px);
+            s->wander_t = viz_randf_range(0.8f, 2.0f);
         }
-        s->wander_t = viz_randf_range(1.5f, 4.0f);
+        dx = s->tx - s->x; dy = s->ty - s->y;
+        ta = atan2f(dy, dx);
+        ad = ta - s->angle;
+        while (ad > 3.14159f) ad -= 6.28318f;
+        while (ad < -3.14159f) ad += 6.28318f;
+        s->angle += ad * 5.0f * dt; /* very fast turning */
+        thrust_amount = 350.0f + viz_kick * 400.0f;
+        s->vx += cosf(s->angle) * thrust_amount * dt;
+        s->vy += sinf(s->angle) * thrust_amount * dt;
+        s->vx *= (1.0f - 2.0f * dt);
+        s->vy *= (1.0f - 2.0f * dt);
+        break;
+
+    case VIZ_FLY_ORBIT:
+        /* Orbiter: circles around target, spiraling in for strafing runs */
+        s->wander_t -= dt;
+        if (s->wander_t <= 0) {
+            viz_ship_pick_target(s, cw, ch, x_off, top_pad_px);
+            s->wander_t = viz_randf_range(3.0f, 6.0f);
+            s->orbit_radius = viz_randf_range(60, 160);
+        }
+        s->orbit_angle += dt * 1.8f; /* orbit speed */
+        /* Slowly spiral inward */
+        s->orbit_radius *= (1.0f - 0.15f * dt);
+        if (s->orbit_radius < 30) s->orbit_radius = 30;
+        {
+            float ox = s->tx + cosf(s->orbit_angle) * s->orbit_radius;
+            float oy = s->ty + sinf(s->orbit_angle) * s->orbit_radius;
+            dx = ox - s->x; dy = oy - s->y;
+            ta = atan2f(dy, dx);
+            ad = ta - s->angle;
+            while (ad > 3.14159f) ad -= 6.28318f;
+            while (ad < -3.14159f) ad += 6.28318f;
+            s->angle += ad * 3.0f * dt;
+            /* Always face roughly toward the target center for shooting */
+            float face_dx = s->tx - s->x, face_dy = s->ty - s->y;
+            float face_a = atan2f(face_dy, face_dx);
+            float face_ad = face_a - s->angle;
+            while (face_ad > 3.14159f) face_ad -= 6.28318f;
+            while (face_ad < -3.14159f) face_ad += 6.28318f;
+            s->angle += face_ad * 1.5f * dt;
+        }
+        thrust_amount = 280.0f + viz_kick * 200.0f;
+        s->vx += cosf(s->angle) * thrust_amount * dt;
+        s->vy += sinf(s->angle) * thrust_amount * dt;
+        s->vx *= (1.0f - 1.8f * dt);
+        s->vy *= (1.0f - 1.8f * dt);
+        break;
+
+    case VIZ_FLY_ZIGZAG:
+        /* Zigzag: fast horizontal/vertical sweeps, sharp direction changes */
+        s->wander_t -= dt;
+        if (s->wander_t <= 0) {
+            viz_ship_pick_target(s, cw, ch, x_off, top_pad_px);
+            s->wander_t = viz_randf_range(1.0f, 2.5f);
+            s->zig_dir = -s->zig_dir; /* flip zigzag direction */
+        }
+        dx = s->tx - s->x; dy = s->ty - s->y;
+        ta = atan2f(dy, dx);
+        /* Add perpendicular zigzag oscillation */
+        ta += s->zig_dir * sinf(s->style_phase * 4.0f) * 0.8f;
+        ad = ta - s->angle;
+        while (ad > 3.14159f) ad -= 6.28318f;
+        while (ad < -3.14159f) ad += 6.28318f;
+        s->angle += ad * 4.0f * dt;
+        thrust_amount = 400.0f + viz_kick * 250.0f; /* fastest ship */
+        s->vx += cosf(s->angle) * thrust_amount * dt;
+        s->vy += sinf(s->angle) * thrust_amount * dt;
+        s->vx *= (1.0f - 2.5f * dt);
+        s->vy *= (1.0f - 2.5f * dt);
+        break;
+
+    case VIZ_FLY_DRIFT:
+        /* Drifter: slow lazy float, sudden burst-dash on beat */
+        s->wander_t -= dt;
+        if (s->wander_t <= 0) {
+            viz_ship_pick_target(s, cw, ch, x_off, top_pad_px);
+            s->wander_t = viz_randf_range(3.0f, 7.0f);
+        }
+        dx = s->tx - s->x; dy = s->ty - s->y;
+        ta = atan2f(dy, dx);
+        ad = ta - s->angle;
+        while (ad > 3.14159f) ad -= 6.28318f;
+        while (ad < -3.14159f) ad += 6.28318f;
+        s->angle += ad * 1.2f * dt; /* slow lazy turning */
+        /* Gentle drift + sine wobble */
+        thrust_amount = 80.0f;
+        s->vx += cosf(s->angle) * thrust_amount * dt;
+        s->vy += sinf(s->angle) * thrust_amount * dt;
+        /* Add gentle sine wobble perpendicular to heading */
+        s->vx += cosf(s->angle + 1.57f) * sinf(s->style_phase * 1.5f) * 40.0f * dt;
+        s->vy += sinf(s->angle + 1.57f) * sinf(s->style_phase * 1.5f) * 40.0f * dt;
+        /* Beat dash: sudden burst toward target */
+        if (viz_beat_hit) {
+            s->vx += cosf(s->angle) * 500.0f;
+            s->vy += sinf(s->angle) * 500.0f;
+        }
+        s->vx *= (1.0f - 0.8f * dt); /* very low drag = long glides */
+        s->vy *= (1.0f - 0.8f * dt);
+        break;
+
+    case VIZ_FLY_PATROL:
+        /* Patrol: smooth figure-8 pattern overlaid on target seeking */
+        s->wander_t -= dt;
+        if (s->wander_t <= 0) {
+            viz_ship_pick_target(s, cw, ch, x_off, top_pad_px);
+            s->wander_t = viz_randf_range(4.0f, 8.0f);
+        }
+        {
+            /* Figure-8 lissajous offset */
+            float fig_x = sinf(s->style_phase * 0.7f) * 120.0f;
+            float fig_y = sinf(s->style_phase * 1.4f) * 80.0f;
+            float goal_x = s->tx + fig_x;
+            float goal_y = s->ty + fig_y;
+            dx = goal_x - s->x; dy = goal_y - s->y;
+            ta = atan2f(dy, dx);
+            ad = ta - s->angle;
+            while (ad > 3.14159f) ad -= 6.28318f;
+            while (ad < -3.14159f) ad += 6.28318f;
+            s->angle += ad * 2.0f * dt; /* smooth turning */
+        }
+        thrust_amount = 200.0f + viz_kick * 150.0f;
+        s->vx += cosf(s->angle) * thrust_amount * dt;
+        s->vy += sinf(s->angle) * thrust_amount * dt;
+        s->vx *= (1.0f - 1.3f * dt);
+        s->vy *= (1.0f - 1.3f * dt);
+        break;
     }
 
-    /* Steer */
-    float dx = s->tx - s->x, dy = s->ty - s->y;
-    float ta = atan2f(dy, dx);
-    float ad = ta - s->angle;
-    while (ad > 3.14159f) ad -= 6.28318f;
-    while (ad < -3.14159f) ad += 6.28318f;
-    s->angle += ad * 2.5f * dt;
-
-    /* Thrust — faster with more energy */
-    float thrust_amount = 250.0f + viz_kick * 300.0f;
-    s->vx += cosf(s->angle) * thrust_amount * dt;
-    s->vy += sinf(s->angle) * thrust_amount * dt;
-    s->vx *= (1.0f - 1.5f * dt);
-    s->vy *= (1.0f - 1.5f * dt);
+    /* Apply velocity */
     s->x += s->vx * dt;
     s->y += s->vy * dt;
 
     /* Wrap */
-    if (s->x < 0) s->x += vp_w;
-    if (s->x > vp_w) s->x -= vp_w;
-    if (s->y < 0) s->y += vp_h;
-    if (s->y > vp_h) s->y -= vp_h;
+    if (s->x < -30) s->x += vp_w + 60;
+    if (s->x > vp_w + 30) s->x -= vp_w + 60;
+    if (s->y < -30) s->y += vp_h + 60;
+    if (s->y > vp_h + 30) s->y -= vp_h + 60;
 }
 
 static void viz_fire_laser(viz_ship_t *s, float angle, float speed) {
