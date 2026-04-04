@@ -670,7 +670,11 @@ static int ttf_loaded[MAX_TTF_FONTS] = {0};
 #define VKM_SUB_EXTRAS   7
 #define VKM_EXT_HIDEMM   0   /* Hide/Show MegaMUD */
 #define VKM_EXT_SOUND    1   /* Sound Settings */
-#define VKM_EXT_COUNT    2
+#define VKM_EXT_SEP1     2   /* separator */
+#define VKM_EXT_BOULDERS 3   /* Rolling Boulders */
+#define VKM_EXT_MATRIX   4   /* Matrix Rain */
+#define VKM_EXT_ASTEROIDS 5  /* Asteroids */
+#define VKM_EXT_COUNT    6
 
 static int megamud_hidden = 0; /* 1 = MegaMUD windows hidden, VK-only mode */
 static int snd_wnd_idx = -1;  /* Sound Settings window index (forward decl) */
@@ -2999,6 +3003,9 @@ static void push_solid(float x0, float y0, float x1, float y1,
     #undef S2Y
 }
 
+/* Terminal visualizations (boulders, matrix rain, asteroids) */
+#include "viz_fx.c"
+
 /* Push a text string at pixel position */
 static void push_text(int px, int py, const char *str,
                       float r, float g, float b,
@@ -4444,6 +4451,17 @@ static void vkm_draw(int vp_w, int vp_h)
                 } else if (i == VKM_EXT_SOUND) {
                     label = "Sound Settings";
                     is_active = (snd_wnd_idx >= 0 && vkw_windows[snd_wnd_idx].active);
+                } else if (i == VKM_EXT_SEP1) {
+                    label = "\xC4\xC4\xC4 Visualizations \xC4\xC4\xC4";
+                } else if (i == VKM_EXT_BOULDERS) {
+                    label = "Rolling Boulders";
+                    is_active = (viz_mode == VIZ_BOULDERS);
+                } else if (i == VKM_EXT_MATRIX) {
+                    label = "Matrix Rain";
+                    is_active = (viz_mode == VIZ_MATRIX);
+                } else if (i == VKM_EXT_ASTEROIDS) {
+                    label = "Asteroids";
+                    is_active = (viz_mode == VIZ_ASTEROIDS);
                 }
             }
 
@@ -5161,6 +5179,10 @@ static void vkt_build_vertices(void)
     float bg_u1 = bg_u0 + tex_cw - 2*hp_u;
     float bg_v1 = bg_v0 + tex_ch - 2*hp_v;
 
+    /* Update visualization physics */
+    viz_update(1.0f / 60.0f, cw, ch, x_offset, (float)top_pad,
+               (float)vp_w, (float)vp_h, tex_cw, tex_ch, hp_u, hp_v);
+
     /* Pass 1: backgrounds using solid glyph */
     for (int r = 0; r < TERM_ROWS; r++) {
         for (int c = 0; c < TERM_COLS; c++) {
@@ -5194,6 +5216,10 @@ static void vkt_build_vertices(void)
             if (byte == 0 || byte == 32) { word_start = -1; continue; }
             if (word_start < 0) word_start = c;
 
+            /* Skip shattered cells (viz_fx renders fragments instead) */
+            if (viz_mode != VIZ_NONE && r < VIZ_ROWS && c < VIZ_COLS &&
+                viz_cells[r][c].shattered) continue;
+
             /* Compute gradient position within word */
             int wlen = word_end[c] - word_start + 1;
             float grad_t = (wlen > 1) ? (float)(c - word_start) / (float)(wlen - 1) : 0.0f;
@@ -5206,6 +5232,15 @@ static void vkt_build_vertices(void)
 
             float px0 = x_offset + c * cw, py0 = top_pad + r * ch;
             float px1 = px0 + cw, py1 = py0 + ch;
+
+            /* Apply viz displacement */
+            if (viz_mode != VIZ_NONE && r < VIZ_ROWS && c < VIZ_COLS) {
+                px0 += viz_cells[r][c].dx;
+                py0 += viz_cells[r][c].dy;
+                px1 += viz_cells[r][c].dx;
+                py1 += viz_cells[r][c].dy;
+            }
+
             /* Try programmatic box-drawing first (gap-free at any resolution) */
             if (byte >= 0xB0 && byte <= 0xDF &&
                 draw_box_char(byte, px0, py0, px1, py1,
@@ -5266,6 +5301,10 @@ static void vkt_build_vertices(void)
 
     #undef PX2NDC_X
     #undef PX2NDC_Y
+
+    /* Push visualization quads (boulders, fragments, rain, ship, lasers) */
+    viz_push_quads(cw, ch, x_offset, (float)top_pad, vp_w, vp_h,
+                    tex_cw, tex_ch, hp_u, hp_v);
 
     /* Mark where terminal text ends and UI chrome begins.
      * FX pipeline (liquid/waves/etc) only applies to quads before this split. */
@@ -7431,6 +7470,15 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                                   megamud_hidden ? "HIDDEN" : "SHOWN");
             } else if (si == VKM_EXT_SOUND) {
                 snd_open_window();
+            } else if (si == VKM_EXT_BOULDERS) {
+                viz_mode = (viz_mode == VIZ_BOULDERS) ? VIZ_NONE : VIZ_BOULDERS;
+                if (viz_mode == VIZ_BOULDERS) viz_init();
+            } else if (si == VKM_EXT_MATRIX) {
+                viz_mode = (viz_mode == VIZ_MATRIX) ? VIZ_NONE : VIZ_MATRIX;
+                if (viz_mode == VIZ_MATRIX) viz_init();
+            } else if (si == VKM_EXT_ASTEROIDS) {
+                viz_mode = (viz_mode == VIZ_ASTEROIDS) ? VIZ_NONE : VIZ_ASTEROIDS;
+                if (viz_mode == VIZ_ASTEROIDS) viz_init();
             }
             vkm_open = 0;
             vkm_sub = VKM_SUB_NONE;
@@ -8354,6 +8402,7 @@ static void pst_draw(int vp_w, int vp_h)
 /* ---- MUDRadio: Audio Player + Internet Radio + Beat Viz ---- */
 #include "mudradio.c"
 #include "mudradio_ui.c"
+/* viz_fx.c moved earlier — after push_quad helpers, before menu/vertex code */
 
 /* ---- Sound Settings Window ---- */
 
