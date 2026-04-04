@@ -654,7 +654,8 @@ static int ttf_loaded[MAX_TTF_FONTS] = {0};
 #define VKM_WID_STATUSBAR 2
 #define VKM_WID_EXPBAR   3
 #define VKM_WID_PSTATS   4   /* Player Statistics */
-#define VKM_WID_COUNT    5
+#define VKM_WID_RADIO    5   /* MUDRadio */
+#define VKM_WID_COUNT    6
 
 /* FX submenu items */
 #define VKM_FX_LIQUID    0
@@ -679,6 +680,9 @@ static float pst_x = 100.0f, pst_y = 60.0f;
 static float pst_w = 340.0f, pst_h = 390.0f;
 static int  pst_dragging = 0;
 static float pst_drag_ox, pst_drag_oy;
+
+/* MUDRadio types + state + forward declarations */
+#include "mudradio.h"
 static void pst_draw(int vp_w, int vp_h);
 static void pst_toggle(void);
 static void pst_feed(const char *data, int len);
@@ -2029,6 +2033,8 @@ static int pl_run_mode = 0;  /* 0 = Walk (combat on), 1 = Run (combat off) */
 static char pl_search[64] = {0};
 static int pl_search_len = 0;
 static int pl_scroll = 0;
+static int pl_total_items = 0;   /* set by draw, used to clamp scroll */
+static int pl_visible_items = 0; /* set by draw, used to clamp scroll */
 static int pl_hover_item = -1;
 static int pl_selected_item = -1;  /* currently selected (green) item, -1 = none */
 static int pl_focused = 0;   /* input focus for search box */
@@ -3820,7 +3826,7 @@ static int vrt_ctx_hit(int mx, int my)
 /* ---- Paths & Loops window drawing ---- */
 #define PL_TITLEBAR  24
 #define PL_TAB_H     28
-#define PL_TOOLBAR_H 26
+#define PL_TOOLBAR_H 34
 #define PL_ITEM_H    20
 #define PL_PAD        6
 #define PL_CW         8
@@ -3891,17 +3897,26 @@ static void pl_draw(int vp_w, int vp_h)
     /* Toolbar: [Search...] [_] Hidden  [Walk|Run] */
     psolid(x, ty, x + w, ty + PL_TOOLBAR_H,
            t->bg[0] * 0.8f, t->bg[1] * 0.8f, t->bg[2] * 0.8f, 0.6f, vp_w, vp_h);
-    /* Search box */
-    int sx = x + PL_PAD, sy = ty + 3, sw = w / 2 - PL_PAD * 2, sh = PL_TOOLBAR_H - 6;
+    /* Search box — prominent with border */
+    int sx = x + PL_PAD, sy = ty + 5, sw = w / 2 - PL_PAD, sh = PL_TOOLBAR_H - 10;
+    /* Border */
+    psolid(sx - 1, sy - 1, sx + sw + 1, sy + sh + 1,
+           t->accent[0] * 0.5f, t->accent[1] * 0.5f, t->accent[2] * 0.5f,
+           pl_focused ? 0.8f : 0.4f, vp_w, vp_h);
+    /* Background */
     psolid(sx, sy, sx + sw, sy + sh,
-           t->bg[0] * 0.4f, t->bg[1] * 0.4f, t->bg[2] * 0.4f, 0.8f, vp_w, vp_h);
+           t->bg[0] * 0.3f, t->bg[1] * 0.3f, t->bg[2] * 0.3f, 0.95f, vp_w, vp_h);
+    /* Magnifying glass icon + text */
+    ptext(sx + 4, sy + (sh - ch) / 2,
+          "\x0F", t->dim[0] * 0.7f, t->dim[1] * 0.7f, t->dim[2] * 0.7f,
+          vp_w, vp_h, cw, ch);
     if (pl_search[0]) {
-        ptext(sx + 3, sy + (sh - ch) / 2,
-              pl_search, t->text[0], t->text[1], t->text[2], vp_w, vp_h, cw - 1, ch - 2);
+        ptext(sx + 4 + cw + 3, sy + (sh - ch) / 2,
+              pl_search, t->text[0], t->text[1], t->text[2], vp_w, vp_h, cw, ch);
     } else {
-        ptext(sx + 3, sy + (sh - ch) / 2,
-              "Search...", t->dim[0] * 0.6f, t->dim[1] * 0.6f, t->dim[2] * 0.6f,
-              vp_w, vp_h, cw - 1, ch - 2);
+        ptext(sx + 4 + cw + 3, sy + (sh - ch) / 2,
+              "Search...", t->dim[0] * 0.5f, t->dim[1] * 0.5f, t->dim[2] * 0.5f,
+              vp_w, vp_h, cw, ch);
     }
 
     /* Hidden checkbox (goto tab only) */
@@ -3961,7 +3976,7 @@ static void pl_draw(int vp_w, int vp_h)
             if (vis_count == 0 && pl_search[0]) continue;
 
             /* Category header — bold, flush left */
-            if (iy >= ty - PL_ITEM_H && iy < content_bottom) {
+            if (iy >= ty && iy < content_bottom) {
                 char catbuf[80];
                 wsprintfA(catbuf, "%s %s (%d)",
                           cat->expanded ? "\x1F" : "\x10",
@@ -3990,7 +4005,7 @@ static void pl_draw(int vp_w, int vp_h)
                     if (pl_search[0] && !pl_stristr(pl_rooms[ri].name, pl_search) &&
                         !pl_stristr(pl_rooms[ri].code, pl_search)) continue;
 
-                    if (iy >= ty - PL_ITEM_H && iy < content_bottom) {
+                    if (iy >= ty && iy < content_bottom) {
                         int is_hover = (pl_hover_item == item_idx);
                         int is_selected = (pl_selected_item == item_idx);
                         if (is_selected) {
@@ -4038,7 +4053,7 @@ static void pl_draw(int vp_w, int vp_h)
             }
             if (vis_count == 0 && pl_search[0]) continue;
 
-            if (iy >= ty - PL_ITEM_H && iy < content_bottom) {
+            if (iy >= ty && iy < content_bottom) {
                 char catbuf[80];
                 wsprintfA(catbuf, "%s %s (%d)",
                           cat->expanded ? "\x1F" : "\x10",
@@ -4065,7 +4080,7 @@ static void pl_draw(int vp_w, int vp_h)
                     if (pl_search[0] && !pl_stristr(pl_paths[pi].name, pl_search) &&
                         !pl_stristr(pl_paths[pi].file, pl_search)) continue;
 
-                    if (iy >= ty - PL_ITEM_H && iy < content_bottom) {
+                    if (iy >= ty && iy < content_bottom) {
                         int is_hover = (pl_hover_item == item_idx);
                         int is_selected = (pl_selected_item == item_idx);
                         if (is_selected) {
@@ -4098,6 +4113,16 @@ static void pl_draw(int vp_w, int vp_h)
                 }
             }
         }
+    }
+
+    /* Track totals for scroll clamping */
+    pl_total_items = item_idx;
+    pl_visible_items = content_h / PL_ITEM_H;
+    if (pl_total_items > pl_visible_items) {
+        int max_scroll = pl_total_items - pl_visible_items;
+        if (pl_scroll > max_scroll) pl_scroll = max_scroll;
+    } else {
+        pl_scroll = 0;
     }
 
     /* GO button */
@@ -4384,6 +4409,9 @@ static void vkm_draw(int vp_w, int vp_h)
                 } else if (i == VKM_WID_PSTATS) {
                     label = pst_visible ? "\x04 Player Stats" : "  Player Stats";
                     is_active = pst_visible;
+                } else if (i == VKM_WID_RADIO) {
+                    label = mr_visible ? "\x04 MUDRadio" : "  MUDRadio";
+                    is_active = mr_visible;
                 }
             } else if (vkm_sub == VKM_SUB_RECENT) {
                 if (vkm_goto_count == 0) {
@@ -5275,6 +5303,7 @@ static void vkt_build_vertices(void)
     vxb_draw(vp_w, vp_h);
     pl_draw(vp_w, vp_h);
     pst_draw(vp_w, vp_h);
+    mr_draw(vp_w, vp_h);
     pl_quad_end = quad_count;
 
     /* Draw context menu on top of EVERYTHING (last = topmost) */
@@ -7014,6 +7043,8 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             }
             return 0;
         }
+        /* Route to MUDRadio search if focused */
+        if (mr_search_focus && mr_key_char((int)wParam)) return 0;
         /* Route to focused window first */
         if (vkw_key_char((unsigned int)wParam)) return 0;
         input_handle_key(wParam, 1);
@@ -7034,6 +7065,11 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             pl_hover_item = pl_item_at_y(my2);
         } else {
             pl_hover_item = -1;
+        }
+        /* MUDRadio drag/resize */
+        if (mr_dragging || mr_resizing || mr_vol_dragging) {
+            mr_mouse_move(mx2, my2);
+            return 0;
         }
         /* Player Stats drag */
         if (pst_dragging) {
@@ -7210,6 +7246,8 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             }
             return 0;
         }
+        /* MUDRadio panel click */
+        if (mr_mouse_down(mx, my)) return 0;
         /* Player Stats panel click */
         if (pst_visible && mx >= (int)pst_x && mx < (int)(pst_x + pst_w) &&
             my >= (int)pst_y && my < (int)(pst_y + pst_h)) {
@@ -7232,7 +7270,7 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             int section_h = ch + 6;
             int row_h = ch + 4;
             int exp_hdr_y = titlebar_h + 2;
-            int acc_hdr_y = exp_hdr_y + section_h + row_h * 4 + 4;
+            int acc_hdr_y = exp_hdr_y + section_h + row_h * 6 + 4;
             if (ly >= exp_hdr_y && ly < exp_hdr_y + section_h) {
                 pst_reset_exp();
                 return 0;
@@ -7279,6 +7317,7 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         int mx = mouse_tx((short)LOWORD(lParam));
         int my = mouse_ty((short)HIWORD(lParam));
         if (pl_dragging) { pl_dragging = 0; return 0; }
+        if (mr_dragging || mr_resizing || mr_vol_dragging) { mr_mouse_up(); return 0; }
         if (pst_dragging) { pst_dragging = 0; return 0; }
         if (vrt_dragging) { vrt_dragging = 0; return 0; }
         vkw_mouse_up(); /* end any drag/resize */
@@ -7311,6 +7350,8 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 vxb_visible = !vxb_visible;
             } else if (si == VKM_WID_PSTATS) {
                 pst_toggle();
+            } else if (si == VKM_WID_RADIO) {
+                mr_toggle();
             }
             vkm_open = 0;
             vkm_sub = VKM_SUB_NONE;
@@ -7481,6 +7522,12 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 int wd = (short)HIWORD(wParam);
                 pl_scroll += (wd > 0) ? -3 : 3;
                 if (pl_scroll < 0) pl_scroll = 0;
+                if (pl_total_items > pl_visible_items) {
+                    int max_scroll = pl_total_items - pl_visible_items;
+                    if (pl_scroll > max_scroll) pl_scroll = max_scroll;
+                } else {
+                    pl_scroll = 0;
+                }
                 return 0;
             }
         }
@@ -8125,17 +8172,77 @@ static void pst_draw(int vp_w, int vp_h)
     cy += row_h;
 
     /* Exp Rate */
+    __int64 exp_rate = 0;
     if (elapsed > 5000) {
-        __int64 rate = pst_s.exp_gained * 3600000LL / (__int64)elapsed;
-        if (rate >= 1000000LL) {
-            _snprintf(buf, sizeof(buf), "%lld m/hr", rate / 1000000LL);
+        exp_rate = pst_s.exp_gained * 3600000LL / (__int64)elapsed;
+        if (exp_rate >= 1000000LL) {
+            _snprintf(buf, sizeof(buf), "%lld m/hr", exp_rate / 1000000LL);
         } else {
-            pst_fmt_num(buf, sizeof(buf), rate);
+            pst_fmt_num(buf, sizeof(buf), exp_rate);
             strcat(buf, " /hr");
         }
     } else { strcpy(buf, "---"); }
     ptext((int)x0 + pad, cy + 2, "Exp Rate:", dmr, dmg, dmb, vp_w, vp_h, cw, ch);
     ptext(val_x, cy + 2, buf, 0.3f, 0.9f, 1.0f, vp_w, vp_h, cw, ch);
+    cy += row_h;
+
+    /* Exp Needed (from the exp bar's memory read) */
+    if (vxb_needed > 0) {
+        pst_fmt_num(buf, sizeof(buf), vxb_needed);
+    } else { strcpy(buf, "---"); }
+    ptext((int)x0 + pad, cy + 2, "Exp Need:", dmr, dmg, dmb, vp_w, vp_h, cw, ch);
+    ptext(val_x, cy + 2, buf, txr, txg, txb, vp_w, vp_h, cw, ch);
+    cy += row_h;
+
+    /* Time to Level */
+    if (exp_rate > 0 && vxb_needed > 0) {
+        __int64 secs = vxb_needed * 3600LL / exp_rate;
+        if (secs < 0) secs = 0;
+        __int64 yrs = secs / (365LL * 24 * 3600);
+        __int64 rem = secs % (365LL * 24 * 3600);
+        __int64 mos = rem / (30LL * 24 * 3600);
+        rem %= (30LL * 24 * 3600);
+        __int64 days = rem / (24 * 3600);
+        rem %= (24 * 3600);
+        __int64 hrs = rem / 3600;
+        rem %= 3600;
+        __int64 mins = rem / 60;
+        __int64 sec = rem % 60;
+
+        if (yrs > 20) {
+            strcpy(buf, "a millennium");
+        } else if (yrs > 0) {
+            if (mos > 0)
+                _snprintf(buf, sizeof(buf), "%lldy %lldmo", yrs, mos);
+            else
+                _snprintf(buf, sizeof(buf), "%lld years", yrs);
+        } else if (mos > 0) {
+            if (days > 0)
+                _snprintf(buf, sizeof(buf), "%lldmo %lldd", mos, days);
+            else
+                _snprintf(buf, sizeof(buf), "%lld months", mos);
+        } else if (days > 0) {
+            _snprintf(buf, sizeof(buf), "%lldd %lldh", days, hrs);
+        } else if (hrs > 0) {
+            _snprintf(buf, sizeof(buf), "%lldh %lldm", hrs, mins);
+        } else if (mins > 0) {
+            _snprintf(buf, sizeof(buf), "%lldm %llds", mins, sec);
+        } else {
+            _snprintf(buf, sizeof(buf), "%lld seconds", sec);
+        }
+        buf[sizeof(buf) - 1] = 0;
+    } else { strcpy(buf, "---"); }
+    ptext((int)x0 + pad, cy + 2, "To Level:", dmr, dmg, dmb, vp_w, vp_h, cw, ch);
+    /* Color: green if under 1hr, yellow if under 1day, dim otherwise */
+    {
+        float tlr = dmr, tlg = dmg, tlb = dmb;
+        if (exp_rate > 0 && vxb_needed > 0) {
+            __int64 secs = vxb_needed * 3600LL / exp_rate;
+            if (secs < 3600) { tlr = 0.3f; tlg = 1.0f; tlb = 0.3f; }
+            else if (secs < 86400) { tlr = 1.0f; tlg = 0.85f; tlb = 0.2f; }
+        }
+        ptext(val_x, cy + 2, buf, tlr, tlg, tlb, vp_w, vp_h, cw, ch);
+    }
     cy += row_h;
 
     /* Kills */
@@ -8243,6 +8350,10 @@ static void pst_draw(int vp_w, int vp_h)
     /* Auto-size panel height to content */
     pst_h = (float)(cy - (int)y0 + 6);
 }
+
+/* ---- MUDRadio: Audio Player + Internet Radio + Beat Viz ---- */
+#include "mudradio.c"
+#include "mudradio_ui.c"
 
 /* ---- Sound Settings Window ---- */
 
@@ -8408,6 +8519,28 @@ static slop_command_t vkt_commands[] = {
     { "console_print","vkt_console_print","s", "v", "Print to console window" },
     { "vk_plugins.show_experimental", "vkt_vk_plugins_show_experimental", "i", "v", "Enable/disable experimental plugins (1=True, 0=False)" },
     { "vk_plugins.list", "vkt_vk_plugins_list", "", "v", "List all VK plugins and their status" },
+    /* MUDRadio */
+    { "radio.show",        "mr_cmd_show",         "",  "v", "Show MUDRadio panel" },
+    { "radio.hide",        "mr_cmd_hide",         "",  "v", "Hide MUDRadio panel" },
+    { "radio.toggle",      "mr_cmd_toggle",       "",  "v", "Toggle MUDRadio panel" },
+    { "radio.play",        "mr_cmd_play",         "",  "v", "Play/resume audio" },
+    { "radio.pause",       "mr_cmd_pause",        "",  "v", "Pause audio" },
+    { "radio.stop",        "mr_cmd_stop",         "",  "v", "Stop audio" },
+    { "radio.next",        "mr_cmd_next",         "",  "v", "Next track" },
+    { "radio.prev",        "mr_cmd_prev",         "",  "v", "Previous track" },
+    { "radio.volume",      "mr_cmd_volume",       "f", "v", "Set volume (0.0-1.0)" },
+    { "radio.get_volume",  "mr_cmd_get_volume",   "",  "f", "Get current volume" },
+    { "radio.shuffle",     "mr_cmd_shuffle",      "i", "v", "Set shuffle (0=off, 1=on)" },
+    { "radio.repeat",      "mr_cmd_repeat",       "i", "v", "Set repeat (0=off, 1=one, 2=all)" },
+    { "radio.play_file",   "mr_cmd_play_file",    "s", "v", "Play audio file (path, Linux or Windows)" },
+    { "radio.play_stream", "mr_cmd_play_stream",  "s", "v", "Play internet radio stream (URL)" },
+    { "radio.search",      "mr_cmd_search",       "s", "v", "Search Radio Browser for stations" },
+    { "radio.play_station","mr_cmd_play_station",  "i", "v", "Play station by index from search results" },
+    { "radio.fav_toggle",  "mr_cmd_fav_toggle",   "i", "v", "Toggle favorite for station index" },
+    { "radio.load_dir",    "mr_cmd_load_dir",     "s", "v", "Load audio files from directory into playlist" },
+    { "radio.playlist_count","mr_cmd_playlist_count","","i", "Get number of tracks in playlist" },
+    { "radio.now_playing", "mr_cmd_now_playing",   "",  "s", "Get now playing text" },
+    { "radio.status",      "mr_cmd_status",        "",  "s", "Get transport status (playing/paused/stopped/etc)" },
 };
 
 __declspec(dllexport) slop_command_t *slop_get_commands(int *count)
@@ -8448,6 +8581,8 @@ static int vkt_init(const slop_api_t *a)
     apply_theme_palette(current_theme);
     input_buf[0] = '\0';
 
+    mr_init();
+
     HINSTANCE hInst = GetModuleHandleA(NULL);
     vkt_thread_handle = CreateThread(NULL, 0, vkt_thread, (LPVOID)hInst, 0, NULL);
     return 0;
@@ -8464,6 +8599,7 @@ static void vkt_shutdown(void)
     }
     for (int i = 0; i < history_count; i++) free(cmd_history[i]);
     history_count = 0;
+    mr_shutdown();
     DeleteCriticalSection(&ansi_lock);
     if (bs_lock_init) { DeleteCriticalSection(&bs_lock); bs_lock_init = 0; }
     if (api) api->log("[vk_terminal] Shutdown\n");
