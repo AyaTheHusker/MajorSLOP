@@ -7761,16 +7761,16 @@ static struct {
     pst_atk_t hit;              /* normal hits */
     pst_atk_t crit;             /* critical hits */
     pst_atk_t extra;            /* extra attacks */
+    pst_atk_t backstab;         /* backstab hits */
     pst_atk_t spell;            /* spell/cast damage */
 
     /* Defense */
     int     dodge;              /* player dodged */
-    int     mon_miss;           /* monster missed (not dodge) */
-    int     mon_hit;            /* monster hit you (we detect " damage!" from monsters too) */
 
-    /* Round tracking */
+    /* Round tracking — includes misses as 0-damage swings */
     pst_atk_t rnd;              /* per-round damage totals */
     int     cur_round_dmg;      /* accumulating current round */
+    int     cur_round_swings;   /* swings this round (hits + misses) */
 
     /* Misc */
     int     kills;              /* monster kills */
@@ -7830,10 +7830,11 @@ static void pst_parse_line(const char *line)
     /* --- Monster killed --- */
     if (pst_contains(line, " drops to the ground!")) {
         pst_s.kills++;
-        /* end of round — record round damage */
-        if (pst_s.cur_round_dmg > 0) {
+        /* end of round — record round damage (including 0-dmg rounds from misses) */
+        if (pst_s.cur_round_swings > 0) {
             pst_record_hit(&pst_s.rnd, pst_s.cur_round_dmg);
             pst_s.cur_round_dmg = 0;
+            pst_s.cur_round_swings = 0;
         }
         return;
     }
@@ -7851,54 +7852,36 @@ static void pst_parse_line(const char *line)
         return;
     }
 
-    /* --- Monster missed (not a dodge) --- */
-    if (pst_contains(line, "but misses") ||
-        pst_contains(line, "and barely misses you!") ||
-        pst_contains(line, "you easily misses!") ||
-        pst_contains(line, "scrambles to regain balance") ||
-        pst_contains(line, "looking for an opening!") ||
-        pst_contains(line, "an opportunity to strike!")) {
-        pst_s.mon_miss++;
-        return;
-    }
-
     /* --- Player Hit (line contains " damage!") --- */
     if (pst_contains(line, " damage!")) {
         /* Is this us hitting a monster, or a monster hitting us? */
-        /* Monster hitting us: line starts with monster name, e.g. "The Goblin slashes you for X damage!" */
-        /* We check: if line contains " you for " or " you " before damage, it's monster hitting us */
         const char *dmg_pos = strstr(line, " damage!");
         int is_monster_hit = 0;
-
-        /* Check if this is a monster hitting us: look for "you for" before " damage!" */
         if (dmg_pos) {
-            /* Simple heuristic: if " you for " appears, monster hit us */
             const char *yf = strstr(line, " you for ");
             if (yf && yf < dmg_pos) is_monster_hit = 1;
-            /* Also: "hits you for", "slashes you for", etc */
             const char *hy = strstr(line, " you!");
             if (hy) is_monster_hit = 1;
         }
-
-        if (is_monster_hit) {
-            pst_s.mon_hit++;
-            return;
-        }
+        if (is_monster_hit) return; /* don't track monster hits on us */
 
         /* Player hit — parse damage and categorize */
         int dmg = pst_parse_dmg(line);
 
-        if (pst_contains(line, " critically ")) {
+        if (pst_contains(line, "backstab")) {
+            pst_record_hit(&pst_s.backstab, dmg);
+        } else if (pst_contains(line, " critically ")) {
             pst_record_hit(&pst_s.crit, dmg);
         } else if (pst_contains(line, "Your ") && (pst_contains(line, " hits ") || pst_contains(line, " blasts ") ||
                    pst_contains(line, " burns ") || pst_contains(line, " freezes ") || pst_contains(line, " zaps "))) {
             pst_record_hit(&pst_s.spell, dmg);
-        } else if (pst_contains(line, "extra attack") || pst_contains(line, "backstab")) {
+        } else if (pst_contains(line, "extra attack")) {
             pst_record_hit(&pst_s.extra, dmg);
         } else {
             pst_record_hit(&pst_s.hit, dmg);
         }
         pst_s.cur_round_dmg += dmg;
+        pst_s.cur_round_swings++;
         return;
     }
 
@@ -7928,16 +7911,18 @@ static void pst_parse_line(const char *line)
         /* Only count as miss if the line does NOT also contain " damage!" (already handled above) */
         if (!pst_contains(line, " damage!")) {
             pst_s.miss++;
+            pst_s.cur_round_swings++;
         }
         return;
     }
 
     /* --- New round detection: "* Combat Engaged *" or similar --- */
     if (pst_contains(line, "Combat Engaged")) {
-        /* Record previous round if any damage was dealt */
-        if (pst_s.cur_round_dmg > 0) {
+        /* Record previous round if any swings happened (0-dmg rounds from all-misses count) */
+        if (pst_s.cur_round_swings > 0) {
             pst_record_hit(&pst_s.rnd, pst_s.cur_round_dmg);
             pst_s.cur_round_dmg = 0;
+            pst_s.cur_round_swings = 0;
         }
     }
 }
@@ -7997,12 +7982,12 @@ static void pst_reset_combat(void) {
     pst_atk_clear(&pst_s.hit);
     pst_atk_clear(&pst_s.crit);
     pst_atk_clear(&pst_s.extra);
+    pst_atk_clear(&pst_s.backstab);
     pst_atk_clear(&pst_s.spell);
     pst_atk_clear(&pst_s.rnd);
     pst_s.cur_round_dmg = 0;
+    pst_s.cur_round_swings = 0;
     pst_s.dodge = 0;
-    pst_s.mon_miss = 0;
-    pst_s.mon_hit = 0;
     pst_s.combat_start_tick = GetTickCount();
 }
 
@@ -8023,6 +8008,7 @@ static void pst_toggle(void)
             pst_atk_clear(&pst_s.hit);
             pst_atk_clear(&pst_s.crit);
             pst_atk_clear(&pst_s.extra);
+            pst_atk_clear(&pst_s.backstab);
             pst_atk_clear(&pst_s.spell);
             pst_atk_clear(&pst_s.rnd);
         }
@@ -8183,18 +8169,19 @@ static void pst_draw(int vp_w, int vp_h)
     cy += row_h;
 
     /* Accuracy rows */
-    int total_atk = pst_s.miss + pst_s.hit.n + pst_s.crit.n + pst_s.extra.n + pst_s.spell.n;
+    int total_atk = pst_s.miss + pst_s.hit.n + pst_s.crit.n + pst_s.extra.n + pst_s.backstab.n + pst_s.spell.n;
     if (total_atk == 0) total_atk = 1;
 
     struct { const char *name; int count; pst_atk_t *atk; float r, g, b; } arows[] = {
-        {"Miss", pst_s.miss,    NULL,          1.0f, 0.35f, 0.35f},
-        {"Hit",  pst_s.hit.n,   &pst_s.hit,    txr,  txg,   txb},
-        {"Crit", pst_s.crit.n,  &pst_s.crit,   1.0f, 0.85f, 0.2f},
-        {"Xtra", pst_s.extra.n, &pst_s.extra,   0.3f, 0.9f,  1.0f},
-        {"Spel", pst_s.spell.n, &pst_s.spell,   0.85f, 0.4f, 1.0f},
+        {"Miss", pst_s.miss,       NULL,             1.0f, 0.35f, 0.35f},
+        {"Hit",  pst_s.hit.n,      &pst_s.hit,       txr,  txg,   txb},
+        {"Crit", pst_s.crit.n,     &pst_s.crit,      1.0f, 0.85f, 0.2f},
+        {"Xtra", pst_s.extra.n,    &pst_s.extra,      0.3f, 0.9f,  1.0f},
+        {"BS",   pst_s.backstab.n, &pst_s.backstab,   1.0f, 0.6f,  0.1f},
+        {"Spel", pst_s.spell.n,    &pst_s.spell,      0.85f, 0.4f, 1.0f},
     };
 
-    for (int i = 0; i < 5; i++) {
+    for (int i = 0; i < 6; i++) {
         int pct = arows[i].count * 100 / total_atk;
         float rr = arows[i].r, rg = arows[i].g, rb = arows[i].b;
 
@@ -8247,29 +8234,11 @@ static void pst_draw(int vp_w, int vp_h)
     ptext((int)x0 + pad, sh_ty, "\xC4\xC4 Defense \xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4", acr, acg, acb, vp_w, vp_h, cw, ch);
     cy += section_h;
 
-    /* Defense rows */
-    int total_def = pst_s.dodge + pst_s.mon_miss + pst_s.mon_hit;
-    if (total_def > 0) {
-        struct { const char *name; int count; float r, g, b; } drows[] = {
-            {"Dodge:", pst_s.dodge,    0.3f, 1.0f, 0.3f},
-            {"Missed:", pst_s.mon_miss, txr,  txg,  txb},
-            {"Hit:",    pst_s.mon_hit,  1.0f, 0.35f, 0.35f},
-        };
-        for (int i = 0; i < 3; i++) {
-            if (i & 1) {
-                psolid(x0 + 3.0f, (float)cy, x1 - 3.0f, (float)(cy + row_h),
-                       1.0f, 1.0f, 1.0f, 0.02f, vp_w, vp_h);
-            }
-            int dpct = drows[i].count * 100 / total_def;
-            _snprintf(buf, sizeof(buf), "%d (%d%%)", drows[i].count, dpct);
-            ptext((int)x0 + pad, cy + 2, drows[i].name, drows[i].r, drows[i].g, drows[i].b, vp_w, vp_h, cw, ch);
-            ptext(val_x, cy + 2, buf, dmr, dmg, dmb, vp_w, vp_h, cw, ch);
-            cy += row_h;
-        }
-    } else {
-        ptext((int)x0 + pad, cy + 2, "No attacks received.", dmr, dmg, dmb, vp_w, vp_h, cw, ch);
-        cy += row_h;
-    }
+    /* Dodge count */
+    _snprintf(buf, sizeof(buf), "%d", pst_s.dodge);
+    ptext((int)x0 + pad, cy + 2, "Dodge:", 0.3f, 1.0f, 0.3f, vp_w, vp_h, cw, ch);
+    ptext(val_x, cy + 2, buf, txr, txg, txb, vp_w, vp_h, cw, ch);
+    cy += row_h;
 
     /* Auto-size panel height to content */
     pst_h = (float)(cy - (int)y0 + 6);
