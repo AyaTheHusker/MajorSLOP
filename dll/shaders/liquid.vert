@@ -15,6 +15,10 @@ layout(push_constant) uniform PushConstants {
     float fx_scanlines;  /* 0 = off, 1 = CRT scanlines (fragment only) */
     float fx_fbm;        /* 0 = off, 1 = FBM noise warp */
     float fx_sobel;      /* 0 = off, 1 = sobel/sharp (fragment only) */
+    float pp_brightness; /* -1..1, default 0 */
+    float pp_contrast;   /* 0..2, default 1 */
+    float pp_hue;        /* -180..180 degrees shift */
+    float pp_saturation; /* 0..2, default 1 */
 } pc;
 
 /* ---- FBM Noise (hash-based, no texture needed) ---- */

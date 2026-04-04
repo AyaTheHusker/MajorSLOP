@@ -12,7 +12,7 @@
 #define VIZ_GRAVITY         600.0f
 #define VIZ_SPRING_K        10.0f
 #define VIZ_SPRING_DAMP     0.88f
-#define VIZ_SHATTER_VEL     150.0f
+#define VIZ_SHATTER_VEL     60.0f   /* low threshold so blades shred on contact */
 #define VIZ_CELL_RESPAWN    4.0f  /* seconds before shattered cell reappears */
 
 /* ---- Types ---- */
@@ -391,9 +391,9 @@ static void viz_update_blades(float dt, float cw, float ch, float x_off,
                             float ny = (dist > 0.1f) ? dy / dist : 1;
                             viz_push_cell(r, c, -nx * push, -ny * push);
                         }
-                        /* Boulder loses some speed on impact */
-                        p->vx *= 0.95f;
-                        p->vy *= 0.85f;
+                        /* Blade barely slows — shreds right through */
+                        p->vx *= 0.99f;
+                        p->vy *= 0.97f;
                     }
                 }
             }
@@ -1053,18 +1053,29 @@ static void viz_push_quads(float cw, float ch, float x_off, float top_pad_px,
                           fr, fg, fb, 1.0f);
             }
         }
-        /* Soft glow halo on beat */
+        /* Soft glow halo on beat — rendered as fading concentric rings */
         if (beat_glow > 0.05f) {
-            float gr = rad * (1.6f + beat_glow * 0.8f);
-            float ga = beat_glow * 0.25f;
             float bh2 = cb->metallic_hue + viz_time * 0.5f;
             float gR = 0.5f + 0.5f * sinf(bh2 * 6.28f);
             float gG = 0.5f + 0.5f * sinf(bh2 * 6.28f + 2.09f);
             float gB = 0.5f + 0.5f * sinf(bh2 * 6.28f + 4.19f);
-            push_quad(VPX(cb->x - gr), VPY(cb->y - gr),
-                      VPX(cb->x + gr), VPY(cb->y + gr),
-                      su0, sv0, su1, sv1,
-                      gR, gG, gB, ga);
+            /* 3 concentric glow rings, fading outward */
+            for (int ring = 1; ring <= 3; ring++) {
+                float gr = rad * (1.0f + ring * 0.25f);
+                float ga = beat_glow * (0.15f / ring);
+                float bsz = px_sz * 1.5f;
+                int steps = (int)(6.28f * gr / bsz);
+                if (steps < 12) steps = 12;
+                for (int gs = 0; gs < steps; gs++) {
+                    float a = gs * (6.28318f / steps);
+                    float gx = cb->x + cosf(a) * gr;
+                    float gy = cb->y + sinf(a) * gr;
+                    push_quad(VPX(gx - bsz*0.5f), VPY(gy - bsz*0.5f),
+                              VPX(gx + bsz*0.5f), VPY(gy + bsz*0.5f),
+                              su0, sv0, su1, sv1,
+                              gR, gG, gB, ga);
+                }
+            }
         }
     }
 

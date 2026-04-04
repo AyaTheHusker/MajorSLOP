@@ -628,7 +628,7 @@ static int ttf_loaded[MAX_TTF_FONTS] = {0};
 #define VKM_ITEM_CONSOLE 3
 #define VKM_ITEM_PATHS   4   /* Paths & Loops — opens VKW window */
 #define VKM_ITEM_RECENT  5   /* Recent > last 10 goto destinations */
-#define VKM_ITEM_EXTRAS  6   /* Extras > (Hide/Show MegaMUD) */
+#define VKM_ITEM_EXTRAS  6   /* Settings > (Sound, Color, Viz) */
 #define VKM_ITEM_SEP2    7
 #define VKM_ITEM_CLOSE   8
 #define VKM_ROOT_COUNT   9
@@ -666,16 +666,18 @@ static int ttf_loaded[MAX_TTF_FONTS] = {0};
 #define VKM_FX_WOBBLE    5
 #define VKM_FX_COUNT     6   /* wobble only shown when vk_experimental=True */
 
-/* Extras submenu items */
+/* Settings submenu items */
 #define VKM_SUB_EXTRAS   7
-#define VKM_EXT_HIDEMM   0   /* Hide/Show MegaMUD */
-#define VKM_EXT_SOUND    1   /* Sound Settings */
+#define VKM_EXT_SOUND    0   /* Sound Settings */
+#define VKM_EXT_COLOR    1   /* Color/Brightness */
 #define VKM_EXT_SEP1     2   /* separator */
-#define VKM_EXT_BLADES   3   /* Pixel Blades */
-#define VKM_EXT_CBALLS   4   /* Cannon Balls */
-#define VKM_EXT_MATRIX   5   /* Matrix Rain */
-#define VKM_EXT_ASTEROIDS 6  /* Asteroids */
-#define VKM_EXT_COUNT    7
+#define VKM_EXT_HIDEMM   3   /* Hide/Show MegaMUD */
+#define VKM_EXT_SEP2B    4   /* separator */
+#define VKM_EXT_BLADES   5   /* Pixel Blades */
+#define VKM_EXT_CBALLS   6   /* Cannon Balls */
+#define VKM_EXT_MATRIX   7   /* Matrix Rain */
+#define VKM_EXT_ASTEROIDS 8  /* Asteroids */
+#define VKM_EXT_COUNT    9
 
 static int megamud_hidden = 0; /* 1 = MegaMUD windows hidden, VK-only mode */
 static int snd_wnd_idx = -1;  /* Sound Settings window index (forward decl) */
@@ -2623,6 +2625,25 @@ static int fx_sobel_mode = 0;     /* 0 = off, 1 = sobel/sharp/plastic */
 static int fx_scanline_mode = 0;  /* 0 = off, 1 = CRT scanlines */
 static float fx_time = 0.0f;      /* animation time in seconds */
 
+/* Post-process color/brightness settings */
+static float pp_brightness = 0.0f;   /* -1..1 */
+static float pp_contrast = 1.0f;     /* 0..2 */
+static float pp_hue = 0.0f;          /* -180..180 degrees */
+static float pp_saturation = 1.0f;   /* 0..2 */
+
+/* Color panel state */
+static int   clr_visible = 0;
+static float clr_x = 120.0f, clr_y = 80.0f;
+static float clr_w = 280.0f, clr_h = 200.0f;
+static int   clr_dragging = 0;
+static float clr_drag_ox, clr_drag_oy;
+static int   clr_active_slider = -1;  /* 0=brightness, 1=contrast, 2=hue, 3=saturation */
+static void  clr_open_window(void);
+static void  clr_draw(int vp_w, int vp_h);
+static int   clr_mouse_down(int mx, int my);
+static void  clr_mouse_move(int mx, int my);
+static void  clr_mouse_up(void);
+
 /* ---- Vulkan Round Timer Widget ---- */
 #define VRT_DEFAULT_SIZE 160
 #define VRT_MIN_SIZE      80
@@ -4350,7 +4371,7 @@ static void vkm_draw(int vp_w, int vp_h)
     const char *root_labels[VKM_ROOT_COUNT] = {
         "Visual  \x10", "Widgets  \x10", "",
         "Console", "Paths & Loops", "Recent  \x10",
-        "Extras  \x10",
+        "Settings  \x10",
         "", "Close  (F11)"
     };
 
@@ -4455,13 +4476,18 @@ static void vkm_draw(int vp_w, int vp_h)
                 else if (i == VKM_FX_SCANLINES) { label = "CRT Scanlines"; is_active = fx_scanline_mode; }
                 else if (i == VKM_FX_WOBBLE && vk_experimental) { label = "Wobbly Widgets \x1b[33m[EXP]"; is_active = fx_wobble_mode; }
             } else if (vkm_sub == VKM_SUB_EXTRAS) {
-                if (i == VKM_EXT_HIDEMM) {
+                if (i == VKM_EXT_SOUND) {
+                    label = "Sound";
+                    is_active = (snd_wnd_idx >= 0 && vkw_windows[snd_wnd_idx].active);
+                } else if (i == VKM_EXT_COLOR) {
+                    label = "Color/Brightness";
+                    is_active = clr_visible;
+                } else if (i == VKM_EXT_SEP1) {
+                    label = "";
+                } else if (i == VKM_EXT_HIDEMM) {
                     label = megamud_hidden ? "Show MegaMUD" : "Hide MegaMUD";
                     is_active = megamud_hidden;
-                } else if (i == VKM_EXT_SOUND) {
-                    label = "Sound Settings";
-                    is_active = (snd_wnd_idx >= 0 && vkw_windows[snd_wnd_idx].active);
-                } else if (i == VKM_EXT_SEP1) {
+                } else if (i == VKM_EXT_SEP2B) {
                     label = "\xC4\xC4\xC4 Visualizations \xC4\xC4\xC4";
                 } else if (i == VKM_EXT_BLADES) {
                     label = "Pixel Blades";
@@ -5356,6 +5382,7 @@ static void vkt_build_vertices(void)
     pl_draw(vp_w, vp_h);
     pst_draw(vp_w, vp_h);
     mr_draw(vp_w, vp_h);
+    clr_draw(vp_w, vp_h);
     pl_quad_end = quad_count;
 
     /* Draw context menu on top of EVERYTHING (last = topmost) */
@@ -6656,7 +6683,7 @@ static int vkt_create_swapchain(void)
         VkPushConstantRange pcr = {0};
         pcr.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
         pcr.offset = 0;
-        pcr.size = sizeof(float) * 6; /* time, fx_mode, fx_waves, fx_scanlines, fx_fbm, fx_sobel */
+        pcr.size = sizeof(float) * 10; /* time, fx_mode, fx_waves, fx_scanlines, fx_fbm, fx_sobel, pp_brightness, pp_contrast, pp_hue, pp_saturation */
 
         VkPipelineLayoutCreateInfo lplci = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
         lplci.setLayoutCount = 1;
@@ -6762,7 +6789,8 @@ static void vkt_render_frame(void)
     rpbi.pClearValues = &clear;
     vkCmdBeginRenderPass(vk_cmd_buf, &rpbi, VK_SUBPASS_CONTENTS_INLINE);
 
-    int fx_active = (fx_liquid_mode || fx_waves_mode || fx_scanline_mode || fx_fbm_mode || fx_sobel_mode) && vk_liquid_pipeline;
+    int pp_active = (pp_brightness != 0.0f || pp_contrast != 1.0f || pp_hue != 0.0f || pp_saturation != 1.0f);
+    int fx_active = (fx_liquid_mode || fx_waves_mode || fx_scanline_mode || fx_fbm_mode || fx_sobel_mode || pp_active) && vk_liquid_pipeline;
 
     VkDeviceSize offset = 0;
     vkCmdBindVertexBuffers(vk_cmd_buf, 0, 1, &vk_vbuf, &offset);
@@ -6773,12 +6801,13 @@ static void vkt_render_frame(void)
         vkCmdBindPipeline(vk_cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS, vk_liquid_pipeline);
         vkCmdBindDescriptorSets(vk_cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                 vk_liquid_pipe_layout, 0, 1, &vk_desc_set, 0, NULL);
-        float pc_data[6] = { fx_time,
+        float pc_data[10] = { fx_time,
                               fx_liquid_mode ? 1.0f : 0.0f,
                               fx_waves_mode ? 1.0f : 0.0f,
                               fx_scanline_mode ? 1.0f : 0.0f,
                               fx_fbm_mode ? 1.0f : 0.0f,
-                              fx_sobel_mode ? 1.0f : 0.0f };
+                              fx_sobel_mode ? 1.0f : 0.0f,
+                              pp_brightness, pp_contrast, pp_hue, pp_saturation };
         vkCmdPushConstants(vk_cmd_buf, vk_liquid_pipe_layout,
                            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                            0, sizeof(pc_data), pc_data);
@@ -6819,12 +6848,13 @@ static void vkt_render_frame(void)
             vkCmdBindPipeline(vk_cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS, vk_liquid_pipeline);
             vkCmdBindDescriptorSets(vk_cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                     vk_liquid_pipe_layout, 0, 1, &vk_desc_set, 0, NULL);
-            float pc_data[6] = { fx_time,
+            float pc_data[10] = { fx_time,
                                   fx_liquid_mode ? 1.0f : 0.0f,
                                   fx_waves_mode ? 1.0f : 0.0f,
                                   fx_scanline_mode ? 1.0f : 0.0f,
                                   fx_fbm_mode ? 1.0f : 0.0f,
-                                  fx_sobel_mode ? 1.0f : 0.0f };
+                                  fx_sobel_mode ? 1.0f : 0.0f,
+                                  pp_brightness, pp_contrast, pp_hue, pp_saturation };
             vkCmdPushConstants(vk_cmd_buf, vk_liquid_pipe_layout,
                                VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                                0, sizeof(pc_data), pc_data);
@@ -7123,6 +7153,11 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             mr_mouse_move(mx2, my2);
             return 0;
         }
+        /* Color panel drag/slider */
+        if (clr_dragging || clr_active_slider >= 0) {
+            clr_mouse_move(mx2, my2);
+            return 0;
+        }
         /* Player Stats drag */
         if (pst_dragging) {
             pst_x = (float)mx2 - pst_drag_ox;
@@ -7300,6 +7335,8 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         }
         /* MUDRadio panel click */
         if (mr_mouse_down(mx, my)) return 0;
+        /* Color/Brightness panel click */
+        if (clr_mouse_down(mx, my)) return 0;
         /* Player Stats panel click */
         if (pst_visible && mx >= (int)pst_x && mx < (int)(pst_x + pst_w) &&
             my >= (int)pst_y && my < (int)(pst_y + pst_h)) {
@@ -7370,6 +7407,7 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         int my = mouse_ty((short)HIWORD(lParam));
         if (pl_dragging) { pl_dragging = 0; return 0; }
         if (mr_dragging || mr_resizing || mr_vol_dragging) { mr_mouse_up(); return 0; }
+        if (clr_dragging || clr_active_slider >= 0) { clr_mouse_up(); return 0; }
         if (pst_dragging) { pst_dragging = 0; return 0; }
         if (vrt_dragging) { vrt_dragging = 0; return 0; }
         vkw_mouse_up(); /* end any drag/resize */
@@ -7466,9 +7504,13 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             return 0;
         }
 
-        /* Extras submenu click */
+        /* Settings submenu click */
         if (si >= 0 && vkm_sub == VKM_SUB_EXTRAS) {
-            if (si == VKM_EXT_HIDEMM) {
+            if (si == VKM_EXT_SOUND) {
+                snd_open_window();
+            } else if (si == VKM_EXT_COLOR) {
+                clr_open_window();
+            } else if (si == VKM_EXT_HIDEMM) {
                 megamud_hidden = !megamud_hidden;
                 if (mmmain_hwnd) {
                     if (megamud_hidden) {
@@ -7481,8 +7523,6 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 }
                 if (api) api->log("[vk_terminal] MegaMUD %s\n",
                                   megamud_hidden ? "HIDDEN" : "SHOWN");
-            } else if (si == VKM_EXT_SOUND) {
-                snd_open_window();
             } else if (si == VKM_EXT_BLADES) {
                 viz_mode = (viz_mode == VIZ_BLADES) ? VIZ_NONE : VIZ_BLADES;
                 if (viz_mode == VIZ_BLADES) viz_init();
@@ -8556,6 +8596,208 @@ static void snd_open_window(void)
     vkw_print(snd_wnd_idx, "");
     vkw_print(snd_wnd_idx, "\x1b[0;36mPTT Key: F9 (hold to record)\x1b[0m");
     vkw_print(snd_wnd_idx, "\x1b[0;36mTTS: SAM + eSpeak loaded\x1b[0m");
+}
+
+/* ---- Color/Brightness Settings Panel ---- */
+
+static void clr_open_window(void) {
+    clr_visible = !clr_visible;
+    if (clr_visible) {
+        int vp_w = (int)vk_sc_extent.width, vp_h = (int)vk_sc_extent.height;
+        if (clr_x < 1 && clr_y < 1) {
+            clr_x = (float)(vp_w - (int)clr_w) / 2.0f;
+            clr_y = (float)(vp_h - (int)clr_h) / 2.0f;
+        }
+    }
+}
+
+static void clr_draw_slider(float x0, float y0, float w, float h,
+                             float val, float vmin, float vmax,
+                             const char *label, const char *fmt_val,
+                             int vp_w, int vp_h, const ui_theme_t *t)
+{
+    int cw = VKM_CHAR_W, ch = VKM_CHAR_H;
+    /* Label on the left */
+    push_text((int)x0, (int)y0, label, t->text[0], t->text[1], t->text[2], vp_w, vp_h, cw, ch);
+
+    /* Slider track */
+    float sx0 = x0 + 110;
+    float sx1 = x0 + w - 50;
+    float sy = y0 + ch * 0.5f - 3;
+    float sh = 6.0f;
+
+    /* Track background */
+    push_solid((int)sx0, (int)sy, (int)sx1, (int)(sy + sh),
+               t->text[0] * 0.2f, t->text[1] * 0.2f, t->text[2] * 0.2f,
+               0.5f, vp_w, vp_h);
+
+    /* Fill */
+    float pct = (val - vmin) / (vmax - vmin);
+    if (pct < 0) pct = 0; if (pct > 1) pct = 1;
+    float fill_x = sx0 + pct * (sx1 - sx0);
+    push_solid((int)sx0, (int)sy, (int)fill_x, (int)(sy + sh),
+               t->accent[0], t->accent[1], t->accent[2],
+               0.6f, vp_w, vp_h);
+
+    /* Thumb */
+    push_solid((int)(fill_x - 3), (int)(sy - 2), (int)(fill_x + 3), (int)(sy + sh + 2),
+               t->text[0], t->text[1], t->text[2],
+               0.9f, vp_w, vp_h);
+
+    /* Value text */
+    push_text((int)(sx1 + 6), (int)y0, fmt_val, t->text[0], t->text[1], t->text[2], vp_w, vp_h, cw, ch);
+}
+
+static void clr_draw(int vp_w, int vp_h) {
+    if (!clr_visible) return;
+    const ui_theme_t *t = &ui_themes[current_theme];
+    int cw = VKM_CHAR_W, ch = VKM_CHAR_H;
+    float x0 = clr_x, y0 = clr_y;
+    float pw = clr_w;
+    int titlebar_h = ch + 8;
+
+    /* Panel background */
+    push_solid((int)x0, (int)y0, (int)(x0 + pw), (int)(y0 + clr_h),
+               t->bg[0], t->bg[1], t->bg[2], 0.92f, vp_w, vp_h);
+    /* Border */
+    push_solid((int)x0, (int)y0, (int)(x0 + pw), (int)(y0 + 1),
+               t->accent[0], t->accent[1], t->accent[2], 0.6f, vp_w, vp_h);
+    push_solid((int)x0, (int)(y0 + clr_h - 1), (int)(x0 + pw), (int)(y0 + clr_h),
+               t->accent[0], t->accent[1], t->accent[2], 0.6f, vp_w, vp_h);
+    push_solid((int)x0, (int)y0, (int)(x0 + 1), (int)(y0 + clr_h),
+               t->accent[0], t->accent[1], t->accent[2], 0.6f, vp_w, vp_h);
+    push_solid((int)(x0 + pw - 1), (int)y0, (int)(x0 + pw), (int)(y0 + clr_h),
+               t->accent[0], t->accent[1], t->accent[2], 0.6f, vp_w, vp_h);
+
+    /* Titlebar */
+    push_solid((int)x0, (int)y0, (int)(x0 + pw), (int)(y0 + titlebar_h),
+               t->accent[0] * 0.3f, t->accent[1] * 0.3f, t->accent[2] * 0.3f,
+               0.8f, vp_w, vp_h);
+    push_text((int)(x0 + 6), (int)(y0 + 4), "Color / Brightness",
+              t->accent[0], t->accent[1], t->accent[2], vp_w, vp_h, cw, ch);
+    /* Close X */
+    push_text((int)(x0 + pw - 16), (int)(y0 + 4), "X",
+              t->text[0] * 0.6f, t->text[1] * 0.6f, t->text[2] * 0.6f, vp_w, vp_h, cw, ch);
+
+    /* Reset button */
+    push_text((int)(x0 + pw - 55), (int)(y0 + 4), "Reset",
+              t->text[0] * 0.5f, t->text[1] * 0.5f, t->text[2] * 0.5f, vp_w, vp_h, cw, ch);
+
+    float cy = y0 + titlebar_h + 12;
+    float row_h = ch + 14;
+    char vbuf[32];
+
+    _snprintf(vbuf, sizeof(vbuf), "%+.0f%%", pp_brightness * 100);
+    clr_draw_slider(x0 + 8, cy, pw - 16, row_h, pp_brightness, -1.0f, 1.0f,
+                    "Brightness", vbuf, vp_w, vp_h, t);
+    cy += row_h;
+
+    _snprintf(vbuf, sizeof(vbuf), "%.0f%%", pp_contrast * 100);
+    clr_draw_slider(x0 + 8, cy, pw - 16, row_h, pp_contrast, 0.0f, 2.0f,
+                    "Contrast", vbuf, vp_w, vp_h, t);
+    cy += row_h;
+
+    _snprintf(vbuf, sizeof(vbuf), "%+.0f\xF8", pp_hue); /* degree symbol */
+    clr_draw_slider(x0 + 8, cy, pw - 16, row_h, pp_hue, -180.0f, 180.0f,
+                    "Hue Shift", vbuf, vp_w, vp_h, t);
+    cy += row_h;
+
+    _snprintf(vbuf, sizeof(vbuf), "%.0f%%", pp_saturation * 100);
+    clr_draw_slider(x0 + 8, cy, pw - 16, row_h, pp_saturation, 0.0f, 2.0f,
+                    "Saturation", vbuf, vp_w, vp_h, t);
+    cy += row_h;
+
+    clr_h = cy - y0 + 8;
+}
+
+static int clr_hit_slider(int mx, int my, float *out_pct) {
+    int cw = VKM_CHAR_W, ch = VKM_CHAR_H;
+    int titlebar_h = ch + 8;
+    float row_h = ch + 14;
+
+    float sx0 = clr_x + 8 + 110;
+    float sx1 = clr_x + clr_w - 16 - 50 + 8;
+
+    for (int i = 0; i < 4; i++) {
+        float sy = clr_y + titlebar_h + 12 + i * row_h;
+        if (my >= (int)sy && my < (int)(sy + row_h) &&
+            mx >= (int)(sx0 - 4) && mx <= (int)(sx1 + 4)) {
+            float pct = ((float)mx - sx0) / (sx1 - sx0);
+            if (pct < 0) pct = 0; if (pct > 1) pct = 1;
+            *out_pct = pct;
+            return i;
+        }
+    }
+    return -1;
+}
+
+static void clr_set_from_pct(int slider, float pct) {
+    switch (slider) {
+        case 0: pp_brightness = -1.0f + pct * 2.0f; break;
+        case 1: pp_contrast = pct * 2.0f; break;
+        case 2: pp_hue = -180.0f + pct * 360.0f; break;
+        case 3: pp_saturation = pct * 2.0f; break;
+    }
+}
+
+static int clr_mouse_down(int mx, int my) {
+    if (!clr_visible) return 0;
+    if (mx < (int)clr_x || mx >= (int)(clr_x + clr_w) ||
+        my < (int)clr_y || my >= (int)(clr_y + clr_h)) return 0;
+
+    int cw = VKM_CHAR_W, ch = VKM_CHAR_H;
+    int titlebar_h = ch + 8;
+    int ly = my - (int)clr_y;
+
+    /* Close button */
+    if (ly < titlebar_h && mx >= (int)(clr_x + clr_w - 20)) {
+        clr_visible = 0;
+        return 1;
+    }
+    /* Reset button */
+    if (ly < titlebar_h && mx >= (int)(clr_x + clr_w - 60) && mx < (int)(clr_x + clr_w - 20)) {
+        pp_brightness = 0.0f; pp_contrast = 1.0f;
+        pp_hue = 0.0f; pp_saturation = 1.0f;
+        return 1;
+    }
+    /* Titlebar drag */
+    if (ly < titlebar_h) {
+        clr_dragging = 1;
+        clr_drag_ox = (float)mx - clr_x;
+        clr_drag_oy = (float)my - clr_y;
+        return 1;
+    }
+
+    /* Slider click */
+    float pct;
+    int s = clr_hit_slider(mx, my, &pct);
+    if (s >= 0) {
+        clr_active_slider = s;
+        clr_set_from_pct(s, pct);
+        return 1;
+    }
+
+    return 1; /* consume click inside panel */
+}
+
+static void clr_mouse_move(int mx, int my) {
+    if (clr_dragging) {
+        clr_x = (float)mx - clr_drag_ox;
+        clr_y = (float)my - clr_drag_oy;
+        return;
+    }
+    if (clr_active_slider >= 0) {
+        float sx0 = clr_x + 8 + 110;
+        float sx1 = clr_x + clr_w - 16 - 50 + 8;
+        float pct = ((float)mx - sx0) / (sx1 - sx0);
+        if (pct < 0) pct = 0; if (pct > 1) pct = 1;
+        clr_set_from_pct(clr_active_slider, pct);
+    }
+}
+
+static void clr_mouse_up(void) {
+    clr_dragging = 0;
+    clr_active_slider = -1;
 }
 
 __declspec(dllexport) void vkt_vk_plugins_show_experimental(int val)

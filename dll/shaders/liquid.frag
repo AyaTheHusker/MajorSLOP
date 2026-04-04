@@ -15,6 +15,10 @@ layout(push_constant) uniform PushConstants {
     float fx_scanlines;  /* 0 = off, 1 = CRT scanlines */
     float fx_fbm;        /* 0 = off, 1 = FBM currents (vertex shader) */
     float fx_sobel;      /* 0 = off, 1 = sobel/sharp/plastic */
+    float pp_brightness; /* -1..1, default 0 */
+    float pp_contrast;   /* 0..2, default 1 */
+    float pp_hue;        /* -180..180 degrees shift */
+    float pp_saturation; /* 0..2, default 1 */
 } pc;
 
 /* --- Helpers --- */
@@ -167,6 +171,50 @@ void main() {
         }
 
         outColor.rgb = litColor;
+    }
+
+    /* ---- Color/Brightness Post-Process (before scanlines) ---- */
+    if (outColor.a > 0.01) {
+        /* Brightness: shift RGB */
+        outColor.rgb += pc.pp_brightness;
+
+        /* Contrast: scale around 0.5 midpoint */
+        outColor.rgb = (outColor.rgb - 0.5) * pc.pp_contrast + 0.5;
+
+        /* RGB → HSV for hue/saturation */
+        if (pc.pp_hue != 0.0 || pc.pp_saturation != 1.0) {
+            vec3 c = outColor.rgb;
+            float cmax = max(c.r, max(c.g, c.b));
+            float cmin = min(c.r, min(c.g, c.b));
+            float delta = cmax - cmin;
+            float h = 0.0, s = 0.0, v = cmax;
+            if (delta > 0.0001) {
+                s = delta / cmax;
+                if (c.r >= cmax) h = (c.g - c.b) / delta;
+                else if (c.g >= cmax) h = 2.0 + (c.b - c.r) / delta;
+                else h = 4.0 + (c.r - c.g) / delta;
+                h *= 60.0;
+                if (h < 0.0) h += 360.0;
+            }
+            /* Apply hue shift and saturation */
+            h = mod(h + pc.pp_hue, 360.0);
+            s = clamp(s * pc.pp_saturation, 0.0, 1.0);
+            /* HSV → RGB */
+            float hh = h / 60.0;
+            int hi = int(floor(hh));
+            float f = hh - float(hi);
+            float p = v * (1.0 - s);
+            float q = v * (1.0 - s * f);
+            float tt = v * (1.0 - s * (1.0 - f));
+            if (hi == 0)      outColor.rgb = vec3(v, tt, p);
+            else if (hi == 1) outColor.rgb = vec3(q, v, p);
+            else if (hi == 2) outColor.rgb = vec3(p, v, tt);
+            else if (hi == 3) outColor.rgb = vec3(p, q, v);
+            else if (hi == 4) outColor.rgb = vec3(tt, p, v);
+            else              outColor.rgb = vec3(v, p, q);
+        }
+
+        outColor.rgb = clamp(outColor.rgb, 0.0, 1.0);
     }
 
     /* ---- CRT Scanlines (applied last) ---- */
