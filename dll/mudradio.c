@@ -10,6 +10,124 @@
 #define DR_WAV_IMPLEMENTATION
 #include "dr_wav.h"
 
+#include "kiss_fftr.h"
+#include <math.h>
+
+/* ---- Beat detection state ---- */
+#define MR_FFT_SIZE   1024
+static kiss_fftr_cfg mr_fft_cfg = NULL;
+static float         mr_fft_buf[MR_FFT_SIZE];  /* mono accumulator */
+static int           mr_fft_pos = 0;
+static float         mr_prev_kick = 0;     /* previous kick energy for onset */
+static float         mr_kick_avg  = 0;     /* running average of kick energy */
+static DWORD         mr_last_onset_tick = 0; /* cooldown between onsets */
+#define MR_ONSET_COOLDOWN_MS  120          /* min ms between beat triggers */
+
+static void mr_analyze_audio(const float *pcm_stereo, int frames)
+{
+    if (!mr_fft_cfg) {
+        mr_fft_cfg = kiss_fftr_alloc(MR_FFT_SIZE, 0, NULL, NULL);
+        if (!mr_fft_cfg) return;
+    }
+
+    /* Downmix stereo to mono into accumulator */
+    for (int i = 0; i < frames; i++) {
+        mr_fft_buf[mr_fft_pos] = (pcm_stereo[i*2] + pcm_stereo[i*2+1]) * 0.5f;
+        mr_fft_pos++;
+        if (mr_fft_pos >= MR_FFT_SIZE) {
+            /* Run FFT */
+            kiss_fft_cpx freq[MR_FFT_SIZE / 2 + 1];
+            kiss_fftr(mr_fft_cfg, mr_fft_buf, freq);
+
+            int n_bins = MR_FFT_SIZE / 2 + 1;
+
+            /* Kick drum band: 40-215 Hz (bins 1-5 at 44100/1024 ≈ 43Hz/bin) */
+            float kick = 0;
+            for (int b = 1; b <= 5 && b < n_bins; b++) {
+                float mag = sqrtf(freq[b].r * freq[b].r + freq[b].i * freq[b].i);
+                kick += mag;
+            }
+            kick /= 5.0f;
+
+            /* Sub-bass: 0-40 Hz (bin 0) — rumble, not beats */
+            float sub = sqrtf(freq[0].r * freq[0].r + freq[0].i * freq[0].i);
+
+            /* Full bass: 0-300 Hz (bins 0-7) */
+            float bass = 0;
+            for (int b = 0; b < 7 && b < n_bins; b++) {
+                float mag = sqrtf(freq[b].r * freq[b].r + freq[b].i * freq[b].i);
+                bass += mag;
+            }
+            bass /= 7.0f;
+
+            /* Mid: 300-4000 Hz (bins 7-93) */
+            float mid = 0;
+            for (int b = 7; b < 93 && b < n_bins; b++) {
+                float mag = sqrtf(freq[b].r * freq[b].r + freq[b].i * freq[b].i);
+                mid += mag;
+            }
+            mid /= 86.0f;
+
+            /* Treble: 4000-16000 Hz (bins 93-372) */
+            float treble = 0;
+            for (int b = 93; b < 372 && b < n_bins; b++) {
+                float mag = sqrtf(freq[b].r * freq[b].r + freq[b].i * freq[b].i);
+                treble += mag;
+            }
+            treble /= 279.0f;
+
+            /* Normalize — auto-scale: track peak and normalize against it */
+            static float kick_peak = 1.0f;
+            if (kick > kick_peak) kick_peak = kick;
+            else kick_peak *= 0.9999f; /* slow decay so it adapts */
+            if (kick_peak < 0.001f) kick_peak = 0.001f;
+            float kick_n = kick / kick_peak; /* 0-1 relative to recent peak */
+
+            static float bass_peak = 1.0f;
+            if (bass > bass_peak) bass_peak = bass;
+            else bass_peak *= 0.9999f;
+            if (bass_peak < 0.001f) bass_peak = 0.001f;
+            float bass_n = bass / bass_peak;
+            float mid_n    = mid    * 0.04f;
+            float treble_n = treble * 0.08f;
+            if (kick_n > 1.0f) kick_n = 1.0f;
+            if (bass_n > 1.0f) bass_n = 1.0f;
+            if (mid_n > 1.0f) mid_n = 1.0f;
+            if (treble_n > 1.0f) treble_n = 1.0f;
+
+            /* Running average for adaptive threshold */
+            mr_kick_avg = mr_kick_avg * 0.92f + kick_n * 0.08f;
+
+            /* Onset detection: kick-only, must exceed running average by 40%+ */
+            DWORD now = GetTickCount();
+            int onset = 0;
+            float thresh = mr_kick_avg * 1.4f;
+            if (thresh < 0.12f) thresh = 0.12f; /* minimum absolute threshold */
+
+            if (kick_n > thresh && kick_n > mr_prev_kick * 1.3f &&
+                (now - mr_last_onset_tick) > MR_ONSET_COOLDOWN_MS) {
+                onset = 1;
+                mr_last_onset_tick = now;
+            }
+
+            /* Update beat snapshot */
+            EnterCriticalSection(&mr_beat_lock);
+            mr_beat_snap.bass_energy   = bass_n;
+            mr_beat_snap.mid_energy    = mid_n;
+            mr_beat_snap.treble_energy = treble_n;
+            mr_beat_snap.onset_detected = onset;
+            if (onset) mr_beat_snap.beat_count++;
+            mr_beat_snap.onset_strength = kick_n;
+            mr_beat_snap.tick = now;
+            LeaveCriticalSection(&mr_beat_lock);
+
+            mr_prev_kick = kick_n;
+
+            mr_fft_pos = 0;
+        }
+    }
+}
+
 /* WinINet for HTTP (dynamically loaded) */
 typedef void *HINTERNET;
 #define INTERNET_OPEN_TYPE_PRECONFIG 0
@@ -300,6 +418,10 @@ static void mr_ma_data_callback(ma_device *pDevice, void *pOutput, const void *p
     ma_uint64 frames_read = 0;
     ma_decoder_read_pcm_frames(&mr_ma_dec, out, frameCount, &frames_read);
 
+    /* Beat analysis on raw decoded audio (before volume) */
+    if (frames_read > 0)
+        mr_analyze_audio(out, (int)frames_read);
+
     /* Apply volume */
     float vol = mr_volume;
     for (ma_uint64 i = 0; i < frames_read * 2; i++)
@@ -309,6 +431,8 @@ static void mr_ma_data_callback(ma_device *pDevice, void *pOutput, const void *p
     if (frames_read < frameCount)
         memset(out + frames_read * 2, 0, (frameCount - frames_read) * 2 * sizeof(float));
 }
+
+static volatile int mr_dec_inited = 0;
 
 static int mr_open_audio(void) {
     if (mr_ma_dev_started) return 1;
@@ -340,6 +464,7 @@ static int mr_open_decoder(void) {
         if (f) { fprintf(f, "ma_decoder_init failed: %d, net_avail=%d\n", rc, mr_net_avail()); fclose(f); }
         return 0;
     }
+    mr_dec_inited = 1;
     mr_ma_dec_ready = 1;
     FILE *f = fopen("C:\\MegaMUD\\radio_error.txt", "a");
     if (f) { fprintf(f, "decoder OK, net_avail=%d\n", mr_net_avail()); fclose(f); }
@@ -347,15 +472,32 @@ static int mr_open_decoder(void) {
 }
 
 static void mr_close_audio(void) {
-    /* Order matters: stop callback from using decoder, then stop device, then uninit decoder */
+    FILE *f = fopen("C:\\MegaMUD\\radio_error.txt", "a");
+    if (f) fprintf(f, "close_audio: dec_ready=%d dev_started=%d dec_inited=%d\n",
+                   mr_ma_dec_ready, mr_ma_dev_started, mr_dec_inited);
+
+    /* 1. Tell callback to output silence */
     mr_ma_dec_ready = 0;
-    Sleep(50); /* let any in-flight callback finish */
+
+    /* 2. Stop device FIRST — this guarantees callback is no longer running */
     if (mr_ma_dev_started) {
+        if (f) fprintf(f, "  stopping device...\n");
         ma_device_stop(&mr_ma_dev);
+        if (f) fprintf(f, "  uninit device...\n");
         ma_device_uninit(&mr_ma_dev);
         mr_ma_dev_started = 0;
+        if (f) fprintf(f, "  device done\n");
     }
-    ma_decoder_uninit(&mr_ma_dec);
+
+    /* 3. NOW safe to uninit decoder — no callback can touch it */
+    if (mr_dec_inited) {
+        if (f) fprintf(f, "  uninit decoder...\n");
+        ma_decoder_uninit(&mr_ma_dec);
+        mr_dec_inited = 0;
+        if (f) fprintf(f, "  decoder done\n");
+    }
+
+    if (f) { fprintf(f, "close_audio: OK\n"); fclose(f); }
 }
 
 /* ---- Audio Thread ---- */
@@ -603,6 +745,7 @@ static void mr_stream_radio(void) {
     mr_transport = MR_STATE_PLAYING;
 
     /* Open miniaudio decoder — reads from net ring via callback */
+    if (!mr_net_running || !mr_audio_running) goto cleanup;
     if (!mr_open_decoder()) {
         mr_transport = MR_STATE_ERROR;
         goto cleanup;
@@ -691,6 +834,7 @@ static DWORD WINAPI mr_audio_thread_fn(LPVOID arg)
                 mr_transport = MR_STATE_ERROR;
                 continue;
             }
+            mr_dec_inited = 1;
             mr_ma_dec_ready = 1;
             mr_transport = MR_STATE_PLAYING;
 
@@ -755,8 +899,8 @@ static void mr_stop(void) {
         h = (HINTERNET)mr_net_hinet;
         if (h) { mr_net_hinet = NULL; pInternetCloseHandle(h); }
     }
-    /* Wait for audio thread to finish stream_radio/file and call mr_close_audio itself */
-    Sleep(300);
+    /* Wait for audio thread to see stop signal and exit stream_radio */
+    Sleep(200);
     /* Safety: close audio if stream_radio didn't get to it */
     mr_close_audio();
     mr_net_w = 0; mr_net_r = 0;
@@ -1027,6 +1171,7 @@ static void mr_shutdown(void) {
         mr_audio_thread = NULL;
     }
     mr_close_audio();
+    if (mr_fft_cfg) { kiss_fftr_free(mr_fft_cfg); mr_fft_cfg = NULL; }
     DeleteCriticalSection(&mr_beat_lock);
     DeleteCriticalSection(&mr_meta_lock);
     if (mr_wininet) { FreeLibrary(mr_wininet); mr_wininet = NULL; }

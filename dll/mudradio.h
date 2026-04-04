@@ -13,6 +13,7 @@ typedef struct {
     float bass_energy, mid_energy, treble_energy;
     float spectrum[512];
     int   onset_detected;
+    int   beat_count;       /* monotonic counter, increments on each onset */
     DWORD tick;
 } mr_beat_t;
 

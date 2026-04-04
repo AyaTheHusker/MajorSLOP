@@ -671,10 +671,11 @@ static int ttf_loaded[MAX_TTF_FONTS] = {0};
 #define VKM_EXT_HIDEMM   0   /* Hide/Show MegaMUD */
 #define VKM_EXT_SOUND    1   /* Sound Settings */
 #define VKM_EXT_SEP1     2   /* separator */
-#define VKM_EXT_BOULDERS 3   /* Rolling Boulders */
-#define VKM_EXT_MATRIX   4   /* Matrix Rain */
-#define VKM_EXT_ASTEROIDS 5  /* Asteroids */
-#define VKM_EXT_COUNT    6
+#define VKM_EXT_BLADES   3   /* Pixel Blades */
+#define VKM_EXT_CBALLS   4   /* Cannon Balls */
+#define VKM_EXT_MATRIX   5   /* Matrix Rain */
+#define VKM_EXT_ASTEROIDS 6  /* Asteroids */
+#define VKM_EXT_COUNT    7
 
 static int megamud_hidden = 0; /* 1 = MegaMUD windows hidden, VK-only mode */
 static int snd_wnd_idx = -1;  /* Sound Settings window index (forward decl) */
@@ -1865,8 +1866,9 @@ static void convo_parse_line(const char *line)
             p++;
             if (*p == '[') {
                 p++;
-                while (*p && *p != 'm') p++;
-                if (*p == 'm') p++;
+                /* Skip params/intermediates until CSI terminator (any letter) */
+                while (*p && !((*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z'))) p++;
+                if (*p) p++;
             }
             continue;
         }
@@ -1919,6 +1921,9 @@ static void convo_parse_line(const char *line)
         }
     }
 
+    /* Skip leading whitespace */
+    while (*s == ' ') s++;
+
     /* Match channels — just identify, don't reformat */
     if (str_starts(s, "You gossip:") || strstr(s, " gossips:"))
         chan = CHAT_GOSSIP;
@@ -1936,6 +1941,11 @@ static void convo_parse_line(const char *line)
     else if (str_starts(s, "You yell \"") || strstr(s, " yells \"") ||
              strstr(s, " yells from "))
         chan = CHAT_YELL;
+    /* Player online/offline notifications */
+    else if (strstr(s, " just entered the realm"))
+        chan = CHAT_SAY;  /* show as grey/info */
+    else if (strstr(s, " just hung up"))
+        chan = CHAT_SAY;
 
     if (chan < 0) return; /* not a chat line */
 
@@ -4453,9 +4463,12 @@ static void vkm_draw(int vp_w, int vp_h)
                     is_active = (snd_wnd_idx >= 0 && vkw_windows[snd_wnd_idx].active);
                 } else if (i == VKM_EXT_SEP1) {
                     label = "\xC4\xC4\xC4 Visualizations \xC4\xC4\xC4";
-                } else if (i == VKM_EXT_BOULDERS) {
-                    label = "Rolling Boulders";
-                    is_active = (viz_mode == VIZ_BOULDERS);
+                } else if (i == VKM_EXT_BLADES) {
+                    label = "Pixel Blades";
+                    is_active = (viz_mode == VIZ_BLADES);
+                } else if (i == VKM_EXT_CBALLS) {
+                    label = "Cannon Balls";
+                    is_active = (viz_mode == VIZ_CANNONBALLS);
                 } else if (i == VKM_EXT_MATRIX) {
                     label = "Matrix Rain";
                     is_active = (viz_mode == VIZ_MATRIX);
@@ -7470,9 +7483,12 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                                   megamud_hidden ? "HIDDEN" : "SHOWN");
             } else if (si == VKM_EXT_SOUND) {
                 snd_open_window();
-            } else if (si == VKM_EXT_BOULDERS) {
-                viz_mode = (viz_mode == VIZ_BOULDERS) ? VIZ_NONE : VIZ_BOULDERS;
-                if (viz_mode == VIZ_BOULDERS) viz_init();
+            } else if (si == VKM_EXT_BLADES) {
+                viz_mode = (viz_mode == VIZ_BLADES) ? VIZ_NONE : VIZ_BLADES;
+                if (viz_mode == VIZ_BLADES) viz_init();
+            } else if (si == VKM_EXT_CBALLS) {
+                viz_mode = (viz_mode == VIZ_CANNONBALLS) ? VIZ_NONE : VIZ_CANNONBALLS;
+                if (viz_mode == VIZ_CANNONBALLS) viz_init();
             } else if (si == VKM_EXT_MATRIX) {
                 viz_mode = (viz_mode == VIZ_MATRIX) ? VIZ_NONE : VIZ_MATRIX;
                 if (viz_mode == VIZ_MATRIX) viz_init();
@@ -7866,6 +7882,7 @@ static struct {
     pst_atk_t rnd;              /* per-round damage totals */
     int     cur_round_dmg;      /* accumulating current round */
     int     cur_round_swings;   /* swings this round (hits + misses) */
+    DWORD   last_swing_tick;    /* timestamp of last swing for round separation */
 
     /* Misc */
     int     kills;              /* monster kills */
@@ -7908,6 +7925,25 @@ static void pst_record_hit(pst_atk_t *a, int dmg) {
 
 static void pst_atk_clear(pst_atk_t *a) { a->n = 0; a->min = -1; a->max = 0; a->total = 0; }
 
+/* Flush current round if any swings accumulated */
+static void pst_flush_round(void) {
+    if (pst_s.cur_round_swings > 0) {
+        pst_record_hit(&pst_s.rnd, pst_s.cur_round_dmg);
+        pst_s.cur_round_dmg = 0;
+        pst_s.cur_round_swings = 0;
+    }
+}
+
+/* Check if enough time passed to consider this a new round (>1500ms gap) */
+static void pst_check_round_gap(void) {
+    DWORD now = GetTickCount();
+    if (pst_s.last_swing_tick > 0 && pst_s.cur_round_swings > 0) {
+        DWORD elapsed = now - pst_s.last_swing_tick;
+        if (elapsed > 1500) pst_flush_round();
+    }
+    pst_s.last_swing_tick = now;
+}
+
 /* ---- Combat line parser ---- */
 
 static void pst_parse_line(const char *line)
@@ -7925,12 +7961,7 @@ static void pst_parse_line(const char *line)
     /* --- Monster killed --- */
     if (pst_contains(line, " drops to the ground!")) {
         pst_s.kills++;
-        /* end of round — record round damage (including 0-dmg rounds from misses) */
-        if (pst_s.cur_round_swings > 0) {
-            pst_record_hit(&pst_s.rnd, pst_s.cur_round_dmg);
-            pst_s.cur_round_dmg = 0;
-            pst_s.cur_round_swings = 0;
-        }
+        pst_flush_round();
         return;
     }
 
@@ -7963,20 +7994,34 @@ static void pst_parse_line(const char *line)
         /* Player hit — parse damage and categorize */
         int dmg = pst_parse_dmg(line);
 
-        if (pst_contains(line, "backstab")) {
+        if (pst_contains(line, "backstab") || pst_contains(line, "You surprise")) {
             pst_record_hit(&pst_s.backstab, dmg);
+            /* BS consumes the whole round — flush prev, record BS as complete round */
+            pst_flush_round();
+            pst_record_hit(&pst_s.rnd, dmg);
+            pst_s.last_swing_tick = GetTickCount();
         } else if (pst_contains(line, " critically ")) {
             pst_record_hit(&pst_s.crit, dmg);
+            pst_check_round_gap();
+            pst_s.cur_round_dmg += dmg;
+            pst_s.cur_round_swings++;
         } else if (pst_contains(line, "Your ") && (pst_contains(line, " hits ") || pst_contains(line, " blasts ") ||
                    pst_contains(line, " burns ") || pst_contains(line, " freezes ") || pst_contains(line, " zaps "))) {
             pst_record_hit(&pst_s.spell, dmg);
+            pst_check_round_gap();
+            pst_s.cur_round_dmg += dmg;
+            pst_s.cur_round_swings++;
         } else if (pst_contains(line, "extra attack")) {
             pst_record_hit(&pst_s.extra, dmg);
+            pst_check_round_gap();
+            pst_s.cur_round_dmg += dmg;
+            pst_s.cur_round_swings++;
         } else {
             pst_record_hit(&pst_s.hit, dmg);
+            pst_check_round_gap();
+            pst_s.cur_round_dmg += dmg;
+            pst_s.cur_round_swings++;
         }
-        pst_s.cur_round_dmg += dmg;
-        pst_s.cur_round_swings++;
         return;
     }
 
@@ -8006,20 +8051,12 @@ static void pst_parse_line(const char *line)
         /* Only count as miss if the line does NOT also contain " damage!" (already handled above) */
         if (!pst_contains(line, " damage!")) {
             pst_s.miss++;
+            pst_check_round_gap();
             pst_s.cur_round_swings++;
         }
         return;
     }
 
-    /* --- New round detection: "* Combat Engaged *" or similar --- */
-    if (pst_contains(line, "Combat Engaged")) {
-        /* Record previous round if any swings happened (0-dmg rounds from all-misses count) */
-        if (pst_s.cur_round_swings > 0) {
-            pst_record_hit(&pst_s.rnd, pst_s.cur_round_dmg);
-            pst_s.cur_round_dmg = 0;
-            pst_s.cur_round_swings = 0;
-        }
-    }
 }
 
 /* ---- ANSI stripper + line extraction ---- */
