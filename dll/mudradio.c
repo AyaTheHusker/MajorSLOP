@@ -242,17 +242,18 @@ static volatile int mr_ma_dev_started = 0;
 static volatile int mr_ma_dec_ready = 0;
 
 /* ma_decoder read callback — pulls raw MP3 bytes from net ring.
- * Called from the device's audio thread via ma_decoder_read_pcm_frames.
- * If not enough data available, we spin-wait briefly. */
+ * During init (device not started): blocks briefly waiting for data.
+ * During playback (device started): returns immediately with whatever is available
+ * so the audio thread never stalls. */
 static ma_result mr_ma_read_cb(ma_decoder *pDecoder, void *pBufferOut, size_t bytesToRead, size_t *pBytesRead)
 {
     (void)pDecoder;
     unsigned char *out = (unsigned char *)pBufferOut;
     size_t total = 0;
+    int max_spins = mr_ma_dev_started ? 0 : 200; /* non-blocking during playback */
     int spins = 0;
 
     while (total < bytesToRead) {
-        /* inline net ring read — avoid forward decl issues */
         int w = mr_net_w, r = mr_net_r;
         int avail = (w >= r) ? (w - r) : (MR_NET_RING_SZ - r + w);
         if (avail > 0) {
@@ -267,7 +268,7 @@ static ma_result mr_ma_read_cb(ma_decoder *pDecoder, void *pBufferOut, size_t by
             spins = 0;
         } else {
             if (!mr_audio_running || !mr_net_running) break;
-            if (++spins > 200) break; /* 1 sec max wait */
+            if (++spins > max_spins) break;
             Sleep(5);
         }
     }
@@ -595,8 +596,8 @@ static void mr_stream_radio(void) {
         goto cleanup;
     }
 
-    /* Wait for enough MP3 data in net ring before starting decoder (~64KB) */
-    while (mr_net_avail() < 65536 && mr_net_running && mr_audio_running)
+    /* Wait for enough MP3 data in net ring before starting decoder (~128KB) */
+    while (mr_net_avail() < 131072 && mr_net_running && mr_audio_running)
         Sleep(20);
 
     mr_transport = MR_STATE_PLAYING;
@@ -606,6 +607,10 @@ static void mr_stream_radio(void) {
         mr_transport = MR_STATE_ERROR;
         goto cleanup;
     }
+
+    /* Wait for net ring to refill after decoder init consumed data for format detection */
+    while (mr_net_avail() < 65536 && mr_net_running && mr_audio_running)
+        Sleep(20);
 
     /* Open audio device — its callback reads from the decoder */
     if (!mr_open_audio()) {
@@ -653,10 +658,14 @@ static DWORD WINAPI mr_audio_thread_fn(LPVOID arg)
 
         /* ---- Stream source ---- */
         if (mr_src_type == MR_SRC_STREAM) {
+            char prev_url[MR_MAX_PATH_LEN];
+            strncpy(prev_url, mr_src_path, MR_MAX_PATH_LEN);
+            prev_url[MR_MAX_PATH_LEN - 1] = 0;
             mr_stream_radio();
-            if (mr_audio_running && mr_transport == MR_STATE_PLAYING) {
+            /* Only mark stopped if stream ended naturally (not switched to new station) */
+            if (mr_audio_running && mr_transport != MR_STATE_STOPPED &&
+                strcmp(mr_src_path, prev_url) == 0) {
                 mr_transport = MR_STATE_STOPPED;
-                mr_close_audio();
             }
             continue;
         }
