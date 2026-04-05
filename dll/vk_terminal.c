@@ -22,6 +22,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <math.h>
+#include <commdlg.h>        /* GetSaveFileNameA for backscroll save */
 
 /* Proper byte-by-byte ANSI/VT100 state machine parser */
 #define AP_ROWS 25
@@ -656,7 +657,8 @@ static int ttf_loaded[MAX_TTF_FONTS] = {0};
 #define VKM_WID_EXPBAR   3
 #define VKM_WID_PSTATS   4   /* Player Statistics */
 #define VKM_WID_RADIO    5   /* MUDRadio */
-#define VKM_WID_COUNT    6
+#define VKM_WID_BSCROLL  6   /* Backscroll */
+#define VKM_WID_COUNT    7
 
 /* FX submenu items */
 #define VKM_FX_LIQUID    0
@@ -673,7 +675,10 @@ static int ttf_loaded[MAX_TTF_FONTS] = {0};
 #define VKM_EXT_COLOR    1   /* Color/Brightness */
 #define VKM_EXT_SEP1     2   /* separator */
 #define VKM_EXT_HIDEMM   3   /* Hide/Show MegaMUD */
-#define VKM_EXT_COUNT    4
+#define VKM_EXT_SEP2     4   /* separator */
+#define VKM_EXT_SAVE     5   /* Save Settings */
+#define VKM_EXT_RESET    6   /* Reset to Defaults */
+#define VKM_EXT_COUNT    7
 
 /* Extras submenu items */
 #define VKM_SUB_XTRA2    8
@@ -697,6 +702,47 @@ static float pst_w = 340.0f, pst_h = 390.0f;
 static int  pst_dragging = 0;
 static float pst_drag_ox, pst_drag_oy;
 
+/* ---- Backscroll Panel ---- */
+#define BSP_MODE_PLAIN     0
+#define BSP_MODE_ANSI_HTML 1
+#define BSP_MODE_THEME_HTML 2
+#define BSP_MODE_RAW_ANSI  3
+static int   bsp_visible = 0;
+static float bsp_x = 80.0f, bsp_y = 40.0f;
+static float bsp_w = 680.0f, bsp_h = 500.0f;
+static int   bsp_dragging = 0;
+static float bsp_drag_ox, bsp_drag_oy;
+static int   bsp_mode = BSP_MODE_PLAIN;
+static int   bsp_scroll = 0;
+static int   bsp_resizing = 0;
+/* Text selection state */
+static int   bsp_selecting = 0;     /* 1 = drag-selecting text */
+static int   bsp_sel_active = 0;    /* 1 = selection exists (highlight visible) */
+static int   bsp_sel_start_line = 0, bsp_sel_start_col = 0; /* anchor */
+static int   bsp_sel_end_line = 0,   bsp_sel_end_col = 0;   /* current */
+/* Cached layout for mouse→cell mapping */
+static float bsp_disp_y0 = 0, bsp_disp_y1 = 0;
+static int   bsp_disp_lx = 0;    /* text left x */
+static int   bsp_disp_start = 0; /* first visible line index */
+static int   bsp_disp_vis = 0;   /* number of visible lines */
+static int   bsp_disp_total = 0; /* total lines */
+/* Snapshot state — frozen on open */
+static int   bsp_snap_plain_lines = 0;
+static int   bsp_snap_raw_lines = 0;
+static int   bsp_snap_cb_count = 0;
+static int   bsp_snap_cb_head = 0;
+static int   bsp_snap_bs_len = 0;
+static int   bsp_snap_bs_head = 0;
+static int   bsp_snap_ra_len = 0;
+static int   bsp_snap_ra_head = 0;
+static void  bsp_draw(int vp_w, int vp_h);
+static void  bsp_toggle(int vp_w, int vp_h);
+static int   bsp_mouse_down(int mx, int my);
+static void  bsp_mouse_move(int mx, int my);
+static void  bsp_mouse_up(void);
+static void  bsp_save(void);
+static void  bsp_copy_selection(void);
+
 /* MUDRadio types + state + forward declarations */
 #include "mudradio.h"
 static void pst_draw(int vp_w, int vp_h);
@@ -706,6 +752,8 @@ static void pst_reset_exp(void);
 static void pst_reset_combat(void);
 
 static int vkm_open = 0;          /* VKM_CLOSED or VKM_ROOT */
+static void vkt_save_settings(void);
+static void vkt_reset_settings(void);
 static int vkm_x = 0, vkm_y = 0; /* root menu top-left in pixels */
 static int vkm_hover = -1;        /* hovered root item */
 static int vkm_sub = VKM_SUB_NONE;/* which submenu is expanded */
@@ -2081,6 +2129,7 @@ static int pl_selected_item = -1;  /* currently selected (green) item, -1 = none
 static int pl_focused = 0;   /* input focus for search box */
 static int pl_loaded = 0;
 
+
 /* Get MegaMUD base directory (where the DLL's host exe lives) */
 static void pl_get_megamud_dir(char *buf, int bufsz)
 {
@@ -2499,6 +2548,27 @@ static void pl_load_data(void)
                        pl_room_count, pl_room_cat_count, pl_path_count, pl_loop_cat_count);
 }
 
+/* Run fake_remote on a throwaway thread (no window = no deadlock).
+ * The Vulkan thread owns vkt_hwnd, so SendMessageA from it can deadlock
+ * if MMMAIN sends anything back. A bare thread has no window to block on. */
+static DWORD WINAPI pl_remote_thread(LPVOID param)
+{
+    char *cmd = (char *)param;
+    if (api && api->fake_remote) api->fake_remote(cmd);
+    HeapFree(GetProcessHeap(), 0, cmd);
+    return 0;
+}
+
+static void pl_fire_remote(const char *cmd)
+{
+    int len = (int)strlen(cmd) + 1;
+    char *buf = (char *)HeapAlloc(GetProcessHeap(), 0, len);
+    if (!buf) return;
+    memcpy(buf, cmd, len);
+    HANDLE h = CreateThread(NULL, 0, pl_remote_thread, buf, 0, NULL);
+    if (h) CloseHandle(h);
+}
+
 /* Execute goto via fake_remote */
 static void pl_do_goto(const char *room_name)
 {
@@ -2506,7 +2576,7 @@ static void pl_do_goto(const char *room_name)
     char cmd[128];
     _snprintf(cmd, sizeof(cmd), "goto %s", room_name);
     cmd[sizeof(cmd) - 1] = '\0';
-    api->fake_remote(cmd);
+    pl_fire_remote(cmd);
 
     /* Add to recent goto list */
     if (vkm_goto_count < VKM_GOTO_MAX) {
@@ -2536,7 +2606,7 @@ static void pl_do_loop(const char *file)
     else
         _snprintf(cmd, sizeof(cmd), "loop %s.mp", file);
     cmd[sizeof(cmd) - 1] = '\0';
-    api->fake_remote(cmd);
+    pl_fire_remote(cmd);
 }
 
 /* ---- Exported functions for Python API ---- */
@@ -2781,6 +2851,7 @@ static int pl_quad_end = 0;    /* index where P&L quads end (menu quads follow) 
 #define VSB_OFF_LOOPING    0x5668
 #define VSB_OFF_ROAMING    0x566C
 #define VSB_OFF_COMBAT_TGT 0x552C
+#define VSB_OFF_AUTOCOMBAT 0x573C  /* runtime autocombat flag */
 
 static int  vsb_visible = 0;
 static int  vsb_quad_start = 0;  /* quad range for status bar (uses UI font) */
@@ -2797,9 +2868,13 @@ static int  vsb_is_medit = 0;
 static int  vsb_pathing = 0;
 static int  vsb_looping = 0;
 static int  vsb_roaming = 0;
+static int  vsb_autocombat = 0;
 static char vsb_target[64] = "";
 static char vsb_status_text[128] = ""; /* derived status label */
 static DWORD vsb_last_read = 0;       /* tick of last status read */
+static int  vsb_prev_mana = -1;       /* previous mana for tick detection */
+static DWORD vsb_mana_tick_time = 0;  /* GetTickCount of last mana tick */
+static int  vsb_mana_tick_show = 0;   /* 1 = flash active */
 
 /* ---- Exp Bar Widget ---- */
 #define VXB_BAR_H      20     /* bar height in pixels */
@@ -2917,6 +2992,72 @@ static char *bs_get_text(int *out_len)
 }
 
 
+/* ---- Raw ANSI ring buffer — preserves escape sequences ---- */
+
+#define RAW_ANSI_SIZE  (512 * 1024)
+static char raw_ansi_buf[RAW_ANSI_SIZE];
+static int ra_head = 0, ra_len = 0;
+
+static void ra_append(const char *data, int len)
+{
+    if (!bs_lock_init) return;
+    EnterCriticalSection(&bs_lock);
+    for (int i = 0; i < len; i++) {
+        raw_ansi_buf[ra_head] = data[i];
+        ra_head = (ra_head + 1) % RAW_ANSI_SIZE;
+        if (ra_len < RAW_ANSI_SIZE) ra_len++;
+    }
+    LeaveCriticalSection(&bs_lock);
+}
+
+static char *ra_get_text(int *out_len)
+{
+    if (!bs_lock_init || ra_len == 0) { *out_len = 0; return NULL; }
+    EnterCriticalSection(&bs_lock);
+    char *text = (char *)malloc(ra_len + 1);
+    if (text) {
+        int start = (ra_head - ra_len + RAW_ANSI_SIZE) % RAW_ANSI_SIZE;
+        for (int i = 0; i < ra_len; i++)
+            text[i] = raw_ansi_buf[(start + i) % RAW_ANSI_SIZE];
+        text[ra_len] = 0;
+        *out_len = ra_len;
+    } else {
+        *out_len = 0;
+    }
+    LeaveCriticalSection(&bs_lock);
+    return text;
+}
+
+/* ---- Colored cell ring buffer — captures scrolled-off lines with attrs ---- */
+
+#define CB_MAX_LINES  8000
+#define CB_COLS       AP_COLS
+
+static ap_cell_t cb_lines[CB_MAX_LINES][CB_COLS];
+static int cb_head = 0;    /* next write position */
+static int cb_count = 0;   /* total lines stored (max CB_MAX_LINES) */
+
+/* Scroll callback — called inside ansi_lock from ap_scroll_up */
+static void cb_scroll_cb(const ap_cell_t *row, int cols, void *user)
+{
+    (void)user;
+    int n = (cols < CB_COLS) ? cols : CB_COLS;
+    memcpy(cb_lines[cb_head], row, n * sizeof(ap_cell_t));
+    /* Zero-fill remainder if cols < CB_COLS */
+    if (n < CB_COLS)
+        memset(&cb_lines[cb_head][n], 0, (CB_COLS - n) * sizeof(ap_cell_t));
+    cb_head = (cb_head + 1) % CB_MAX_LINES;
+    if (cb_count < CB_MAX_LINES) cb_count++;
+}
+
+/* Get a specific line from the ring (0 = oldest). Returns NULL if out of range. */
+static ap_cell_t *cb_get_line(int idx)
+{
+    if (idx < 0 || idx >= cb_count) return NULL;
+    int ring_idx = (cb_head - cb_count + idx + CB_MAX_LINES) % CB_MAX_LINES;
+    return cb_lines[ring_idx];
+}
+
 /* ---- Clipboard helpers ---- */
 
 static void clipboard_paste_into(char *buf, int *len, int *cursor, int max_len)
@@ -2966,6 +3107,7 @@ static void vkt_on_data(const char *data, int len)
     ap_feed(&ansi_term, (const uint8_t *)data, len);
     LeaveCriticalSection(&ansi_lock);
     bs_append(data, len);
+    ra_append(data, len);
     pst_feed(data, len);
 }
 
@@ -4511,6 +4653,9 @@ static void vkm_draw(int vp_w, int vp_h)
                 } else if (i == VKM_WID_RADIO) {
                     label = mr_visible ? "\x04 MUDRadio" : "  MUDRadio";
                     is_active = mr_visible;
+                } else if (i == VKM_WID_BSCROLL) {
+                    label = bsp_visible ? "\x04 Backscroll" : "  Backscroll";
+                    is_active = bsp_visible;
                 }
             } else if (vkm_sub == VKM_SUB_RECENT) {
                 if (vkm_goto_count == 0) {
@@ -4543,11 +4688,15 @@ static void vkm_draw(int vp_w, int vp_h)
                 } else if (i == VKM_EXT_COLOR) {
                     label = "Color/Brightness";
                     is_active = clr_visible;
-                } else if (i == VKM_EXT_SEP1) {
+                } else if (i == VKM_EXT_SEP1 || i == VKM_EXT_SEP2) {
                     label = "";
                 } else if (i == VKM_EXT_HIDEMM) {
                     label = megamud_hidden ? "Show MegaMUD" : "Hide MegaMUD";
                     is_active = megamud_hidden;
+                } else if (i == VKM_EXT_SAVE) {
+                    label = "Save Settings";
+                } else if (i == VKM_EXT_RESET) {
+                    label = "Reset to Defaults";
                 }
             } else if (vkm_sub == VKM_SUB_XTRA2) {
                 if (i == VKM_X2_VIZ) {
@@ -4878,6 +5027,16 @@ static void vsb_read_status(void)
     vsb_max_hp = api->read_struct_i32(VSB_OFF_MAX_HP);
     vsb_cur_mana = api->read_struct_i32(VSB_OFF_CUR_MANA);
     vsb_max_mana = api->read_struct_i32(VSB_OFF_MAX_MANA);
+    /* Mana tick detection: mana increased while resting/meditating */
+    if (vsb_prev_mana >= 0 && vsb_cur_mana > vsb_prev_mana &&
+        (vsb_is_resting || vsb_is_medit) && !vsb_in_combat) {
+        vsb_mana_tick_time = now;
+        vsb_mana_tick_show = 1;
+    }
+    /* Fade out after 2 seconds */
+    if (vsb_mana_tick_show && now - vsb_mana_tick_time > 2000)
+        vsb_mana_tick_show = 0;
+    vsb_prev_mana = vsb_cur_mana;
     vsb_in_combat = api->read_struct_i32(VSB_OFF_IN_COMBAT);
     vsb_is_resting = api->read_struct_i32(VSB_OFF_IS_RESTING);
     vsb_is_medit = api->read_struct_i32(VSB_OFF_IS_MEDIT);
@@ -4886,6 +5045,7 @@ static void vsb_read_status(void)
     vsb_pathing = api->read_struct_i32(VSB_OFF_PATHING);
     vsb_looping = api->read_struct_i32(VSB_OFF_LOOPING);
     vsb_roaming = api->read_struct_i32(VSB_OFF_ROAMING);
+    vsb_autocombat = api->read_struct_i32(VSB_OFF_AUTOCOMBAT);
 
     /* Read combat target string from struct */
     {
@@ -4936,7 +5096,7 @@ static void vsb_read_status(void)
     } else if (vsb_looping) {
         _snprintf(vsb_status_text, sizeof(vsb_status_text), "Looping");
     } else if (vsb_pathing) {
-        _snprintf(vsb_status_text, sizeof(vsb_status_text), "Walking");
+        _snprintf(vsb_status_text, sizeof(vsb_status_text), vsb_autocombat ? "Walking" : "Running");
     } else {
         _snprintf(vsb_status_text, sizeof(vsb_status_text), "Idle");
     }
@@ -5025,6 +5185,24 @@ static void vsb_draw(int vp_w, int vp_h)
         float mg = mn_ratio > 0.5f ? 0.6f : (mn_ratio > 0.25f ? 0.5f : 0.2f);
         float mb = mn_ratio > 0.5f ? 1.0f : (mn_ratio > 0.25f ? 0.0f : 0.2f);
         VSB_SECTION("Mana: ", buf, lr, lg, lb, mr, mg, mb);
+
+        /* Mana tick indicator — flashes when mana regenerates */
+        if (vsb_mana_tick_show) {
+            DWORD elapsed = GetTickCount() - vsb_mana_tick_time;
+            float alpha = (elapsed < 500) ? 1.0f : 1.0f - (float)(elapsed - 500) / 1500.0f;
+            if (alpha < 0.0f) alpha = 0.0f;
+            /* Pulsing cyan diamond indicator */
+            float pulse = 0.7f + 0.3f * (float)sin((double)elapsed * 0.006);
+            ptext(tx, ty, "\x04", 0.3f * pulse, 1.0f * pulse, 1.0f * pulse * alpha,
+                  vp_w, vp_h, cw, ch);
+            tx += cw;
+            ptext(tx, ty, "Tick", 0.3f, 0.9f * alpha, 1.0f * alpha,
+                  vp_w, vp_h, cw, ch);
+            tx += 4 * cw + VSB_PAD;
+            psolid((float)tx, 3.0f, (float)(tx + VSB_SEP_W), (float)(VSB_BAR_H - 3),
+                   t->text[0], t->text[1], t->text[2], 0.2f, vp_w, vp_h);
+            tx += VSB_SEP_W + VSB_PAD;
+        }
     }
 
     /* Section: Status */
@@ -5197,18 +5375,26 @@ static void vxb_draw(int vp_w, int vp_h)
     }
     info[sizeof(info) - 1] = '\0';
 
-    int text_w = (int)strlen(info) * cw;
+    /* Use larger font for exp bar text — bigger than status bar */
+    int ecw = VKM_CHAR_W, ech = VKM_CHAR_H;
+    int text_w = (int)strlen(info) * ecw;
     int text_x = (vp_w - text_w) / 2;
-    int text_y = (int)bar_top + (VXB_BAR_H - ch) / 2;
+    int text_y = (int)bar_top + (VXB_BAR_H - ech) / 2;
 
-    /* Shadow */
-    ptext(text_x + 1, text_y + 1, info, 0.0f, 0.0f, 0.0f, vp_w, vp_h, cw, ch);
-    /* Text */
-    if (overflow) {
-        ptext(text_x, text_y, info, 1.0f, 0.9f, 0.2f, vp_w, vp_h, cw, ch);
-    } else {
-        ptext(text_x, text_y, info, t->text[0], t->text[1], t->text[2], vp_w, vp_h, cw, ch);
-    }
+    /* Thick shadow outline for readability — 8 directions + center drop */
+    for (int dy = -1; dy <= 1; dy++)
+        for (int dx = -1; dx <= 1; dx++)
+            if (dx || dy)
+                ptext(text_x + dx, text_y + dy, info, 0.0f, 0.0f, 0.0f,
+                      vp_w, vp_h, ecw, ech);
+    /* Extra drop shadow for depth */
+    ptext(text_x + 1, text_y + 2, info, 0.0f, 0.0f, 0.0f, vp_w, vp_h, ecw, ech);
+    /* Bold: draw text twice offset by 1px for faux-bold */
+    float tr, tg, tb;
+    if (overflow) { tr = 1.0f; tg = 0.9f; tb = 0.2f; }
+    else { tr = t->text[0]; tg = t->text[1]; tb = t->text[2]; }
+    ptext(text_x, text_y, info, tr, tg, tb, vp_w, vp_h, ecw, ech);
+    ptext(text_x + 1, text_y, info, tr, tg, tb, vp_w, vp_h, ecw, ech);
 }
 
 static void vkt_build_vertices(void)
@@ -5446,6 +5632,7 @@ static void vkt_build_vertices(void)
     vxb_draw(vp_w, vp_h);
     pl_draw(vp_w, vp_h);
     pst_draw(vp_w, vp_h);
+    bsp_draw(vp_w, vp_h);
     mr_draw(vp_w, vp_h);
     clr_draw(vp_w, vp_h);
     pl_quad_end = quad_count;
@@ -6438,6 +6625,7 @@ static void vkt_switch_font(int font_idx)
     /* Clear terminal so old glyph shapes don't linger */
     EnterCriticalSection(&ansi_lock);
     ap_init(&ansi_term, TERM_ROWS, TERM_COLS);
+    ap_set_scroll_cb(&ansi_term, cb_scroll_cb, NULL);
     LeaveCriticalSection(&ansi_lock);
 
     const char *fname = (current_font < 0) ? "CP437 Bitmap (VGA)"
@@ -7035,7 +7223,7 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
 
         /* Alt+B = toggle backscroll */
         if (alt && (wParam == 'B' || wParam == 'b')) {
-            vkw_toggle_backscroll((int)vk_sc_extent.width, (int)vk_sc_extent.height);
+            bsp_toggle((int)vk_sc_extent.width, (int)vk_sc_extent.height);
             return 0;
         }
 
@@ -7144,7 +7332,7 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
     case WM_SYSKEYDOWN:
         /* Alt+B when system key (alt held) */
         if (wParam == 'B' || wParam == 'b') {
-            vkw_toggle_backscroll((int)vk_sc_extent.width, (int)vk_sc_extent.height);
+            bsp_toggle((int)vk_sc_extent.width, (int)vk_sc_extent.height);
             return 0;
         }
         break;
@@ -7229,6 +7417,11 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             pst_y = (float)my2 - pst_drag_oy;
             return 0;
         }
+        /* Backscroll panel drag/resize */
+        if (bsp_dragging || bsp_resizing || bsp_selecting) {
+            bsp_mouse_move(mx2, my2);
+            return 0;
+        }
         /* Round timer drag */
         if (vrt_dragging) {
             vrt_x = (float)mx2 - vrt_drag_ox;
@@ -7260,7 +7453,21 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         if (vkm_open) {
             int rh = vkm_hit_root(mx2, my2);
             int sh = vkm_hit_sub(mx2, my2);
-            if (rh >= 0) {
+
+            /* Check if mouse is inside the 3rd-level submenu panel */
+            int in_3rd = 0;
+            if (vkm_sub == VKM_SUB_THEME || vkm_sub == VKM_SUB_FONT ||
+                vkm_sub == VKM_SUB_FX || vkm_sub == VKM_SUB_VIZ) {
+                int sx3, sy3;
+                vkm_get_sub_rect(&sx3, &sy3);
+                int sh3 = vkm_sub_height();
+                if (mx2 >= sx3 && mx2 < sx3 + VKM_SUB_W &&
+                    my2 >= sy3 && my2 < sy3 + sh3) {
+                    in_3rd = 1;
+                }
+            }
+
+            if (rh >= 0 && !in_3rd) {
                 vkm_hover = rh;
                 /* Determine target sub for this root item */
                 int target_sub = VKM_SUB_NONE;
@@ -7270,7 +7477,16 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 else if (rh == VKM_ITEM_EXTRAS) target_sub = VKM_SUB_EXTRAS;
                 else if (rh == VKM_ITEM_XTRA2) target_sub = VKM_SUB_XTRA2;
 
-                if (target_sub == VKM_SUB_NONE) {
+                /* If a 3rd-level sub is open and we're hovering its parent root,
+                 * don't close/switch — treat it as "already on this sub" */
+                int is_3rd_parent = 0;
+                if ((vkm_sub == VKM_SUB_THEME || vkm_sub == VKM_SUB_FONT || vkm_sub == VKM_SUB_FX)
+                    && rh == VKM_ITEM_VISUAL) is_3rd_parent = 1;
+                if (vkm_sub == VKM_SUB_VIZ && rh == VKM_ITEM_XTRA2) is_3rd_parent = 1;
+
+                if (is_3rd_parent) {
+                    vkm_hover_root = rh;
+                } else if (target_sub == VKM_SUB_NONE) {
                     /* Non-submenu item: close sub immediately */
                     vkm_sub = VKM_SUB_NONE;
                     vkm_hover_root = -1;
@@ -7287,7 +7503,7 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                         vkm_sub_hover = -1;
                     }
                 }
-            } else {
+            } else if (!in_3rd) {
                 vkm_hover_root = -1;
             }
             if (sh >= 0) {
@@ -7317,7 +7533,7 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 } else {
                     vkm_hover_drill = -1;
                 }
-            } else {
+            } else if (!in_3rd) {
                 vkm_hover_drill = -1;
             }
         }
@@ -7448,6 +7664,8 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             }
             return 0;
         }
+        /* Backscroll panel click */
+        if (bsp_mouse_down(mx, my)) return 0;
         /* MUDRadio panel click */
         if (mr_mouse_down(mx, my)) return 0;
         /* Color/Brightness panel click */
@@ -7524,6 +7742,7 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         if (mr_dragging || mr_resizing || mr_vol_dragging) { mr_mouse_up(); return 0; }
         if (clr_dragging || clr_active_slider >= 0) { clr_mouse_up(); return 0; }
         if (pst_dragging) { pst_dragging = 0; return 0; }
+        if (bsp_dragging || bsp_resizing || bsp_selecting) { bsp_mouse_up(); return 0; }
         if (vrt_dragging) { vrt_dragging = 0; return 0; }
         vkw_mouse_up(); /* end any drag/resize */
 
@@ -7557,6 +7776,8 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 pst_toggle();
             } else if (si == VKM_WID_RADIO) {
                 mr_toggle();
+            } else if (si == VKM_WID_BSCROLL) {
+                bsp_toggle((int)vk_sc_extent.width, (int)vk_sc_extent.height);
             }
             vkm_open = 0;
             vkm_sub = VKM_SUB_NONE;
@@ -7640,6 +7861,10 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 }
                 if (api) api->log("[vk_terminal] MegaMUD %s\n",
                                   megamud_hidden ? "HIDDEN" : "SHOWN");
+            } else if (si == VKM_EXT_SAVE) {
+                vkt_save_settings();
+            } else if (si == VKM_EXT_RESET) {
+                vkt_reset_settings();
             }
             vkm_open = 0;
             vkm_sub = VKM_SUB_NONE;
@@ -7757,6 +7982,18 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         return 0;
     }
     case WM_MOUSEWHEEL: {
+        /* Scroll backscroll panel */
+        if (bsp_visible) {
+            int bmx = mouse_tx((short)LOWORD(lParam));
+            int bmy = mouse_ty((short)HIWORD(lParam));
+            if (bmx >= (int)bsp_x && bmx < (int)(bsp_x + bsp_w) &&
+                bmy >= (int)bsp_y && bmy < (int)(bsp_y + bsp_h)) {
+                int wd = (short)HIWORD(wParam);
+                bsp_scroll += (wd > 0) ? 3 : -3;
+                if (bsp_scroll < 0) bsp_scroll = 0;
+                return 0;
+            }
+        }
         /* Scroll Paths & Loops window */
         if (pl_wnd_open) {
             int pmx = mouse_tx((short)LOWORD(lParam));
@@ -8636,6 +8873,763 @@ static void pst_draw(int vp_w, int vp_h)
     pst_h = (float)(cy - (int)y0 + 6);
 }
 
+/* ---- Backscroll Panel — glossy panel with 4 mode tabs + save ---- */
+
+static void bsp_toggle(int vp_w, int vp_h)
+{
+    bsp_visible = !bsp_visible;
+    if (bsp_visible) {
+        bsp_w = (float)(vp_w - 80);
+        bsp_h = (float)(vp_h - 60);
+        if (bsp_w < 400) bsp_w = 400;
+        if (bsp_h < 300) bsp_h = 300;
+        bsp_x = (float)(vp_w - (int)bsp_w) / 2.0f;
+        bsp_y = (float)(vp_h - (int)bsp_h) / 2.0f;
+        bsp_scroll = 0; /* 0 = bottom (most recent) */
+        bsp_sel_active = 0;
+        bsp_selecting = 0;
+        vkw_focus = -1;
+        /* Freeze snapshot of all buffers */
+        bsp_snap_cb_count = cb_count;
+        bsp_snap_cb_head = cb_head;
+        bsp_snap_bs_len = bs_len;
+        bsp_snap_bs_head = bs_head;
+        bsp_snap_ra_len = ra_len;
+        bsp_snap_ra_head = ra_head;
+        /* Count plain/raw lines from snapshot */
+        bsp_snap_plain_lines = 0;
+        if (bsp_snap_bs_len > 0) {
+            bsp_snap_plain_lines = 1;
+            int start = (bsp_snap_bs_head - bsp_snap_bs_len + BACKSCROLL_SIZE) % BACKSCROLL_SIZE;
+            for (int i = 0; i < bsp_snap_bs_len; i++)
+                if (backscroll_buf[(start + i) % BACKSCROLL_SIZE] == '\n') bsp_snap_plain_lines++;
+        }
+        bsp_snap_raw_lines = 0;
+        if (bsp_snap_ra_len > 0) {
+            bsp_snap_raw_lines = 1;
+            int start = (bsp_snap_ra_head - bsp_snap_ra_len + RAW_ANSI_SIZE) % RAW_ANSI_SIZE;
+            for (int i = 0; i < bsp_snap_ra_len; i++)
+                if (raw_ansi_buf[(start + i) % RAW_ANSI_SIZE] == '\n') bsp_snap_raw_lines++;
+        }
+    }
+}
+
+/* Get a specific plain-text line from snapshot. Writes into buf, returns length. */
+static int bsp_get_plain_line(int line_idx, char *buf, int max_len)
+{
+    if (!bs_lock_init || bsp_snap_bs_len == 0) return 0;
+    int start = (bsp_snap_bs_head - bsp_snap_bs_len + BACKSCROLL_SIZE) % BACKSCROLL_SIZE;
+    int cur_line = 0, pos = 0;
+    for (int i = 0; i < bsp_snap_bs_len; i++) {
+        char ch = backscroll_buf[(start + i) % BACKSCROLL_SIZE];
+        if (ch == '\n') {
+            if (cur_line == line_idx) { buf[pos] = 0; return pos; }
+            cur_line++;
+            pos = 0;
+            continue;
+        }
+        if (cur_line == line_idx && pos < max_len - 1) buf[pos++] = ch;
+    }
+    buf[pos] = 0;
+    return pos;
+}
+
+static int bsp_get_raw_line(int line_idx, char *buf, int max_len)
+{
+    if (!bs_lock_init || bsp_snap_ra_len == 0) return 0;
+    int start = (bsp_snap_ra_head - bsp_snap_ra_len + RAW_ANSI_SIZE) % RAW_ANSI_SIZE;
+    int cur_line = 0, pos = 0;
+    for (int i = 0; i < bsp_snap_ra_len; i++) {
+        char ch = raw_ansi_buf[(start + i) % RAW_ANSI_SIZE];
+        if (ch == '\n') {
+            if (cur_line == line_idx) { buf[pos] = 0; return pos; }
+            cur_line++;
+            pos = 0;
+            continue;
+        }
+        if (cur_line == line_idx && pos < max_len - 1) {
+            if ((unsigned char)ch == 0x1B) {
+                if (pos < max_len - 4) { buf[pos++] = 'E'; buf[pos++] = 'S'; buf[pos++] = 'C'; }
+            } else if (ch >= 0x20 || ch == '\t') {
+                buf[pos++] = ch;
+            }
+        }
+    }
+    buf[pos] = 0;
+    return pos;
+}
+
+/* Get a colored cell line from snapshot */
+static ap_cell_t *bsp_get_cb_line(int idx)
+{
+    if (idx < 0 || idx >= bsp_snap_cb_count) return NULL;
+    int ring_idx = (bsp_snap_cb_head - bsp_snap_cb_count + idx + CB_MAX_LINES) % CB_MAX_LINES;
+    return cb_lines[ring_idx];
+}
+
+/* ---- Save helpers ---- */
+
+static void bsp_save_plain_file(FILE *fp)
+{
+    int text_len = 0;
+    char *text = bs_get_text(&text_len);
+    if (text) { fwrite(text, 1, text_len, fp); free(text); }
+}
+
+static void bsp_save_raw_file(FILE *fp)
+{
+    int text_len = 0;
+    char *text = ra_get_text(&text_len);
+    if (text) { fwrite(text, 1, text_len, fp); free(text); }
+}
+
+static void bsp_write_html_char(FILE *fp, unsigned char ch)
+{
+    if (ch == '<') fprintf(fp, "&lt;");
+    else if (ch == '>') fprintf(fp, "&gt;");
+    else if (ch == '&') fprintf(fp, "&amp;");
+    else if (ch == '"') fprintf(fp, "&quot;");
+    else if (ch >= 0x20 && ch < 0x7F) fputc(ch, fp);
+    else if (ch == 0) fputc(' ', fp);
+    else fprintf(fp, "&#x%04X;", cp437_to_unicode[ch]);
+}
+
+static void bsp_save_html_file(FILE *fp, rgb_t *pal)
+{
+    /* HTML header with embedded styling */
+    fprintf(fp,
+        "<!DOCTYPE html>\n<html><head><meta charset=\"utf-8\">\n"
+        "<style>\n"
+        "body{background:#000;margin:0;padding:8px;}\n"
+        "pre{font-family:'IBM Plex Mono','Cascadia Code','Consolas','Courier New',monospace;"
+        "font-size:14px;line-height:1.3;margin:0;}\n"
+        ".s{}\n");
+    /* CRT scanlines if enabled */
+    if (fx_scanline_mode) {
+        fprintf(fp,
+            ".scanlines{background:repeating-linear-gradient("
+            "transparent,transparent 1px,rgba(0,0,0,0.15) 1px,rgba(0,0,0,0.15) 2px);"
+            "position:fixed;top:0;left:0;width:100%%;height:100%%;pointer-events:none;z-index:99;}\n");
+    }
+    fprintf(fp, "</style></head><body>\n");
+    if (fx_scanline_mode) fprintf(fp, "<div class=\"scanlines\"></div>\n");
+    fprintf(fp, "<pre>");
+
+    /* Iterate colored cell ring buffer */
+    int prev_fg = -1, prev_bg = -1;
+    int span_open = 0;
+    for (int i = 0; i < bsp_snap_cb_count; i++) {
+        ap_cell_t *row = bsp_get_cb_line(i);
+        if (!row) continue;
+        /* Find last non-space char to trim trailing spaces */
+        int last_char = CB_COLS - 1;
+        while (last_char >= 0 && row[last_char].ch <= 0x20 &&
+               row[last_char].attr.bg == 0) last_char--;
+        for (int c = 0; c <= last_char; c++) {
+            ap_cell_t *cell = &row[c];
+            int fg_idx = cell->attr.fg;
+            if (cell->attr.bold && !cell->attr.fg256 && fg_idx < 8) fg_idx += 8;
+            fg_idx &= 15;
+            int bg_idx = cell->attr.bg & 15;
+            if (cell->attr.reverse) { int tmp = fg_idx; fg_idx = bg_idx; bg_idx = tmp; }
+            /* Check if color changed */
+            if (fg_idx != prev_fg || bg_idx != prev_bg) {
+                if (span_open) fprintf(fp, "</span>");
+                rgb_t fc = pal[fg_idx], bc = pal[bg_idx];
+                fprintf(fp, "<span style=\"color:#%02x%02x%02x",
+                    (int)(fc.r*255.0f), (int)(fc.g*255.0f), (int)(fc.b*255.0f));
+                if (bg_idx != 0)
+                    fprintf(fp, ";background:#%02x%02x%02x",
+                        (int)(bc.r*255.0f), (int)(bc.g*255.0f), (int)(bc.b*255.0f));
+                fprintf(fp, "\">");
+                span_open = 1;
+                prev_fg = fg_idx;
+                prev_bg = bg_idx;
+            }
+            bsp_write_html_char(fp, cell->ch);
+        }
+        if (span_open) { fprintf(fp, "</span>"); span_open = 0; prev_fg = -1; prev_bg = -1; }
+        fprintf(fp, "\n");
+    }
+    if (span_open) fprintf(fp, "</span>");
+    fprintf(fp, "</pre></body></html>\n");
+}
+
+static void bsp_save(void)
+{
+    OPENFILENAMEA ofn;
+    char path[MAX_PATH] = "backscroll";
+    memset(&ofn, 0, sizeof(ofn));
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = vkt_hwnd;
+    ofn.lpstrFile = path;
+    ofn.nMaxFile = MAX_PATH;
+
+    if (bsp_mode == BSP_MODE_PLAIN || bsp_mode == BSP_MODE_RAW_ANSI) {
+        ofn.lpstrFilter = "Text Files\0*.txt\0All Files\0*.*\0";
+        ofn.lpstrDefExt = "txt";
+    } else {
+        ofn.lpstrFilter = "HTML Files\0*.html\0All Files\0*.*\0";
+        ofn.lpstrDefExt = "html";
+    }
+    ofn.Flags = OFN_OVERWRITEPROMPT | OFN_NOCHANGEDIR;
+
+    if (!GetSaveFileNameA(&ofn)) return;
+
+    FILE *fp = fopen(path, "wb");
+    if (!fp) return;
+
+    switch (bsp_mode) {
+        case BSP_MODE_PLAIN:      bsp_save_plain_file(fp); break;
+        case BSP_MODE_ANSI_HTML:  bsp_save_html_file(fp, pal_classic); break;
+        case BSP_MODE_THEME_HTML: bsp_save_html_file(fp, tinted_palette); break;
+        case BSP_MODE_RAW_ANSI:   bsp_save_raw_file(fp); break;
+    }
+    fclose(fp);
+    if (api) api->log("[vk_terminal] Backscroll saved to %s\n", path);
+}
+
+/* ---- Backscroll Panel: draw ---- */
+
+static void bsp_draw(int vp_w, int vp_h)
+{
+    if (!bsp_visible) return;
+
+    const ui_theme_t *t = &ui_themes[current_theme];
+    void (*psolid)(float, float, float, float, float, float, float, float, int, int) =
+        ui_font_ready ? push_solid_ui : push_solid;
+    void (*ptext)(int, int, const char *, float, float, float, int, int, int, int) =
+        ui_font_ready ? push_text_ui : push_text;
+    int cw = VKM_CHAR_W, ch = VKM_CHAR_H;
+
+    float x0 = bsp_x, y0 = bsp_y;
+    float x1 = bsp_x + bsp_w, y1 = bsp_y + bsp_h;
+    int titlebar_h = ch + 10;
+    int tab_h = ch + 8;
+    int save_h = ch + 12;
+
+    /* Drop shadow */
+    psolid(x0 + 4, y0 + 4, x1 + 4, y1 + 4,
+           0.0f, 0.0f, 0.0f, 0.4f, vp_w, vp_h);
+
+    /* Panel background */
+    psolid(x0, y0, x1, y1,
+           t->bg[0] + 0.05f, t->bg[1] + 0.05f, t->bg[2] + 0.05f, 0.97f,
+           vp_w, vp_h);
+
+    /* Border */
+    psolid(x0, y0, x1, y0 + 1, t->accent[0], t->accent[1], t->accent[2], 0.6f, vp_w, vp_h);
+    psolid(x0, y1 - 1, x1, y1, t->accent[0], t->accent[1], t->accent[2], 0.4f, vp_w, vp_h);
+    psolid(x0, y0, x0 + 1, y1, t->accent[0], t->accent[1], t->accent[2], 0.3f, vp_w, vp_h);
+    psolid(x1 - 1, y0, x1, y1, t->accent[0], t->accent[1], t->accent[2], 0.3f, vp_w, vp_h);
+
+    /* ---- Glossy title bar ---- */
+    float tb_y0 = y0 + 1, tb_y1 = y0 + titlebar_h;
+    float ar = t->accent[0], ag = t->accent[1], ab = t->accent[2];
+
+    /* Accent-tinted background */
+    psolid(x0 + 1, tb_y0, x1 - 1, tb_y1,
+           ar * 0.25f + t->bg[0] * 0.75f, ag * 0.25f + t->bg[1] * 0.75f,
+           ab * 0.25f + t->bg[2] * 0.75f, 0.95f, vp_w, vp_h);
+    /* Gloss highlight — top half */
+    float gloss_mid = tb_y0 + (tb_y1 - tb_y0) * 0.45f;
+    psolid(x0 + 1, tb_y0, x1 - 1, gloss_mid,
+           1.0f, 1.0f, 1.0f, 0.10f, vp_w, vp_h);
+    /* Accent bottom edge */
+    psolid(x0 + 1, tb_y1 - 1, x1 - 1, tb_y1,
+           ar, ag, ab, 0.5f, vp_w, vp_h);
+
+    /* Title text with drop shadow */
+    int ttx = (int)x0 + 8, tty = (int)tb_y0 + (titlebar_h - ch) / 2;
+    ptext(ttx + 1, tty + 1, "Backscroll", 0.0f, 0.0f, 0.0f, vp_w, vp_h, cw, ch);
+    ptext(ttx, tty, "Backscroll", t->text[0], t->text[1], t->text[2], vp_w, vp_h, cw, ch);
+
+    /* Close button X */
+    int close_w = 20;
+    int cbx = (int)(x1 - close_w - 4);
+    ptext(cbx + 1, tty + 1, "X", 0.0f, 0.0f, 0.0f, vp_w, vp_h, cw, ch);
+    ptext(cbx, tty, "X", 1.0f, 0.4f, 0.4f, vp_w, vp_h, cw, ch);
+
+    /* ---- Radio button tab bar ---- */
+    float tab_y0 = tb_y1;
+    float tab_y1 = tab_y0 + tab_h;
+
+    /* Tab bar background */
+    psolid(x0 + 1, tab_y0, x1 - 1, tab_y1,
+           t->bg[0], t->bg[1], t->bg[2], 0.95f, vp_w, vp_h);
+
+    static const char *tab_labels[] = { "Plain", "ANSI HTML", "Theme HTML", "Raw ANSI" };
+    float tab_w = (bsp_w - 2) / 4.0f;
+    for (int i = 0; i < 4; i++) {
+        float tx0 = x0 + 1 + i * tab_w;
+        float tx1 = tx0 + tab_w;
+        if (i == bsp_mode) {
+            /* Active tab — accent background + underline */
+            psolid(tx0, tab_y0, tx1, tab_y1,
+                   ar * 0.2f, ag * 0.2f, ab * 0.2f, 0.8f, vp_w, vp_h);
+            psolid(tx0, tab_y1 - 2, tx1, tab_y1,
+                   ar, ag, ab, 0.9f, vp_w, vp_h);
+        }
+        /* Tab label centered */
+        int lw = (int)strlen(tab_labels[i]) * cw;
+        int lx = (int)(tx0 + (tab_w - lw) / 2);
+        int ly = (int)tab_y0 + (tab_h - ch) / 2;
+        if (i == bsp_mode) {
+            ptext(lx, ly, tab_labels[i], ar, ag, ab, vp_w, vp_h, cw, ch);
+        } else {
+            ptext(lx, ly, tab_labels[i], t->dim[0], t->dim[1], t->dim[2], vp_w, vp_h, cw, ch);
+        }
+        /* Tab separator */
+        if (i < 3) {
+            psolid(tx1, tab_y0 + 3, tx1 + 1, tab_y1 - 3,
+                   t->text[0], t->text[1], t->text[2], 0.15f, vp_w, vp_h);
+        }
+    }
+
+    /* ---- Display area ---- */
+    float disp_y0 = tab_y1 + 2;
+    float disp_y1 = y1 - save_h - 2;
+    int disp_h = (int)(disp_y1 - disp_y0);
+    int vis_lines = disp_h / ch;
+    if (vis_lines < 1) vis_lines = 1;
+
+    /* Dark inset background */
+    psolid(x0 + 4, disp_y0, x1 - 4, disp_y1,
+           0.0f, 0.0f, 0.0f, 0.85f, vp_w, vp_h);
+
+    int total_lines = 0;
+    if (bsp_mode == BSP_MODE_PLAIN) total_lines = bsp_snap_plain_lines;
+    else if (bsp_mode == BSP_MODE_RAW_ANSI) total_lines = bsp_snap_raw_lines;
+    else total_lines = bsp_snap_cb_count; /* colored modes use snapshot */
+
+    /* Clamp scroll */
+    int max_scroll = total_lines - vis_lines;
+    if (max_scroll < 0) max_scroll = 0;
+    if (bsp_scroll > max_scroll) bsp_scroll = max_scroll;
+    if (bsp_scroll < 0) bsp_scroll = 0;
+
+    int start_line = total_lines - vis_lines - bsp_scroll;
+    if (start_line < 0) start_line = 0;
+
+    /* Cache layout for mouse handlers */
+    bsp_disp_y0 = disp_y0;
+    bsp_disp_y1 = disp_y1;
+    bsp_disp_lx = (int)x0 + 8;
+    bsp_disp_start = start_line;
+    bsp_disp_vis = vis_lines;
+    bsp_disp_total = total_lines;
+
+    /* Render visible lines */
+    for (int v = 0; v < vis_lines && (start_line + v) < total_lines; v++) {
+        int line_idx = start_line + v;
+        int ly = (int)disp_y0 + v * ch;
+        int lx = (int)x0 + 8;
+
+        if (bsp_mode == BSP_MODE_PLAIN) {
+            char line[256];
+            bsp_get_plain_line(line_idx, line, 256);
+            ptext(lx, ly, line, t->text[0], t->text[1], t->text[2], vp_w, vp_h, cw, ch);
+        } else if (bsp_mode == BSP_MODE_RAW_ANSI) {
+            char line[256];
+            bsp_get_raw_line(line_idx, line, 256);
+            ptext(lx, ly, line, t->text[0], t->text[1], t->text[2], vp_w, vp_h, cw, ch);
+        } else {
+            /* Colored cell rendering (ANSI HTML / Theme HTML) */
+            ap_cell_t *row = bsp_get_cb_line(line_idx);
+            if (!row) continue;
+            rgb_t *cpal = (bsp_mode == BSP_MODE_ANSI_HTML) ? pal_classic : tinted_palette;
+            /* Find last non-space */
+            int last = CB_COLS - 1;
+            while (last >= 0 && row[last].ch <= 0x20 && row[last].attr.bg == 0) last--;
+            /* Batch by color runs */
+            int run_start = 0;
+            char run_buf[CB_COLS + 1];
+            int run_len = 0;
+            int prev_fg_idx = -1;
+            for (int c = 0; c <= last; c++) {
+                int fg_idx = row[c].attr.fg;
+                if (row[c].attr.bold && !row[c].attr.fg256 && fg_idx < 8) fg_idx += 8;
+                fg_idx &= 15;
+                if (row[c].attr.reverse) fg_idx = row[c].attr.bg & 15;
+                if (fg_idx != prev_fg_idx) {
+                    /* Flush previous run */
+                    if (run_len > 0) {
+                        run_buf[run_len] = 0;
+                        rgb_t fc = cpal[prev_fg_idx];
+                        ptext(lx + run_start * cw, ly, run_buf,
+                              fc.r, fc.g, fc.b, vp_w, vp_h, cw, ch);
+                    }
+                    run_start = c;
+                    run_len = 0;
+                    prev_fg_idx = fg_idx;
+                }
+                unsigned char byte = row[c].ch;
+                run_buf[run_len++] = (byte >= 0x20) ? (char)byte : ' ';
+            }
+            /* Flush last run */
+            if (run_len > 0 && prev_fg_idx >= 0) {
+                run_buf[run_len] = 0;
+                rgb_t fc = cpal[prev_fg_idx];
+                ptext(lx + run_start * cw, ly, run_buf,
+                      fc.r, fc.g, fc.b, vp_w, vp_h, cw, ch);
+            }
+        }
+    }
+
+    /* ---- Selection highlight overlay ---- */
+    if (bsp_sel_active || bsp_selecting) {
+        /* Normalize selection so s_line <= e_line */
+        int s_line = bsp_sel_start_line, s_col = bsp_sel_start_col;
+        int e_line = bsp_sel_end_line, e_col = bsp_sel_end_col;
+        if (s_line > e_line || (s_line == e_line && s_col > e_col)) {
+            int tmp; tmp = s_line; s_line = e_line; e_line = tmp;
+            tmp = s_col; s_col = e_col; e_col = tmp;
+        }
+        for (int v = 0; v < vis_lines && (start_line + v) < total_lines; v++) {
+            int abs_line = start_line + v;
+            if (abs_line < s_line || abs_line > e_line) continue;
+            int hy = (int)disp_y0 + v * ch;
+            int hlx, hrx;
+            if (abs_line == s_line && abs_line == e_line) {
+                hlx = bsp_disp_lx + s_col * cw;
+                hrx = bsp_disp_lx + e_col * cw;
+            } else if (abs_line == s_line) {
+                hlx = bsp_disp_lx + s_col * cw;
+                hrx = (int)(x1 - 14);
+            } else if (abs_line == e_line) {
+                hlx = bsp_disp_lx;
+                hrx = bsp_disp_lx + e_col * cw;
+            } else {
+                hlx = bsp_disp_lx;
+                hrx = (int)(x1 - 14);
+            }
+            if (hrx > hlx) {
+                psolid((float)hlx, (float)hy, (float)hrx, (float)(hy + ch),
+                       ar, ag, ab, 0.30f, vp_w, vp_h);
+            }
+        }
+    }
+
+    /* Scrollbar track */
+    if (total_lines > vis_lines) {
+        float sb_x = x1 - 12;
+        float sb_w = 6;
+        psolid(sb_x, disp_y0, sb_x + sb_w, disp_y1,
+               t->bg[0], t->bg[1], t->bg[2], 0.5f, vp_w, vp_h);
+        /* Thumb */
+        float ratio = (float)vis_lines / (float)total_lines;
+        float thumb_h = disp_h * ratio;
+        if (thumb_h < 20) thumb_h = 20;
+        float scroll_ratio = (max_scroll > 0) ? (float)(max_scroll - bsp_scroll) / (float)max_scroll : 0;
+        float thumb_y = disp_y0 + scroll_ratio * (disp_h - thumb_h);
+        psolid(sb_x, thumb_y, sb_x + sb_w, thumb_y + thumb_h,
+               ar, ag, ab, 0.6f, vp_w, vp_h);
+    }
+
+    /* ---- Save button bar ---- */
+    float save_y0 = y1 - save_h;
+    /* Subtle separator */
+    psolid(x0 + 8, save_y0, x1 - 8, save_y0 + 1,
+           t->text[0], t->text[1], t->text[2], 0.15f, vp_w, vp_h);
+
+    /* Save button — centered, glossy */
+    int btn_w = 12 * cw + 16;
+    float btn_x0 = x0 + (bsp_w - btn_w) / 2;
+    float btn_x1 = btn_x0 + btn_w;
+    float btn_y0 = save_y0 + 4;
+    float btn_y1 = y1 - 4;
+    /* Button background */
+    psolid(btn_x0, btn_y0, btn_x1, btn_y1,
+           ar * 0.3f + t->bg[0] * 0.7f, ag * 0.3f + t->bg[1] * 0.7f,
+           ab * 0.3f + t->bg[2] * 0.7f, 0.95f, vp_w, vp_h);
+    /* Gloss top half */
+    psolid(btn_x0, btn_y0, btn_x1, btn_y0 + (btn_y1 - btn_y0) * 0.45f,
+           1.0f, 1.0f, 1.0f, 0.08f, vp_w, vp_h);
+    /* Accent bottom edge */
+    psolid(btn_x0, btn_y1 - 1, btn_x1, btn_y1,
+           ar, ag, ab, 0.5f, vp_w, vp_h);
+    /* Button text */
+    const char *save_label = "[ Save File ]";
+    int slw = (int)strlen(save_label) * cw;
+    int slx = (int)(btn_x0 + (btn_w - slw) / 2);
+    int sly = (int)(btn_y0 + (btn_y1 - btn_y0 - ch) / 2);
+    ptext(slx + 1, sly + 1, save_label, 0.0f, 0.0f, 0.0f, vp_w, vp_h, cw, ch);
+    ptext(slx, sly, save_label, t->text[0], t->text[1], t->text[2], vp_w, vp_h, cw, ch);
+
+    /* Resize grip (bottom-right corner) */
+    psolid(x1 - 14, y1 - 14, x1 - 2, y1 - 2,
+           ar, ag, ab, 0.3f, vp_w, vp_h);
+}
+
+/* ---- Backscroll Panel: copy selection to clipboard ---- */
+
+static void bsp_copy_selection(void)
+{
+    /* Normalize so s <= e */
+    int s_line = bsp_sel_start_line, s_col = bsp_sel_start_col;
+    int e_line = bsp_sel_end_line, e_col = bsp_sel_end_col;
+    if (s_line > e_line || (s_line == e_line && s_col > e_col)) {
+        int tmp; tmp = s_line; s_line = e_line; e_line = tmp;
+        tmp = s_col; s_col = e_col; e_col = tmp;
+    }
+
+    int num_lines = e_line - s_line + 1;
+    if (num_lines <= 0) return;
+
+    if (bsp_mode == BSP_MODE_PLAIN || bsp_mode == BSP_MODE_RAW_ANSI) {
+        /* Plain text copy */
+        int buf_size = num_lines * (CB_COLS + 2) + 1;
+        char *buf = (char *)malloc(buf_size);
+        if (!buf) return;
+        int pos = 0;
+        for (int i = s_line; i <= e_line; i++) {
+            char line[256];
+            int len;
+            if (bsp_mode == BSP_MODE_PLAIN)
+                len = bsp_get_plain_line(i, line, 256);
+            else
+                len = bsp_get_raw_line(i, line, 256);
+            int c0 = (i == s_line) ? s_col : 0;
+            int c1 = (i == e_line) ? e_col : len;
+            if (c0 > len) c0 = len;
+            if (c1 > len) c1 = len;
+            for (int c = c0; c < c1 && pos < buf_size - 2; c++)
+                buf[pos++] = line[c];
+            /* Trim trailing spaces on each line */
+            while (pos > 0 && buf[pos - 1] == ' ' &&
+                   (i == e_line || buf[pos - 1] == ' ')) {
+                /* Only trim if it's trailing, not if mid-line */
+                break;
+            }
+            if (i < e_line) { buf[pos++] = '\r'; buf[pos++] = '\n'; }
+        }
+        buf[pos] = 0;
+        /* Put on clipboard */
+        if (OpenClipboard(vkt_hwnd)) {
+            EmptyClipboard();
+            HGLOBAL hg = GlobalAlloc(GMEM_MOVEABLE, pos + 1);
+            if (hg) {
+                char *dst = (char *)GlobalLock(hg);
+                memcpy(dst, buf, pos + 1);
+                GlobalUnlock(hg);
+                SetClipboardData(CF_TEXT, hg);
+            }
+            CloseClipboard();
+        }
+        free(buf);
+    } else {
+        /* HTML mode — build a self-contained HTML snippet */
+        rgb_t *cpal = (bsp_mode == BSP_MODE_ANSI_HTML) ? pal_classic : tinted_palette;
+        /* Estimate size: ~100 bytes per cell worst case */
+        int est = num_lines * CB_COLS * 80 + 1024;
+        char *buf = (char *)malloc(est);
+        if (!buf) return;
+        int pos = 0;
+
+        #define BSP_APPENDF(...) do { pos += _snprintf(buf + pos, est - pos, __VA_ARGS__); } while(0)
+        #define BSP_APPEND(s) do { int _l = (int)strlen(s); if (pos + _l < est) { memcpy(buf+pos,s,_l); pos+=_l; } } while(0)
+
+        BSP_APPENDF("<!DOCTYPE html>\n<html><head><meta charset=\"utf-8\">\n<style>\n"
+            "body{background:#000;margin:0;padding:8px;}\n"
+            "pre{font-family:'IBM Plex Mono','Cascadia Code','Consolas','Courier New',monospace;"
+            "font-size:14px;line-height:1.3;margin:0;}\n");
+        if (fx_scanline_mode) {
+            BSP_APPEND(".scanlines{background:repeating-linear-gradient("
+                "transparent,transparent 1px,rgba(0,0,0,0.15) 1px,rgba(0,0,0,0.15) 2px);"
+                "position:fixed;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:99;}\n");
+        }
+        BSP_APPEND("</style></head><body>\n");
+        if (fx_scanline_mode) BSP_APPEND("<div class=\"scanlines\"></div>\n");
+        BSP_APPEND("<pre>");
+
+        int prev_fg = -1, prev_bg = -1;
+        int span_open = 0;
+        for (int i = s_line; i <= e_line; i++) {
+            ap_cell_t *row = bsp_get_cb_line(i);
+            if (!row) { BSP_APPEND("\n"); continue; }
+            int c0 = (i == s_line) ? s_col : 0;
+            int c1 = (i == e_line) ? e_col : CB_COLS;
+            /* Trim trailing spaces */
+            int last = c1 - 1;
+            while (last >= c0 && row[last].ch <= 0x20 && row[last].attr.bg == 0) last--;
+            for (int c = c0; c <= last; c++) {
+                ap_cell_t *cell = &row[c];
+                int fg_idx = cell->attr.fg;
+                if (cell->attr.bold && !cell->attr.fg256 && fg_idx < 8) fg_idx += 8;
+                fg_idx &= 15;
+                int bg_idx = cell->attr.bg & 15;
+                if (cell->attr.reverse) { int tmp2 = fg_idx; fg_idx = bg_idx; bg_idx = tmp2; }
+                if (fg_idx != prev_fg || bg_idx != prev_bg) {
+                    if (span_open) BSP_APPEND("</span>");
+                    rgb_t fc = cpal[fg_idx], bc = cpal[bg_idx];
+                    BSP_APPENDF("<span style=\"color:#%02x%02x%02x",
+                        (int)(fc.r*255), (int)(fc.g*255), (int)(fc.b*255));
+                    if (bg_idx != 0)
+                        BSP_APPENDF(";background:#%02x%02x%02x",
+                            (int)(bc.r*255), (int)(bc.g*255), (int)(bc.b*255));
+                    BSP_APPEND("\">");
+                    span_open = 1;
+                    prev_fg = fg_idx; prev_bg = bg_idx;
+                }
+                unsigned char ch = cell->ch;
+                if (ch == '<') BSP_APPEND("&lt;");
+                else if (ch == '>') BSP_APPEND("&gt;");
+                else if (ch == '&') BSP_APPEND("&amp;");
+                else if (ch >= 0x20 && ch < 0x7F) { buf[pos++] = (char)ch; }
+                else if (ch == 0) { buf[pos++] = ' '; }
+                else BSP_APPENDF("&#x%04X;", cp437_to_unicode[ch]);
+            }
+            if (span_open) { BSP_APPEND("</span>"); span_open = 0; prev_fg = -1; prev_bg = -1; }
+            if (i < e_line) BSP_APPEND("\n");
+        }
+        if (span_open) BSP_APPEND("</span>");
+        BSP_APPEND("</pre></body></html>\n");
+        buf[pos] = 0;
+
+        #undef BSP_APPENDF
+        #undef BSP_APPEND
+
+        /* Put on clipboard as text (the HTML is the text content) */
+        if (OpenClipboard(vkt_hwnd)) {
+            EmptyClipboard();
+            HGLOBAL hg = GlobalAlloc(GMEM_MOVEABLE, pos + 1);
+            if (hg) {
+                char *dst = (char *)GlobalLock(hg);
+                memcpy(dst, buf, pos + 1);
+                GlobalUnlock(hg);
+                SetClipboardData(CF_TEXT, hg);
+            }
+            CloseClipboard();
+        }
+        free(buf);
+    }
+}
+
+/* ---- Backscroll Panel: mouse handling ---- */
+
+static int bsp_mouse_down(int mx, int my)
+{
+    if (!bsp_visible) return 0;
+    if (mx < (int)bsp_x || mx >= (int)(bsp_x + bsp_w) ||
+        my < (int)bsp_y || my >= (int)(bsp_y + bsp_h)) return 0;
+
+    vkw_focus = -1; /* steal focus from floating windows */
+
+    int cw = VKM_CHAR_W, ch = VKM_CHAR_H;
+    int titlebar_h = ch + 10;
+    int tab_h = ch + 8;
+    int save_h = ch + 12;
+    int ly = my - (int)bsp_y;
+    int lx = mx - (int)bsp_x;
+
+    /* Close button */
+    if (ly < titlebar_h && mx >= (int)(bsp_x + bsp_w - 24)) {
+        bsp_visible = 0;
+        return 1;
+    }
+    /* Title bar drag */
+    if (ly < titlebar_h) {
+        bsp_dragging = 1;
+        bsp_drag_ox = (float)mx - bsp_x;
+        bsp_drag_oy = (float)my - bsp_y;
+        return 1;
+    }
+    /* Tab bar click */
+    if (ly >= titlebar_h && ly < titlebar_h + tab_h) {
+        int tab = (int)((float)lx / ((bsp_w) / 4.0f));
+        if (tab > 3) tab = 3;
+        if (tab < 0) tab = 0;
+        bsp_mode = tab;
+        bsp_scroll = 0;
+        return 1;
+    }
+    /* Save button click */
+    if (ly >= (int)bsp_h - save_h) {
+        bsp_save();
+        return 1;
+    }
+    /* Resize grip */
+    if (mx >= (int)(bsp_x + bsp_w - 14) && my >= (int)(bsp_y + bsp_h - 14)) {
+        bsp_resizing = 1;
+        bsp_drag_ox = (float)mx - bsp_w;
+        bsp_drag_oy = (float)my - bsp_h;
+        return 1;
+    }
+    /* Display area — start text selection */
+    if (my >= (int)bsp_disp_y0 && my < (int)bsp_disp_y1) {
+        int cw2 = VKM_CHAR_W, ch2 = VKM_CHAR_H;
+        int row = (my - (int)bsp_disp_y0) / ch2;
+        int col = (mx - bsp_disp_lx) / cw2;
+        if (col < 0) col = 0;
+        if (col > CB_COLS) col = CB_COLS;
+        int abs_line = bsp_disp_start + row;
+        if (abs_line >= bsp_disp_total) abs_line = bsp_disp_total - 1;
+        if (abs_line < 0) abs_line = 0;
+        bsp_sel_start_line = abs_line;
+        bsp_sel_start_col = col;
+        bsp_sel_end_line = abs_line;
+        bsp_sel_end_col = col;
+        bsp_selecting = 1;
+        bsp_sel_active = 0;
+        return 1;
+    }
+    return 1; /* consume click inside panel */
+}
+
+static void bsp_mouse_move(int mx, int my)
+{
+    if (bsp_dragging) {
+        bsp_x = (float)mx - bsp_drag_ox;
+        bsp_y = (float)my - bsp_drag_oy;
+        return;
+    }
+    if (bsp_resizing) {
+        bsp_w = (float)mx - bsp_drag_ox;
+        bsp_h = (float)my - bsp_drag_oy;
+        if (bsp_w < 400) bsp_w = 400;
+        if (bsp_h < 200) bsp_h = 200;
+        return;
+    }
+    if (bsp_selecting) {
+        int cw2 = VKM_CHAR_W, ch2 = VKM_CHAR_H;
+        int row = (my - (int)bsp_disp_y0) / ch2;
+        int col = (mx - bsp_disp_lx) / cw2;
+        if (col < 0) col = 0;
+        if (col > CB_COLS) col = CB_COLS;
+        int abs_line = bsp_disp_start + row;
+        /* Auto-scroll if dragging past top/bottom */
+        if (my < (int)bsp_disp_y0 && bsp_scroll < bsp_disp_total - bsp_disp_vis) {
+            bsp_scroll++;
+            abs_line = bsp_disp_start;
+        } else if (my >= (int)bsp_disp_y1 && bsp_scroll > 0) {
+            bsp_scroll--;
+            abs_line = bsp_disp_start + bsp_disp_vis - 1;
+        }
+        if (abs_line >= bsp_disp_total) abs_line = bsp_disp_total - 1;
+        if (abs_line < 0) abs_line = 0;
+        bsp_sel_end_line = abs_line;
+        bsp_sel_end_col = col;
+        bsp_sel_active = 1;
+    }
+}
+
+static void bsp_mouse_up(void)
+{
+    if (bsp_selecting) {
+        bsp_selecting = 0;
+        /* If we have an actual selection (not just a click), copy to clipboard */
+        if (bsp_sel_active &&
+            (bsp_sel_start_line != bsp_sel_end_line ||
+             bsp_sel_start_col != bsp_sel_end_col)) {
+            bsp_copy_selection();
+        } else {
+            bsp_sel_active = 0;
+        }
+    }
+    bsp_dragging = 0;
+    bsp_resizing = 0;
+}
+
 /* ---- MUDRadio: Audio Player + Internet Radio + Beat Viz ---- */
 #include "mudradio.c"
 #include "mudradio_ui.c"
@@ -9041,6 +10035,14 @@ static slop_command_t vkt_commands[] = {
     { "radio.playlist_count","mr_cmd_playlist_count","","i", "Get number of tracks in playlist" },
     { "radio.now_playing", "mr_cmd_now_playing",   "",  "s", "Get now playing text" },
     { "radio.status",      "mr_cmd_status",        "",  "s", "Get transport status (playing/paused/stopped/etc)" },
+    /* Radio beat/waveform analysis */
+    { "radio.bpm",            "mr_cmd_get_bpm",            "", "f", "Get estimated BPM" },
+    { "radio.bass_energy",    "mr_cmd_get_bass_energy",    "", "f", "Get bass energy (0.0-1.0)" },
+    { "radio.mid_energy",     "mr_cmd_get_mid_energy",     "", "f", "Get mid energy (0.0-1.0)" },
+    { "radio.treble_energy",  "mr_cmd_get_treble_energy",  "", "f", "Get treble energy (0.0-1.0)" },
+    { "radio.onset_strength", "mr_cmd_get_onset_strength", "", "f", "Get onset/kick strength (0.0-1.0)" },
+    { "radio.onset",          "mr_cmd_get_onset",          "", "i", "Get beat onset (1=detected this frame)" },
+    { "radio.beat_count",     "mr_cmd_get_beat_count",     "", "i", "Get monotonic beat counter" },
 };
 
 __declspec(dllexport) slop_command_t *slop_get_commands(int *count)
@@ -9066,6 +10068,122 @@ static int vkt_on_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     return 0;
 }
 
+/* ---- Settings Save/Load ---- */
+#define VKT_INI_SECTION "VulkanTerminal"
+
+static void vkt_get_ini_path(char *out, int maxlen)
+{
+    char mod[MAX_PATH];
+    GetModuleFileNameA(NULL, mod, MAX_PATH);
+    /* Strip exe name, append plugins\vk_terminal.ini */
+    char *slash = strrchr(mod, '\\');
+    if (slash) *(slash + 1) = '\0';
+    _snprintf(out, maxlen, "%splugins\\vk_terminal.ini", mod);
+    out[maxlen - 1] = '\0';
+}
+
+static void vkt_save_settings(void)
+{
+    char ini[MAX_PATH];
+    vkt_get_ini_path(ini, MAX_PATH);
+    char buf[32];
+    #define SAVE_INT(key, val) do { _snprintf(buf, 32, "%d", val); \
+        WritePrivateProfileStringA(VKT_INI_SECTION, key, buf, ini); } while(0)
+    #define SAVE_FLOAT(key, val) do { _snprintf(buf, 32, "%.4f", val); \
+        WritePrivateProfileStringA(VKT_INI_SECTION, key, buf, ini); } while(0)
+
+    SAVE_INT("theme", current_theme);
+    SAVE_INT("font", current_font);
+    SAVE_INT("fx_liquid", fx_liquid_mode);
+    SAVE_INT("fx_waves", fx_waves_mode);
+    SAVE_INT("fx_fbm", fx_fbm_mode);
+    SAVE_INT("fx_sobel", fx_sobel_mode);
+    SAVE_INT("fx_scanlines", fx_scanline_mode);
+    SAVE_INT("fx_wobble", fx_wobble_mode);
+    SAVE_INT("round_timer", vrt_visible);
+    SAVE_INT("status_bar", vsb_visible);
+    SAVE_INT("exp_bar", vxb_visible);
+    SAVE_INT("player_stats", pst_visible);
+    SAVE_INT("mudradio", mr_visible);
+    SAVE_FLOAT("brightness", pp_brightness);
+    SAVE_FLOAT("contrast", pp_contrast);
+    SAVE_FLOAT("hue", pp_hue);
+    SAVE_FLOAT("saturation", pp_saturation);
+    /* Window positions */
+    SAVE_INT("pst_x", (int)pst_x); SAVE_INT("pst_y", (int)pst_y);
+    SAVE_INT("mr_x", (int)mr_x); SAVE_INT("mr_y", (int)mr_y);
+    SAVE_INT("mr_w", (int)mr_w); SAVE_INT("mr_h", (int)mr_h);
+
+    #undef SAVE_INT
+    #undef SAVE_FLOAT
+    if (api) api->log("[vk_terminal] Settings saved to %s\n", ini);
+}
+
+static void vkt_load_settings(void)
+{
+    char ini[MAX_PATH];
+    vkt_get_ini_path(ini, MAX_PATH);
+    /* Check if file exists */
+    DWORD attr = GetFileAttributesA(ini);
+    if (attr == INVALID_FILE_ATTRIBUTES) return;
+
+    #define LOAD_INT(key, var, def) var = (int)GetPrivateProfileIntA(VKT_INI_SECTION, key, def, ini)
+    #define LOAD_FLOAT(key, var, def) do { char _b[32]; \
+        GetPrivateProfileStringA(VKT_INI_SECTION, key, #def, _b, 32, ini); \
+        var = (float)atof(_b); } while(0)
+
+    LOAD_INT("theme", current_theme, 0);
+    LOAD_INT("font", current_font, -1);
+    LOAD_INT("fx_liquid", fx_liquid_mode, 0);
+    LOAD_INT("fx_waves", fx_waves_mode, 0);
+    LOAD_INT("fx_fbm", fx_fbm_mode, 0);
+    LOAD_INT("fx_sobel", fx_sobel_mode, 0);
+    LOAD_INT("fx_scanlines", fx_scanline_mode, 0);
+    LOAD_INT("fx_wobble", fx_wobble_mode, 0);
+    LOAD_INT("round_timer", vrt_visible, 0);
+    LOAD_INT("status_bar", vsb_visible, 0);
+    LOAD_INT("exp_bar", vxb_visible, 0);
+    LOAD_INT("player_stats", pst_visible, 0);
+    LOAD_INT("mudradio", mr_visible, 0);
+    LOAD_FLOAT("brightness", pp_brightness, 0.0);
+    LOAD_FLOAT("contrast", pp_contrast, 1.0);
+    LOAD_FLOAT("hue", pp_hue, 0.0);
+    LOAD_FLOAT("saturation", pp_saturation, 1.0);
+    { int v; LOAD_INT("pst_x", v, (int)pst_x); pst_x = (float)v; }
+    { int v; LOAD_INT("pst_y", v, (int)pst_y); pst_y = (float)v; }
+    { int v; LOAD_INT("mr_x", v, (int)mr_x); mr_x = (float)v; }
+    { int v; LOAD_INT("mr_y", v, (int)mr_y); mr_y = (float)v; }
+    { int v; LOAD_INT("mr_w", v, (int)mr_w); mr_w = (float)v; }
+    { int v; LOAD_INT("mr_h", v, (int)mr_h); mr_h = (float)v; }
+
+    #undef LOAD_INT
+    #undef LOAD_FLOAT
+    if (api) api->log("[vk_terminal] Settings loaded from %s\n", ini);
+}
+
+static void vkt_reset_settings(void)
+{
+    current_theme = 0;
+    current_font = -1;
+    fx_liquid_mode = 0;
+    fx_waves_mode = 0;
+    fx_fbm_mode = 0;
+    fx_sobel_mode = 0;
+    fx_scanline_mode = 0;
+    fx_wobble_mode = 0;
+    vrt_visible = 0;
+    vsb_visible = 0;
+    vxb_visible = 0;
+    pst_visible = 0;
+    mr_visible = 0;
+    pp_brightness = 0.0f;
+    pp_contrast = 1.0f;
+    pp_hue = 0.0f;
+    pp_saturation = 1.0f;
+    apply_theme_palette(current_theme);
+    if (api) api->log("[vk_terminal] Settings reset to defaults\n");
+}
+
 static int vkt_init(const slop_api_t *a)
 {
     api = a;
@@ -9077,7 +10195,9 @@ static int vkt_init(const slop_api_t *a)
     InitializeCriticalSection(&bs_lock);
     bs_lock_init = 1;
     ap_init(&ansi_term, TERM_ROWS, TERM_COLS);
+    ap_set_scroll_cb(&ansi_term, cb_scroll_cb, NULL);
 
+    vkt_load_settings();
     apply_theme_palette(current_theme);
     input_buf[0] = '\0';
 
