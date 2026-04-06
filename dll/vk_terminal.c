@@ -137,6 +137,8 @@ static res_t resolutions[] = {
 #include "shaders/term_frag.h"
 #include "shaders/liquid_vert.h"
 #include "shaders/liquid_frag.h"
+#include "shaders/bg_plasma_vert.h"
+#include "shaders/bg_plasma_frag.h"
 
 /* ---- Plugin state ---- */
 
@@ -666,8 +668,9 @@ static int ttf_loaded[MAX_TTF_FONTS] = {0};
 #define VKM_FX_FBM       2
 #define VKM_FX_SOBEL     3
 #define VKM_FX_SCANLINES 4
-#define VKM_FX_WOBBLE    5
-#define VKM_FX_COUNT     6   /* wobble only shown when vk_experimental=True */
+#define VKM_FX_SMOKY     5
+#define VKM_FX_WOBBLE    6
+#define VKM_FX_COUNT     7   /* wobble only shown when vk_experimental=True */
 
 /* Settings submenu items */
 #define VKM_SUB_EXTRAS   7
@@ -683,7 +686,8 @@ static int ttf_loaded[MAX_TTF_FONTS] = {0};
 /* Extras submenu items */
 #define VKM_SUB_XTRA2    8
 #define VKM_X2_VIZ       0   /* Visualizations > */
-#define VKM_X2_COUNT     1
+#define VKM_X2_BG        1   /* Backgrounds > */
+#define VKM_X2_COUNT     2
 
 /* Visualizations 3rd-level submenu */
 #define VKM_SUB_VIZ      9
@@ -692,6 +696,11 @@ static int ttf_loaded[MAX_TTF_FONTS] = {0};
 #define VKM_VIZ_MATRIX   2
 #define VKM_VIZ_ASTEROIDS 3
 #define VKM_VIZ_COUNT    4
+
+/* Backgrounds 3rd-level submenu */
+#define VKM_SUB_BG       10
+#define VKM_BG_PLASMA    0
+#define VKM_BG_COUNT     1
 
 static int megamud_hidden = 0; /* 1 = MegaMUD windows hidden, VK-only mode */
 static int snd_wnd_idx = -1;  /* Sound Settings window index (forward decl) */
@@ -2718,7 +2727,64 @@ static int fx_waves_mode = 0;     /* 0 = off, 1 = diagonal waves */
 static int fx_fbm_mode = 0;       /* 0 = off, 1 = FBM noise warp */
 static int fx_sobel_mode = 0;     /* 0 = off, 1 = sobel/sharp/plastic */
 static int fx_scanline_mode = 0;  /* 0 = off, 1 = CRT scanlines */
+static int fx_smoky_mode = 0;       /* 0 = off, 1 = smoky letters */
 static float fx_time = 0.0f;      /* animation time in seconds */
+
+/* Smoky Letters parameters */
+static float smoke_decay = 1.5f;      /* fade speed, 0.5-5.0 */
+static float smoke_depth = 0.8f;      /* opacity/strength, 0.0-2.0 */
+static float smoke_zoom = 2.0f;       /* noise scale, 0.5-4.0 */
+static float smoke_hue = 0.0f;        /* 0-360 degrees */
+static float smoke_saturation = 0.0f; /* 0-2 (0 = white smoke) */
+static float smoke_value = 1.0f;      /* brightness 0-2 */
+
+/* ---- Animated Background System ---- */
+#define BG_NONE     0
+#define BG_PLASMA   1
+static int bg_mode = BG_NONE;
+static int bg_quad_end = 0;
+
+/* Background pipeline */
+static VkPipelineLayout vk_bg_pipe_layout = VK_NULL_HANDLE;
+static VkPipeline vk_bg_pipeline = VK_NULL_HANDLE;
+
+/* Fractal Plasma parameters */
+static float bg_plasma_speed      = 1.0f;
+static float bg_plasma_turbulence = 0.5f;
+static float bg_plasma_complexity = 4.0f;
+static float bg_plasma_hue        = 0.0f;
+static float bg_plasma_saturation = 0.8f;
+static float bg_plasma_brightness = 0.7f;
+static float bg_plasma_alpha      = 0.35f;
+
+/* Background settings panel state */
+static int   bgp_visible = 0;
+static float bgp_x = 140.0f, bgp_y = 100.0f;
+static float bgp_w = 300.0f, bgp_h = 290.0f;
+static int   bgp_dragging = 0;
+static float bgp_drag_ox, bgp_drag_oy;
+static int   bgp_active_slider = -1;
+static void  bgp_draw(int vp_w, int vp_h);
+static int   bgp_mouse_down(int mx, int my);
+static void  bgp_mouse_move(int mx, int my);
+static void  bgp_mouse_up(void);
+
+/* Smoke settings panel */
+#define SMK_SLIDER_COUNT 6
+static int   smk_visible = 0;
+static float smk_x = 20, smk_y = 100;
+static float smk_w = 280, smk_h = 200;
+static int   smk_dragging = 0;
+static float smk_drag_ox = 0, smk_drag_oy = 0;
+static int   smk_active_slider = -1;
+static float *smk_slider_ptr[SMK_SLIDER_COUNT];
+static const float smk_slider_min[SMK_SLIDER_COUNT] = { 0.5f, 0.0f, 0.5f, 0.0f, 0.0f, 0.0f };
+static const float smk_slider_max[SMK_SLIDER_COUNT] = { 5.0f, 2.0f, 4.0f, 360.0f, 2.0f, 2.0f };
+static const char *smk_labels[SMK_SLIDER_COUNT] = { "Decay", "Depth", "Zoom", "Hue", "Saturation", "Brightness" };
+static void  smk_draw(int vp_w, int vp_h);
+static int   smk_mouse_down(int mx, int my);
+static void  smk_mouse_move(int mx, int my);
+static void  smk_mouse_up(void);
 
 /* Post-process color/brightness settings */
 static float pp_brightness = 0.0f;   /* -1..1 */
@@ -3310,6 +3376,7 @@ static int vkm_sub_count(void)
     if (vkm_sub == VKM_SUB_EXTRAS) return VKM_EXT_COUNT;
     if (vkm_sub == VKM_SUB_XTRA2) return VKM_X2_COUNT;
     if (vkm_sub == VKM_SUB_VIZ) return VKM_VIZ_COUNT;
+    if (vkm_sub == VKM_SUB_BG) return VKM_BG_COUNT;
     return 0;
 }
 
@@ -3349,7 +3416,7 @@ static void vkm_get_sub_rect(int *out_sx, int *out_sy)
         parent = VKM_ITEM_EXTRAS;
     else if (vkm_sub == VKM_SUB_XTRA2)
         parent = VKM_ITEM_XTRA2;
-    else if (vkm_sub == VKM_SUB_VIZ) {
+    else if (vkm_sub == VKM_SUB_VIZ || vkm_sub == VKM_SUB_BG) {
         parent = VKM_ITEM_XTRA2;
         is_3rd_level = 1;
     } else
@@ -4600,7 +4667,7 @@ static void vkm_draw(int vp_w, int vp_h)
             (i == VKM_ITEM_WIDGETS && vkm_sub == VKM_SUB_WIDGETS) ||
             (i == VKM_ITEM_RECENT && vkm_sub == VKM_SUB_RECENT) ||
             (i == VKM_ITEM_EXTRAS && vkm_sub == VKM_SUB_EXTRAS) ||
-            (i == VKM_ITEM_XTRA2 && (vkm_sub == VKM_SUB_XTRA2 || vkm_sub == VKM_SUB_VIZ))) {
+            (i == VKM_ITEM_XTRA2 && (vkm_sub == VKM_SUB_XTRA2 || vkm_sub == VKM_SUB_VIZ || vkm_sub == VKM_SUB_BG))) {
             tr = t->accent[0]; tg = t->accent[1]; tb = t->accent[2];
         }
         push_text(vkm_x + VKM_PAD, iy + (ih - ch) / 2,
@@ -4680,6 +4747,7 @@ static void vkm_draw(int vp_w, int vp_h)
                 else if (i == VKM_FX_FBM) { label = "FBM Currents"; is_active = fx_fbm_mode; }
                 else if (i == VKM_FX_SOBEL) { label = "Sobel/Sharp"; is_active = fx_sobel_mode; }
                 else if (i == VKM_FX_SCANLINES) { label = "CRT Scanlines"; is_active = fx_scanline_mode; }
+                else if (i == VKM_FX_SMOKY) { label = "Smoky Letters"; is_active = fx_smoky_mode; }
                 else if (i == VKM_FX_WOBBLE && vk_experimental) { label = "Wobbly Widgets \x1b[33m[EXP]"; is_active = fx_wobble_mode; }
             } else if (vkm_sub == VKM_SUB_EXTRAS) {
                 if (i == VKM_EXT_SOUND) {
@@ -4701,6 +4769,13 @@ static void vkm_draw(int vp_w, int vp_h)
             } else if (vkm_sub == VKM_SUB_XTRA2) {
                 if (i == VKM_X2_VIZ) {
                     label = "Visualizations  \x10"; has_arrow = 1;
+                } else if (i == VKM_X2_BG) {
+                    label = "Backgrounds  \x10"; has_arrow = 1;
+                }
+            } else if (vkm_sub == VKM_SUB_BG) {
+                if (i == VKM_BG_PLASMA) {
+                    label = "Fractal Plasma";
+                    is_active = (bg_mode == BG_PLASMA);
                 }
             } else if (vkm_sub == VKM_SUB_VIZ) {
                 if (i == VKM_VIZ_BLADES) {
@@ -5473,6 +5548,16 @@ static void vkt_build_vertices(void)
     viz_update(1.0f / 60.0f, cw, ch, x_offset, (float)top_pad,
                (float)vp_w, (float)vp_h, tex_cw, tex_ch, hp_u, hp_v);
 
+    /* Background layer: fullscreen quad for animated backgrounds */
+    bg_quad_end = 0;
+    if (bg_mode != BG_NONE) {
+        push_quad(PX2NDC_X(0), PX2NDC_Y(0),
+                  PX2NDC_X(vp_w), PX2NDC_Y(vp_h),
+                  bg_u0, bg_v0, bg_u1, bg_v1,
+                  1.0f, 1.0f, 1.0f, 1.0f);
+        bg_quad_end = quad_count;
+    }
+
     /* Pass 1: backgrounds using solid glyph */
     for (int r = 0; r < TERM_ROWS; r++) {
         for (int c = 0; c < TERM_COLS; c++) {
@@ -5635,6 +5720,8 @@ static void vkt_build_vertices(void)
     bsp_draw(vp_w, vp_h);
     mr_draw(vp_w, vp_h);
     clr_draw(vp_w, vp_h);
+    bgp_draw(vp_w, vp_h);
+    smk_draw(vp_w, vp_h);
     pl_quad_end = quad_count;
 
     /* Draw context menu on top of EVERYTHING (last = topmost) */
@@ -6936,7 +7023,7 @@ static int vkt_create_swapchain(void)
         VkPushConstantRange pcr = {0};
         pcr.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
         pcr.offset = 0;
-        pcr.size = sizeof(float) * 10; /* time, fx_mode, fx_waves, fx_scanlines, fx_fbm, fx_sobel, pp_brightness, pp_contrast, pp_hue, pp_saturation */
+        pcr.size = sizeof(float) * 17;
 
         VkPipelineLayoutCreateInfo lplci = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
         lplci.setLayoutCount = 1;
@@ -6977,6 +7064,53 @@ static int vkt_create_swapchain(void)
         else
             api->log("[vk_terminal] Liquid Letters pipeline OK\n");
     }
+
+    /* ---- Background Plasma pipeline ---- */
+    {
+        VkPushConstantRange pcr = {0};
+        pcr.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+        pcr.offset = 0;
+        pcr.size = sizeof(float) * 10; /* BG shader only uses 10 push constants */
+
+        VkPipelineLayoutCreateInfo bplci = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+        bplci.setLayoutCount = 1;
+        bplci.pSetLayouts = &vk_desc_layout;
+        bplci.pushConstantRangeCount = 1;
+        bplci.pPushConstantRanges = &pcr;
+        vkCreatePipelineLayout(vk_dev, &bplci, NULL, &vk_bg_pipe_layout);
+
+        VkShaderModuleCreateInfo bvsci = { VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO };
+        bvsci.codeSize = bg_plasma_vert_spv_size;
+        bvsci.pCode = bg_plasma_vert_spv;
+        VkShaderModule bvs;
+        vkCreateShaderModule(vk_dev, &bvsci, NULL, &bvs);
+
+        VkShaderModuleCreateInfo bfsci = { VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO };
+        bfsci.codeSize = bg_plasma_frag_spv_size;
+        bfsci.pCode = bg_plasma_frag_spv;
+        VkShaderModule bfs;
+        vkCreateShaderModule(vk_dev, &bfsci, NULL, &bfs);
+
+        VkPipelineShaderStageCreateInfo bstages[2] = {
+            { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0,
+              VK_SHADER_STAGE_VERTEX_BIT, bvs, "main", NULL },
+            { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0,
+              VK_SHADER_STAGE_FRAGMENT_BIT, bfs, "main", NULL },
+        };
+
+        VkGraphicsPipelineCreateInfo bgpci = gpci;
+        bgpci.pStages = bstages;
+        bgpci.layout = vk_bg_pipe_layout;
+        res = vkCreateGraphicsPipelines(vk_dev, VK_NULL_HANDLE, 1, &bgpci, NULL, &vk_bg_pipeline);
+
+        vkDestroyShaderModule(vk_dev, bvs, NULL);
+        vkDestroyShaderModule(vk_dev, bfs, NULL);
+
+        if (res != VK_SUCCESS)
+            api->log("[vk_terminal] Background pipeline failed: %d\n", res);
+        else
+            api->log("[vk_terminal] Background pipeline OK\n");
+    }
     api->log("[vk_terminal] Swapchain %dx%d, %d images\n",
              vk_sc_extent.width, vk_sc_extent.height, vk_sc_count);
     return 0;
@@ -6989,6 +7123,8 @@ static void vkt_destroy_swapchain(void)
     if (vk_pipe_layout) { vkDestroyPipelineLayout(vk_dev, vk_pipe_layout, NULL); vk_pipe_layout = VK_NULL_HANDLE; }
     if (vk_liquid_pipeline) { vkDestroyPipeline(vk_dev, vk_liquid_pipeline, NULL); vk_liquid_pipeline = VK_NULL_HANDLE; }
     if (vk_liquid_pipe_layout) { vkDestroyPipelineLayout(vk_dev, vk_liquid_pipe_layout, NULL); vk_liquid_pipe_layout = VK_NULL_HANDLE; }
+    if (vk_bg_pipeline) { vkDestroyPipeline(vk_dev, vk_bg_pipeline, NULL); vk_bg_pipeline = VK_NULL_HANDLE; }
+    if (vk_bg_pipe_layout) { vkDestroyPipelineLayout(vk_dev, vk_bg_pipe_layout, NULL); vk_bg_pipe_layout = VK_NULL_HANDLE; }
     if (vk_renderpass) { vkDestroyRenderPass(vk_dev, vk_renderpass, NULL); vk_renderpass = VK_NULL_HANDLE; }
     if (vk_sc_fbs) {
         for (uint32_t i = 0; i < vk_sc_count; i++) vkDestroyFramebuffer(vk_dev, vk_sc_fbs[i], NULL);
@@ -7043,28 +7179,48 @@ static void vkt_render_frame(void)
     vkCmdBeginRenderPass(vk_cmd_buf, &rpbi, VK_SUBPASS_CONTENTS_INLINE);
 
     int pp_active = (pp_brightness != 0.0f || pp_contrast != 1.0f || pp_hue != 0.0f || pp_saturation != 1.0f);
-    int fx_active = (fx_liquid_mode || fx_waves_mode || fx_scanline_mode || fx_fbm_mode || fx_sobel_mode || pp_active) && vk_liquid_pipeline;
+    int fx_active = (fx_liquid_mode || fx_waves_mode || fx_scanline_mode || fx_fbm_mode || fx_sobel_mode || fx_smoky_mode || pp_active) && vk_liquid_pipeline;
 
     VkDeviceSize offset = 0;
     vkCmdBindVertexBuffers(vk_cmd_buf, 0, 1, &vk_vbuf, &offset);
     vkCmdBindIndexBuffer(vk_cmd_buf, vk_ibuf, 0, VK_INDEX_TYPE_UINT16);
 
-    if (fx_active && fx_split_quad > 0) {
+    /* Draw 0: Animated background (if active) */
+    int term_start = 0;
+    if (bg_mode != BG_NONE && bg_quad_end > 0 && vk_bg_pipeline) {
+        vkCmdBindPipeline(vk_cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS, vk_bg_pipeline);
+        vkCmdBindDescriptorSets(vk_cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                vk_bg_pipe_layout, 0, 1, &vk_desc_set, 0, NULL);
+        float bg_pc[10] = { fx_time, bg_plasma_speed, bg_plasma_turbulence,
+                            bg_plasma_complexity, bg_plasma_hue, bg_plasma_saturation,
+                            bg_plasma_brightness, bg_plasma_alpha,
+                            (float)vk_sc_extent.width, (float)vk_sc_extent.height };
+        vkCmdPushConstants(vk_cmd_buf, vk_bg_pipe_layout,
+                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                           0, sizeof(bg_pc), bg_pc);
+        vkCmdDrawIndexed(vk_cmd_buf, bg_quad_end * 6, 1, 0, 0, 0);
+        term_start = bg_quad_end;
+    }
+
+    if (fx_active && fx_split_quad > term_start) {
         /* Draw 1: Terminal text with FX pipeline */
         vkCmdBindPipeline(vk_cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS, vk_liquid_pipeline);
         vkCmdBindDescriptorSets(vk_cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                 vk_liquid_pipe_layout, 0, 1, &vk_desc_set, 0, NULL);
-        float pc_data[10] = { fx_time,
+        float pc_data[17] = { fx_time,
                               fx_liquid_mode ? 1.0f : 0.0f,
                               fx_waves_mode ? 1.0f : 0.0f,
                               fx_scanline_mode ? 1.0f : 0.0f,
                               fx_fbm_mode ? 1.0f : 0.0f,
                               fx_sobel_mode ? 1.0f : 0.0f,
-                              pp_brightness, pp_contrast, pp_hue, pp_saturation };
+                              pp_brightness, pp_contrast, pp_hue, pp_saturation,
+                              fx_smoky_mode ? 1.0f : 0.0f,
+                              smoke_decay, smoke_depth, smoke_zoom,
+                              smoke_hue, smoke_saturation, smoke_value };
         vkCmdPushConstants(vk_cmd_buf, vk_liquid_pipe_layout,
                            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                            0, sizeof(pc_data), pc_data);
-        vkCmdDrawIndexed(vk_cmd_buf, fx_split_quad * 6, 1, 0, 0, 0);
+        vkCmdDrawIndexed(vk_cmd_buf, (fx_split_quad - term_start) * 6, 1, term_start * 6, 0, 0);
 
         /* Draw 2: UI chrome (windows, timer) with normal pipeline + main font */
         vkCmdBindPipeline(vk_cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS, vk_pipeline);
@@ -7101,13 +7257,16 @@ static void vkt_render_frame(void)
             vkCmdBindPipeline(vk_cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS, vk_liquid_pipeline);
             vkCmdBindDescriptorSets(vk_cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                     vk_liquid_pipe_layout, 0, 1, &vk_desc_set, 0, NULL);
-            float pc_data[10] = { fx_time,
+            float pc_data[17] = { fx_time,
                                   fx_liquid_mode ? 1.0f : 0.0f,
                                   fx_waves_mode ? 1.0f : 0.0f,
                                   fx_scanline_mode ? 1.0f : 0.0f,
                                   fx_fbm_mode ? 1.0f : 0.0f,
                                   fx_sobel_mode ? 1.0f : 0.0f,
-                                  pp_brightness, pp_contrast, pp_hue, pp_saturation };
+                                  pp_brightness, pp_contrast, pp_hue, pp_saturation,
+                                  fx_smoky_mode ? 1.0f : 0.0f,
+                                  smoke_decay, smoke_depth, smoke_zoom,
+                                  smoke_hue, smoke_saturation, smoke_value };
             vkCmdPushConstants(vk_cmd_buf, vk_liquid_pipe_layout,
                                VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                                0, sizeof(pc_data), pc_data);
@@ -7116,9 +7275,9 @@ static void vkt_render_frame(void)
             vkCmdBindDescriptorSets(vk_cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                     vk_pipe_layout, 0, 1, &vk_desc_set, 0, NULL);
         }
-        /* Draw terminal + UI chrome up to P&L */
-        if (pl_quad_start > 0)
-            vkCmdDrawIndexed(vk_cmd_buf, pl_quad_start * 6, 1, 0, 0, 0);
+        /* Draw terminal + UI chrome up to P&L (skip bg quads) */
+        if (pl_quad_start > term_start)
+            vkCmdDrawIndexed(vk_cmd_buf, (pl_quad_start - term_start) * 6, 1, term_start * 6, 0, 0);
         /* P&L with UI font */
         {
             int pl_quads = pl_quad_end - pl_quad_start;
@@ -7411,6 +7570,15 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             clr_mouse_move(mx2, my2);
             return 0;
         }
+        /* Background settings panel drag/slider */
+        if (bgp_dragging || bgp_active_slider >= 0) {
+            bgp_mouse_move(mx2, my2);
+            return 0;
+        }
+        if (smk_dragging || smk_active_slider >= 0) {
+            smk_mouse_move(mx2, my2);
+            return 0;
+        }
         /* Player Stats drag */
         if (pst_dragging) {
             pst_x = (float)mx2 - pst_drag_ox;
@@ -7457,7 +7625,8 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             /* Check if mouse is inside the 3rd-level submenu panel */
             int in_3rd = 0;
             if (vkm_sub == VKM_SUB_THEME || vkm_sub == VKM_SUB_FONT ||
-                vkm_sub == VKM_SUB_FX || vkm_sub == VKM_SUB_VIZ) {
+                vkm_sub == VKM_SUB_FX || vkm_sub == VKM_SUB_VIZ ||
+                vkm_sub == VKM_SUB_BG) {
                 int sx3, sy3;
                 vkm_get_sub_rect(&sx3, &sy3);
                 int sh3 = vkm_sub_height();
@@ -7482,7 +7651,7 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 int is_3rd_parent = 0;
                 if ((vkm_sub == VKM_SUB_THEME || vkm_sub == VKM_SUB_FONT || vkm_sub == VKM_SUB_FX)
                     && rh == VKM_ITEM_VISUAL) is_3rd_parent = 1;
-                if (vkm_sub == VKM_SUB_VIZ && rh == VKM_ITEM_XTRA2) is_3rd_parent = 1;
+                if ((vkm_sub == VKM_SUB_VIZ || vkm_sub == VKM_SUB_BG) && rh == VKM_ITEM_XTRA2) is_3rd_parent = 1;
 
                 if (is_3rd_parent) {
                     vkm_hover_root = rh;
@@ -7527,6 +7696,7 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                             else if (sh == VKM_VIS_FX) vkm_sub = VKM_SUB_FX;
                         } else if (vkm_sub == VKM_SUB_XTRA2) {
                             if (sh == VKM_X2_VIZ) vkm_sub = VKM_SUB_VIZ;
+                            else if (sh == VKM_X2_BG) vkm_sub = VKM_SUB_BG;
                         }
                         vkm_hover_drill = -1;
                     }
@@ -7670,6 +7840,9 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         if (mr_mouse_down(mx, my)) return 0;
         /* Color/Brightness panel click */
         if (clr_mouse_down(mx, my)) return 0;
+        /* Background settings panel click */
+        if (bgp_mouse_down(mx, my)) return 0;
+        if (smk_mouse_down(mx, my)) return 0;
         /* Player Stats panel click */
         if (pst_visible && mx >= (int)pst_x && mx < (int)(pst_x + pst_w) &&
             my >= (int)pst_y && my < (int)(pst_y + pst_h)) {
@@ -7741,6 +7914,8 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         if (pl_dragging) { pl_dragging = 0; return 0; }
         if (mr_dragging || mr_resizing || mr_vol_dragging) { mr_mouse_up(); return 0; }
         if (clr_dragging || clr_active_slider >= 0) { clr_mouse_up(); return 0; }
+        if (bgp_dragging || bgp_active_slider >= 0) { bgp_mouse_up(); return 0; }
+        if (smk_dragging || smk_active_slider >= 0) { smk_mouse_up(); return 0; }
         if (pst_dragging) { pst_dragging = 0; return 0; }
         if (bsp_dragging || bsp_resizing || bsp_selecting) { bsp_mouse_up(); return 0; }
         if (vrt_dragging) { vrt_dragging = 0; return 0; }
@@ -7830,6 +8005,12 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 fx_scanline_mode = !fx_scanline_mode;
                 if (api) api->log("[vk_terminal] CRT Scanlines: %s\n",
                                   fx_scanline_mode ? "ON" : "OFF");
+            } else if (si == VKM_FX_SMOKY) {
+                fx_smoky_mode = !fx_smoky_mode;
+                if (fx_smoky_mode && !smk_visible) smk_visible = 1;
+                if (!fx_smoky_mode) smk_visible = 0;
+                if (api) api->log("[vk_terminal] Smoky Letters: %s\n",
+                                  fx_smoky_mode ? "ON" : "OFF");
             } else if (si == VKM_FX_WOBBLE && vk_experimental) {
                 fx_wobble_mode = !fx_wobble_mode;
                 if (api) api->log("[vk_terminal] Wobbly Widgets: %s\n",
@@ -7871,9 +8052,28 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             return 0;
         }
 
-        /* Extras > submenu click — opens Visualizations 3rd-level */
+        /* Extras > submenu click — opens 3rd-level submenus */
         if (si >= 0 && vkm_sub == VKM_SUB_XTRA2) {
             if (si == VKM_X2_VIZ) { vkm_sub = VKM_SUB_VIZ; vkm_sub_hover = -1; }
+            else if (si == VKM_X2_BG) { vkm_sub = VKM_SUB_BG; vkm_sub_hover = -1; }
+            return 0;
+        }
+
+        /* Backgrounds submenu click */
+        if (si >= 0 && vkm_sub == VKM_SUB_BG) {
+            if (si == VKM_BG_PLASMA) {
+                if (bg_mode == BG_PLASMA) {
+                    bg_mode = BG_NONE;
+                    bgp_visible = 0;
+                } else {
+                    bg_mode = BG_PLASMA;
+                    bgp_visible = 1;
+                }
+                if (api) api->log("[vk_terminal] Fractal Plasma: %s\n",
+                                  bg_mode == BG_PLASMA ? "ON" : "OFF");
+            }
+            vkm_open = 0;
+            vkm_sub = VKM_SUB_NONE;
             return 0;
         }
 
@@ -9966,6 +10166,378 @@ static void clr_mouse_up(void) {
     clr_active_slider = -1;
 }
 
+/* ---- Background Settings Panel (bgp_) ---- */
+
+#define BGP_SLIDER_COUNT 7
+
+static const char *bgp_labels[BGP_SLIDER_COUNT] = {
+    "Speed", "Turbulence", "Complexity", "Hue", "Saturation", "Brightness", "Opacity"
+};
+
+static float bgp_slider_min[BGP_SLIDER_COUNT] = { 0.1f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f };
+static float bgp_slider_max[BGP_SLIDER_COUNT] = { 5.0f, 2.0f, 8.0f, 360.0f, 1.0f, 2.0f, 1.0f };
+
+static float *bgp_slider_ptr[BGP_SLIDER_COUNT];
+
+static void bgp_draw(int vp_w, int vp_h) {
+    if (!bgp_visible) return;
+    const ui_theme_t *t = &ui_themes[current_theme];
+    int cw = VKM_CHAR_W, ch = VKM_CHAR_H;
+    float x0 = bgp_x, y0 = bgp_y;
+    float pw = bgp_w;
+    int titlebar_h = ch + 8;
+
+    bgp_slider_ptr[0] = &bg_plasma_speed;
+    bgp_slider_ptr[1] = &bg_plasma_turbulence;
+    bgp_slider_ptr[2] = &bg_plasma_complexity;
+    bgp_slider_ptr[3] = &bg_plasma_hue;
+    bgp_slider_ptr[4] = &bg_plasma_saturation;
+    bgp_slider_ptr[5] = &bg_plasma_brightness;
+    bgp_slider_ptr[6] = &bg_plasma_alpha;
+
+    push_solid((int)x0, (int)y0, (int)(x0 + pw), (int)(y0 + bgp_h),
+               t->bg[0], t->bg[1], t->bg[2], 0.92f, vp_w, vp_h);
+    push_solid((int)x0, (int)y0, (int)(x0 + pw), (int)(y0 + 1),
+               t->accent[0], t->accent[1], t->accent[2], 0.6f, vp_w, vp_h);
+    push_solid((int)x0, (int)(y0 + bgp_h - 1), (int)(x0 + pw), (int)(y0 + bgp_h),
+               t->accent[0], t->accent[1], t->accent[2], 0.6f, vp_w, vp_h);
+    push_solid((int)x0, (int)y0, (int)(x0 + 1), (int)(y0 + bgp_h),
+               t->accent[0], t->accent[1], t->accent[2], 0.6f, vp_w, vp_h);
+    push_solid((int)(x0 + pw - 1), (int)y0, (int)(x0 + pw), (int)(y0 + bgp_h),
+               t->accent[0], t->accent[1], t->accent[2], 0.6f, vp_w, vp_h);
+
+    {
+        float acr = t->accent[0], acg = t->accent[1], acb = t->accent[2];
+        float tbr = acr * 0.25f + t->bg[0] * 0.5f;
+        float tbg = acg * 0.25f + t->bg[1] * 0.5f;
+        float tbb = acb * 0.25f + t->bg[2] * 0.5f;
+        int ty0 = (int)y0 + 2, ty1 = (int)y0 + titlebar_h;
+        push_solid((int)x0 + 2, ty0, (int)(x0 + pw) - 2, ty1,
+                   tbr, tbg, tbb, 0.95f, vp_w, vp_h);
+        push_solid((int)x0 + 2, ty0, (int)(x0 + pw) - 2, ty0 + titlebar_h / 2,
+                   1.0f, 1.0f, 1.0f, 0.06f, vp_w, vp_h);
+        push_solid((int)x0 + 2, ty1 - 1, (int)(x0 + pw) - 2, ty1,
+                   acr, acg, acb, 0.5f, vp_w, vp_h);
+    }
+    push_text((int)(x0 + 6) + 1, (int)(y0 + 4) + 1, "Fractal Plasma",
+              0.0f, 0.0f, 0.0f, vp_w, vp_h, cw, ch);
+    push_text((int)(x0 + 6), (int)(y0 + 4), "Fractal Plasma",
+              t->text[0], t->text[1], t->text[2], vp_w, vp_h, cw, ch);
+    push_text((int)(x0 + pw - 16), (int)(y0 + 4), "X",
+              t->text[0] * 0.6f, t->text[1] * 0.6f, t->text[2] * 0.6f, vp_w, vp_h, cw, ch);
+    push_text((int)(x0 + pw - 55), (int)(y0 + 4), "Reset",
+              t->text[0] * 0.5f, t->text[1] * 0.5f, t->text[2] * 0.5f, vp_w, vp_h, cw, ch);
+
+    float cy = y0 + titlebar_h + 12;
+    float row_h = ch + 14;
+    char vbuf[32];
+
+    for (int i = 0; i < BGP_SLIDER_COUNT; i++) {
+        float val = *bgp_slider_ptr[i];
+        if (i == 3)
+            _snprintf(vbuf, sizeof(vbuf), "%.0f\xF8", val);
+        else if (i == 2)
+            _snprintf(vbuf, sizeof(vbuf), "%.0f", val);
+        else
+            _snprintf(vbuf, sizeof(vbuf), "%.2f", val);
+
+        clr_draw_slider(x0 + 8, cy, pw - 16, row_h, val,
+                        bgp_slider_min[i], bgp_slider_max[i],
+                        bgp_labels[i], vbuf, vp_w, vp_h, t);
+        cy += row_h;
+    }
+
+    bgp_h = cy - y0 + 8;
+}
+
+static int bgp_hit_slider(int mx, int my, float *out_pct) {
+    int cw = VKM_CHAR_W, ch = VKM_CHAR_H;
+    int titlebar_h = ch + 8;
+    float row_h = ch + 14;
+    float sx0 = bgp_x + 8 + 110;
+    float sx1 = bgp_x + bgp_w - 16 - 50 + 8;
+    for (int i = 0; i < BGP_SLIDER_COUNT; i++) {
+        float sy = bgp_y + titlebar_h + 12 + i * row_h;
+        if (my >= (int)sy && my < (int)(sy + row_h) &&
+            mx >= (int)(sx0 - 4) && mx <= (int)(sx1 + 4)) {
+            float pct = ((float)mx - sx0) / (sx1 - sx0);
+            if (pct < 0) pct = 0; if (pct > 1) pct = 1;
+            *out_pct = pct;
+            return i;
+        }
+    }
+    return -1;
+}
+
+static void bgp_set_from_pct(int slider, float pct) {
+    if (slider < 0 || slider >= BGP_SLIDER_COUNT) return;
+    float val = bgp_slider_min[slider] + pct * (bgp_slider_max[slider] - bgp_slider_min[slider]);
+    *bgp_slider_ptr[slider] = val;
+}
+
+static int bgp_mouse_down(int mx, int my) {
+    if (!bgp_visible) return 0;
+    if (mx < (int)bgp_x || mx >= (int)(bgp_x + bgp_w) ||
+        my < (int)bgp_y || my >= (int)(bgp_y + bgp_h)) return 0;
+    int ch = VKM_CHAR_H;
+    int titlebar_h = ch + 8;
+    int ly = my - (int)bgp_y;
+    if (ly < titlebar_h && mx >= (int)(bgp_x + bgp_w - 20)) {
+        bgp_visible = 0;
+        return 1;
+    }
+    if (ly < titlebar_h && mx >= (int)(bgp_x + bgp_w - 60) && mx < (int)(bgp_x + bgp_w - 20)) {
+        bg_plasma_speed = 1.0f; bg_plasma_turbulence = 0.5f;
+        bg_plasma_complexity = 4.0f; bg_plasma_hue = 0.0f;
+        bg_plasma_saturation = 0.8f; bg_plasma_brightness = 0.7f;
+        bg_plasma_alpha = 0.35f;
+        return 1;
+    }
+    if (ly < titlebar_h) {
+        bgp_dragging = 1;
+        bgp_drag_ox = (float)mx - bgp_x;
+        bgp_drag_oy = (float)my - bgp_y;
+        return 1;
+    }
+    float pct;
+    int s = bgp_hit_slider(mx, my, &pct);
+    if (s >= 0) {
+        bgp_active_slider = s;
+        bgp_set_from_pct(s, pct);
+        return 1;
+    }
+    return 1;
+}
+
+static void bgp_mouse_move(int mx, int my) {
+    if (bgp_dragging) {
+        bgp_x = (float)mx - bgp_drag_ox;
+        bgp_y = (float)my - bgp_drag_oy;
+        return;
+    }
+    if (bgp_active_slider >= 0) {
+        float sx0 = bgp_x + 8 + 110;
+        float sx1 = bgp_x + bgp_w - 16 - 50 + 8;
+        float pct = ((float)mx - sx0) / (sx1 - sx0);
+        if (pct < 0) pct = 0; if (pct > 1) pct = 1;
+        bgp_set_from_pct(bgp_active_slider, pct);
+    }
+}
+
+static void bgp_mouse_up(void) {
+    bgp_dragging = 0;
+    bgp_active_slider = -1;
+}
+
+/* ---- Smoky Letters Settings Panel ---- */
+
+static void smk_draw(int vp_w, int vp_h) {
+    if (!smk_visible) return;
+    const ui_theme_t *t = &ui_themes[current_theme];
+    int cw = VKM_CHAR_W, ch = VKM_CHAR_H;
+    float x0 = smk_x, y0 = smk_y;
+    float pw = smk_w;
+    int titlebar_h = ch + 8;
+
+    smk_slider_ptr[0] = &smoke_decay;
+    smk_slider_ptr[1] = &smoke_depth;
+    smk_slider_ptr[2] = &smoke_zoom;
+    smk_slider_ptr[3] = &smoke_hue;
+    smk_slider_ptr[4] = &smoke_saturation;
+    smk_slider_ptr[5] = &smoke_value;
+
+    push_solid((int)x0, (int)y0, (int)(x0 + pw), (int)(y0 + smk_h),
+               t->bg[0], t->bg[1], t->bg[2], 0.92f, vp_w, vp_h);
+    push_solid((int)x0, (int)y0, (int)(x0 + pw), (int)(y0 + 1),
+               t->accent[0], t->accent[1], t->accent[2], 0.6f, vp_w, vp_h);
+    push_solid((int)x0, (int)(y0 + smk_h - 1), (int)(x0 + pw), (int)(y0 + smk_h),
+               t->accent[0], t->accent[1], t->accent[2], 0.6f, vp_w, vp_h);
+    push_solid((int)x0, (int)y0, (int)(x0 + 1), (int)(y0 + smk_h),
+               t->accent[0], t->accent[1], t->accent[2], 0.6f, vp_w, vp_h);
+    push_solid((int)(x0 + pw - 1), (int)y0, (int)(x0 + pw), (int)(y0 + smk_h),
+               t->accent[0], t->accent[1], t->accent[2], 0.6f, vp_w, vp_h);
+
+    {
+        float acr = t->accent[0], acg = t->accent[1], acb = t->accent[2];
+        float tbr = acr * 0.25f + t->bg[0] * 0.5f;
+        float tbg = acg * 0.25f + t->bg[1] * 0.5f;
+        float tbb = acb * 0.25f + t->bg[2] * 0.5f;
+        int ty0 = (int)y0 + 2, ty1 = (int)y0 + titlebar_h;
+        push_solid((int)x0 + 2, ty0, (int)(x0 + pw) - 2, ty1,
+                   tbr, tbg, tbb, 0.95f, vp_w, vp_h);
+        push_solid((int)x0 + 2, ty0, (int)(x0 + pw) - 2, ty0 + titlebar_h / 2,
+                   1.0f, 1.0f, 1.0f, 0.06f, vp_w, vp_h);
+        push_solid((int)x0 + 2, ty1 - 1, (int)(x0 + pw) - 2, ty1,
+                   acr, acg, acb, 0.5f, vp_w, vp_h);
+    }
+    push_text((int)(x0 + 6) + 1, (int)(y0 + 4) + 1, "Smoky Letters",
+              0.0f, 0.0f, 0.0f, vp_w, vp_h, cw, ch);
+    push_text((int)(x0 + 6), (int)(y0 + 4), "Smoky Letters",
+              t->text[0], t->text[1], t->text[2], vp_w, vp_h, cw, ch);
+    push_text((int)(x0 + pw - 16), (int)(y0 + 4), "X",
+              t->text[0] * 0.6f, t->text[1] * 0.6f, t->text[2] * 0.6f, vp_w, vp_h, cw, ch);
+    push_text((int)(x0 + pw - 55), (int)(y0 + 4), "Reset",
+              t->text[0] * 0.5f, t->text[1] * 0.5f, t->text[2] * 0.5f, vp_w, vp_h, cw, ch);
+
+    float cy = y0 + titlebar_h + 12;
+    float row_h = ch + 14;
+    char vbuf[32];
+
+    for (int i = 0; i < SMK_SLIDER_COUNT; i++) {
+        float val = *smk_slider_ptr[i];
+        if (i == 3)
+            _snprintf(vbuf, sizeof(vbuf), "%.0f\xF8", val);
+        else
+            _snprintf(vbuf, sizeof(vbuf), "%.2f", val);
+
+        clr_draw_slider(x0 + 8, cy, pw - 16, row_h, val,
+                        smk_slider_min[i], smk_slider_max[i],
+                        smk_labels[i], vbuf, vp_w, vp_h, t);
+        cy += row_h;
+    }
+
+    smk_h = cy - y0 + 8;
+}
+
+static int smk_hit_slider(int mx, int my, float *out_pct) {
+    int cw = VKM_CHAR_W, ch = VKM_CHAR_H;
+    int titlebar_h = ch + 8;
+    float row_h = ch + 14;
+    float sx0 = smk_x + 8 + 110;
+    float sx1 = smk_x + smk_w - 16 - 50 + 8;
+    for (int i = 0; i < SMK_SLIDER_COUNT; i++) {
+        float sy = smk_y + titlebar_h + 12 + i * row_h;
+        if (my >= (int)sy && my < (int)(sy + row_h) &&
+            mx >= (int)(sx0 - 4) && mx <= (int)(sx1 + 4)) {
+            float pct = ((float)mx - sx0) / (sx1 - sx0);
+            if (pct < 0) pct = 0; if (pct > 1) pct = 1;
+            *out_pct = pct;
+            return i;
+        }
+    }
+    return -1;
+}
+
+static void smk_set_from_pct(int slider, float pct) {
+    if (slider < 0 || slider >= SMK_SLIDER_COUNT) return;
+    float val = smk_slider_min[slider] + pct * (smk_slider_max[slider] - smk_slider_min[slider]);
+    *smk_slider_ptr[slider] = val;
+}
+
+static int smk_mouse_down(int mx, int my) {
+    if (!smk_visible) return 0;
+    if (mx < (int)smk_x || mx >= (int)(smk_x + smk_w) ||
+        my < (int)smk_y || my >= (int)(smk_y + smk_h)) return 0;
+    int ch = VKM_CHAR_H;
+    int titlebar_h = ch + 8;
+    int ly = my - (int)smk_y;
+    if (ly < titlebar_h && mx >= (int)(smk_x + smk_w - 20)) {
+        smk_visible = 0;
+        return 1;
+    }
+    if (ly < titlebar_h && mx >= (int)(smk_x + smk_w - 60) && mx < (int)(smk_x + smk_w - 20)) {
+        smoke_decay = 1.5f; smoke_depth = 0.8f;
+        smoke_zoom = 2.0f; smoke_hue = 0.0f;
+        smoke_saturation = 0.0f; smoke_value = 1.0f;
+        return 1;
+    }
+    if (ly < titlebar_h) {
+        smk_dragging = 1;
+        smk_drag_ox = (float)mx - smk_x;
+        smk_drag_oy = (float)my - smk_y;
+        return 1;
+    }
+    float pct;
+    int s = smk_hit_slider(mx, my, &pct);
+    if (s >= 0) {
+        smk_active_slider = s;
+        smk_set_from_pct(s, pct);
+        return 1;
+    }
+    return 1;
+}
+
+static void smk_mouse_move(int mx, int my) {
+    if (smk_dragging) {
+        smk_x = (float)mx - smk_drag_ox;
+        smk_y = (float)my - smk_drag_oy;
+        return;
+    }
+    if (smk_active_slider >= 0) {
+        float sx0 = smk_x + 8 + 110;
+        float sx1 = smk_x + smk_w - 16 - 50 + 8;
+        float pct = ((float)mx - sx0) / (sx1 - sx0);
+        if (pct < 0) pct = 0; if (pct > 1) pct = 1;
+        smk_set_from_pct(smk_active_slider, pct);
+    }
+}
+
+static void smk_mouse_up(void) {
+    smk_dragging = 0;
+    smk_active_slider = -1;
+}
+
+/* ---- Background MMUDPy Exports ---- */
+
+__declspec(dllexport) void vkt_bg_set_mode(int mode)
+{
+    bg_mode = mode;
+    if (bg_mode == BG_PLASMA && !bgp_visible) bgp_visible = 1;
+    if (bg_mode == BG_NONE) bgp_visible = 0;
+    if (api) api->log("[vk_terminal] bg_mode=%d\n", bg_mode);
+}
+
+__declspec(dllexport) int vkt_bg_get_mode(void) { return bg_mode; }
+
+__declspec(dllexport) void vkt_bg_plasma_set_speed(float v) { bg_plasma_speed = v; }
+__declspec(dllexport) void vkt_bg_plasma_set_turbulence(float v) { bg_plasma_turbulence = v; }
+__declspec(dllexport) void vkt_bg_plasma_set_complexity(float v) { bg_plasma_complexity = v; }
+__declspec(dllexport) void vkt_bg_plasma_set_hue(float v) { bg_plasma_hue = v; }
+__declspec(dllexport) void vkt_bg_plasma_set_saturation(float v) { bg_plasma_saturation = v; }
+__declspec(dllexport) void vkt_bg_plasma_set_brightness(float v) { bg_plasma_brightness = v; }
+__declspec(dllexport) void vkt_bg_plasma_set_alpha(float v) { bg_plasma_alpha = v; }
+
+__declspec(dllexport) float vkt_bg_plasma_get_speed(void) { return bg_plasma_speed; }
+__declspec(dllexport) float vkt_bg_plasma_get_turbulence(void) { return bg_plasma_turbulence; }
+__declspec(dllexport) float vkt_bg_plasma_get_complexity(void) { return bg_plasma_complexity; }
+__declspec(dllexport) float vkt_bg_plasma_get_hue(void) { return bg_plasma_hue; }
+__declspec(dllexport) float vkt_bg_plasma_get_saturation(void) { return bg_plasma_saturation; }
+__declspec(dllexport) float vkt_bg_plasma_get_brightness(void) { return bg_plasma_brightness; }
+__declspec(dllexport) float vkt_bg_plasma_get_alpha(void) { return bg_plasma_alpha; }
+
+__declspec(dllexport) void vkt_bg_plasma_set_all(float speed, float turbulence, float complexity,
+                                                  float hue, float saturation, float brightness, float alpha)
+{
+    bg_plasma_speed = speed; bg_plasma_turbulence = turbulence;
+    bg_plasma_complexity = complexity; bg_plasma_hue = hue;
+    bg_plasma_saturation = saturation; bg_plasma_brightness = brightness;
+    bg_plasma_alpha = alpha;
+}
+
+__declspec(dllexport) void vkt_bg_show_settings(void) { if (bg_mode != BG_NONE) bgp_visible = 1; }
+__declspec(dllexport) void vkt_bg_hide_settings(void) { bgp_visible = 0; }
+
+__declspec(dllexport) void vkt_bg_help(void)
+{
+    if (vkw_console_idx < 0) return;
+    vkw_print(vkw_console_idx, "\x1b[1;37m---- Backgrounds ----\x1b[0m");
+    vkw_print(vkw_console_idx, " \x1b[1;32m*\x1b[0m Fractal Plasma");
+    vkw_print(vkw_console_idx, "");
+    vkw_print(vkw_console_idx, "\x1b[1;37mCommands:\x1b[0m");
+    vkw_print(vkw_console_idx, "  bg.set_mode(0|1)     - Off / Plasma");
+    vkw_print(vkw_console_idx, "  bg.get_mode()        - Get current mode");
+    vkw_print(vkw_console_idx, "  bg.plasma.speed(f)   - Speed (0.1-5.0)");
+    vkw_print(vkw_console_idx, "  bg.plasma.turbulence(f)");
+    vkw_print(vkw_console_idx, "  bg.plasma.complexity(f) - Octaves (1-8)");
+    vkw_print(vkw_console_idx, "  bg.plasma.hue(f)     - Hue (0-360)");
+    vkw_print(vkw_console_idx, "  bg.plasma.saturation(f)");
+    vkw_print(vkw_console_idx, "  bg.plasma.brightness(f)");
+    vkw_print(vkw_console_idx, "  bg.plasma.alpha(f)   - Opacity (0-1)");
+    vkw_print(vkw_console_idx, "  bg.plasma.set_all(speed,turb,cmplx,hue,sat,brt,alpha)");
+    vkw_print(vkw_console_idx, "  bg.show_settings()   - Show settings panel");
+    vkw_print(vkw_console_idx, "  bg.hide_settings()   - Hide settings panel");
+}
+
 __declspec(dllexport) void vkt_vk_plugins_show_experimental(int val)
 {
     vk_experimental = val ? 1 : 0;
@@ -9987,8 +10559,15 @@ __declspec(dllexport) void vkt_vk_plugins_list(void)
     vkw_print(vkw_console_idx, " \x1b[1;32m*\x1b[0m FBM Currents");
     vkw_print(vkw_console_idx, " \x1b[1;32m*\x1b[0m Sobel/Sharp");
     vkw_print(vkw_console_idx, " \x1b[1;32m*\x1b[0m CRT Scanlines");
+    vkw_print(vkw_console_idx, fx_smoky_mode
+        ? " \x1b[1;32m*\x1b[0m Smoky Letters  [\x1b[1;32mACTIVE\x1b[0m]"
+        : " \x1b[1;32m*\x1b[0m Smoky Letters");
     vkw_print(vkw_console_idx, " \x1b[1;32m*\x1b[0m Round Timer");
     vkw_print(vkw_console_idx, " \x1b[1;32m*\x1b[0m Exp Bar");
+    vkw_print(vkw_console_idx, "\x1b[1;37m---- Backgrounds ----\x1b[0m");
+    vkw_print(vkw_console_idx, bg_mode == BG_PLASMA
+        ? " \x1b[1;32m*\x1b[0m Fractal Plasma  [\x1b[1;32mACTIVE\x1b[0m]"
+        : " \x1b[1;32m*\x1b[0m Fractal Plasma");
     vkw_print(vkw_console_idx, "\x1b[1;37m---- Experimental ----\x1b[0m");
     vkw_print(vkw_console_idx, vk_experimental
         ? " \x1b[1;33m!\x1b[0m Wobbly Widgets  [\x1b[1;33mEXPERIMENTAL\x1b[0m]"
@@ -9997,6 +10576,51 @@ __declspec(dllexport) void vkt_vk_plugins_list(void)
     vkw_print(vkw_console_idx, vk_experimental
         ? "  show_experimental = \x1b[1;32mTrue\x1b[0m"
         : "  show_experimental = \x1b[1;31mFalse\x1b[0m");
+}
+
+/* ---- Smoky Letters MMUDPy Exports ---- */
+__declspec(dllexport) void vkt_smoke_set_mode(int mode) {
+    fx_smoky_mode = mode ? 1 : 0;
+    if (fx_smoky_mode && !smk_visible) smk_visible = 1;
+    if (!fx_smoky_mode) smk_visible = 0;
+    if (api) api->log("[vk_terminal] Smoky Letters: %s\n", fx_smoky_mode ? "ON" : "OFF");
+}
+__declspec(dllexport) int vkt_smoke_get_mode(void) { return fx_smoky_mode; }
+__declspec(dllexport) void vkt_smoke_set_decay(float v) { smoke_decay = v; }
+__declspec(dllexport) void vkt_smoke_set_depth(float v) { smoke_depth = v; }
+__declspec(dllexport) void vkt_smoke_set_zoom(float v) { smoke_zoom = v; }
+__declspec(dllexport) void vkt_smoke_set_hue(float v) { smoke_hue = v; }
+__declspec(dllexport) void vkt_smoke_set_saturation(float v) { smoke_saturation = v; }
+__declspec(dllexport) void vkt_smoke_set_value(float v) { smoke_value = v; }
+__declspec(dllexport) float vkt_smoke_get_decay(void) { return smoke_decay; }
+__declspec(dllexport) float vkt_smoke_get_depth(void) { return smoke_depth; }
+__declspec(dllexport) float vkt_smoke_get_zoom(void) { return smoke_zoom; }
+__declspec(dllexport) float vkt_smoke_get_hue(void) { return smoke_hue; }
+__declspec(dllexport) float vkt_smoke_get_saturation(void) { return smoke_saturation; }
+__declspec(dllexport) float vkt_smoke_get_value(void) { return smoke_value; }
+__declspec(dllexport) void vkt_smoke_set_all(float decay, float depth, float zoom, float hue, float sat, float val) {
+    smoke_decay = decay; smoke_depth = depth; smoke_zoom = zoom;
+    smoke_hue = hue; smoke_saturation = sat; smoke_value = val;
+}
+__declspec(dllexport) void vkt_smoke_show_settings(void) { smk_visible = 1; }
+__declspec(dllexport) void vkt_smoke_hide_settings(void) { smk_visible = 0; }
+__declspec(dllexport) void vkt_smoke_help(void) {
+    if (vkw_console_idx < 0) return;
+    vkw_print(vkw_console_idx, "\x1b[1;37m---- Smoky Letters ----\x1b[0m");
+    vkw_print(vkw_console_idx, "Smoke emitting from letter edges");
+    vkw_print(vkw_console_idx, "");
+    vkw_print(vkw_console_idx, "\x1b[1;37mCommands:\x1b[0m");
+    vkw_print(vkw_console_idx, "  smoke.set_mode(0|1)  - Off / On");
+    vkw_print(vkw_console_idx, "  smoke.get_mode()     - Get current mode");
+    vkw_print(vkw_console_idx, "  smoke.decay(f)       - Decay speed (0.5-5.0)");
+    vkw_print(vkw_console_idx, "  smoke.depth(f)       - Strength (0.0-2.0)");
+    vkw_print(vkw_console_idx, "  smoke.zoom(f)        - Noise scale (0.5-4.0)");
+    vkw_print(vkw_console_idx, "  smoke.hue(f)         - Hue (0-360)");
+    vkw_print(vkw_console_idx, "  smoke.saturation(f)  - Saturation (0-2)");
+    vkw_print(vkw_console_idx, "  smoke.value(f)       - Brightness (0-2)");
+    vkw_print(vkw_console_idx, "  smoke.set_all(decay,depth,zoom,hue,sat,val)");
+    vkw_print(vkw_console_idx, "  smoke.show_settings() - Show settings panel");
+    vkw_print(vkw_console_idx, "  smoke.hide_settings() - Hide settings panel");
 }
 
 static slop_command_t vkt_commands[] = {
@@ -10013,6 +10637,33 @@ static slop_command_t vkt_commands[] = {
     { "console_print","vkt_console_print","s", "v", "Print to console window" },
     { "vk_plugins.show_experimental", "vkt_vk_plugins_show_experimental", "i", "v", "Enable/disable experimental plugins (1=True, 0=False)" },
     { "vk_plugins.list", "vkt_vk_plugins_list", "", "v", "List all VK plugins and their status" },
+    /* Backgrounds */
+    { "bg.set_mode",          "vkt_bg_set_mode",          "i",       "v", "Set background mode (0=off, 1=plasma)" },
+    { "bg.get_mode",          "vkt_bg_get_mode",          "",        "i", "Get current background mode" },
+    { "bg.plasma.speed",      "vkt_bg_plasma_set_speed",  "f",       "v", "Set plasma speed (0.1-5.0)" },
+    { "bg.plasma.turbulence", "vkt_bg_plasma_set_turbulence","f",    "v", "Set plasma turbulence (0.0-2.0)" },
+    { "bg.plasma.complexity", "vkt_bg_plasma_set_complexity","f",    "v", "Set plasma complexity/octaves (1-8)" },
+    { "bg.plasma.hue",        "vkt_bg_plasma_set_hue",    "f",       "v", "Set plasma hue shift (0-360)" },
+    { "bg.plasma.saturation", "vkt_bg_plasma_set_saturation","f",    "v", "Set plasma saturation (0-1)" },
+    { "bg.plasma.brightness", "vkt_bg_plasma_set_brightness","f",    "v", "Set plasma brightness (0-2)" },
+    { "bg.plasma.alpha",      "vkt_bg_plasma_set_alpha",  "f",       "v", "Set plasma opacity (0-1)" },
+    { "bg.plasma.set_all",    "vkt_bg_plasma_set_all",    "fffffff", "v", "Set all plasma params (speed,turb,cmplx,hue,sat,brt,alpha)" },
+    { "bg.show_settings",     "vkt_bg_show_settings",     "",        "v", "Show background settings panel" },
+    { "bg.hide_settings",     "vkt_bg_hide_settings",     "",        "v", "Hide background settings panel" },
+    { "bg.help",              "vkt_bg_help",              "",        "v", "Show background commands help" },
+    /* Smoky Letters */
+    { "smoke.set_mode",       "vkt_smoke_set_mode",       "i",      "v", "Set smoky letters mode (0=off, 1=on)" },
+    { "smoke.get_mode",       "vkt_smoke_get_mode",       "",       "i", "Get smoky letters mode" },
+    { "smoke.decay",          "vkt_smoke_set_decay",      "f",      "v", "Set smoke decay speed (0.5-5.0)" },
+    { "smoke.depth",          "vkt_smoke_set_depth",      "f",      "v", "Set smoke strength (0.0-2.0)" },
+    { "smoke.zoom",           "vkt_smoke_set_zoom",       "f",      "v", "Set smoke noise scale (0.5-4.0)" },
+    { "smoke.hue",            "vkt_smoke_set_hue",        "f",      "v", "Set smoke hue (0-360)" },
+    { "smoke.saturation",     "vkt_smoke_set_saturation", "f",      "v", "Set smoke saturation (0-2)" },
+    { "smoke.value",          "vkt_smoke_set_value",      "f",      "v", "Set smoke brightness (0-2)" },
+    { "smoke.set_all",        "vkt_smoke_set_all",        "ffffff", "v", "Set all smoke params (decay,depth,zoom,hue,sat,val)" },
+    { "smoke.show_settings",  "vkt_smoke_show_settings",  "",       "v", "Show smoke settings panel" },
+    { "smoke.hide_settings",  "vkt_smoke_hide_settings",  "",       "v", "Hide smoke settings panel" },
+    { "smoke.help",           "vkt_smoke_help",           "",       "v", "Show smoke commands help" },
     /* MUDRadio */
     { "radio.show",        "mr_cmd_show",         "",  "v", "Show MUDRadio panel" },
     { "radio.hide",        "mr_cmd_hide",         "",  "v", "Hide MUDRadio panel" },
@@ -10099,6 +10750,7 @@ static void vkt_save_settings(void)
     SAVE_INT("fx_fbm", fx_fbm_mode);
     SAVE_INT("fx_sobel", fx_sobel_mode);
     SAVE_INT("fx_scanlines", fx_scanline_mode);
+    SAVE_INT("fx_smoky", fx_smoky_mode);
     SAVE_INT("fx_wobble", fx_wobble_mode);
     SAVE_INT("round_timer", vrt_visible);
     SAVE_INT("status_bar", vsb_visible);
@@ -10109,6 +10761,22 @@ static void vkt_save_settings(void)
     SAVE_FLOAT("contrast", pp_contrast);
     SAVE_FLOAT("hue", pp_hue);
     SAVE_FLOAT("saturation", pp_saturation);
+    /* Background settings */
+    SAVE_INT("bg_mode", bg_mode);
+    SAVE_FLOAT("bg_plasma_speed", bg_plasma_speed);
+    SAVE_FLOAT("bg_plasma_turbulence", bg_plasma_turbulence);
+    SAVE_FLOAT("bg_plasma_complexity", bg_plasma_complexity);
+    SAVE_FLOAT("bg_plasma_hue", bg_plasma_hue);
+    SAVE_FLOAT("bg_plasma_saturation", bg_plasma_saturation);
+    SAVE_FLOAT("bg_plasma_brightness", bg_plasma_brightness);
+    SAVE_FLOAT("bg_plasma_alpha", bg_plasma_alpha);
+    /* Smoke settings */
+    SAVE_FLOAT("smoke_decay", smoke_decay);
+    SAVE_FLOAT("smoke_depth", smoke_depth);
+    SAVE_FLOAT("smoke_zoom", smoke_zoom);
+    SAVE_FLOAT("smoke_hue", smoke_hue);
+    SAVE_FLOAT("smoke_saturation", smoke_saturation);
+    SAVE_FLOAT("smoke_value", smoke_value);
     /* Window positions */
     SAVE_INT("pst_x", (int)pst_x); SAVE_INT("pst_y", (int)pst_y);
     SAVE_INT("mr_x", (int)mr_x); SAVE_INT("mr_y", (int)mr_y);
@@ -10139,6 +10807,7 @@ static void vkt_load_settings(void)
     LOAD_INT("fx_fbm", fx_fbm_mode, 0);
     LOAD_INT("fx_sobel", fx_sobel_mode, 0);
     LOAD_INT("fx_scanlines", fx_scanline_mode, 0);
+    LOAD_INT("fx_smoky", fx_smoky_mode, 0);
     LOAD_INT("fx_wobble", fx_wobble_mode, 0);
     LOAD_INT("round_timer", vrt_visible, 0);
     LOAD_INT("status_bar", vsb_visible, 0);
@@ -10149,6 +10818,21 @@ static void vkt_load_settings(void)
     LOAD_FLOAT("contrast", pp_contrast, 1.0);
     LOAD_FLOAT("hue", pp_hue, 0.0);
     LOAD_FLOAT("saturation", pp_saturation, 1.0);
+    /* Background settings */
+    LOAD_INT("bg_mode", bg_mode, 0);
+    LOAD_FLOAT("bg_plasma_speed", bg_plasma_speed, 1.0);
+    LOAD_FLOAT("bg_plasma_turbulence", bg_plasma_turbulence, 0.5);
+    LOAD_FLOAT("bg_plasma_complexity", bg_plasma_complexity, 4.0);
+    LOAD_FLOAT("bg_plasma_hue", bg_plasma_hue, 0.0);
+    LOAD_FLOAT("bg_plasma_saturation", bg_plasma_saturation, 0.8);
+    LOAD_FLOAT("bg_plasma_brightness", bg_plasma_brightness, 0.7);
+    LOAD_FLOAT("bg_plasma_alpha", bg_plasma_alpha, 0.35);
+    LOAD_FLOAT("smoke_decay", smoke_decay, 1.5);
+    LOAD_FLOAT("smoke_depth", smoke_depth, 0.8);
+    LOAD_FLOAT("smoke_zoom", smoke_zoom, 2.0);
+    LOAD_FLOAT("smoke_hue", smoke_hue, 0.0);
+    LOAD_FLOAT("smoke_saturation", smoke_saturation, 0.0);
+    LOAD_FLOAT("smoke_value", smoke_value, 1.0);
     { int v; LOAD_INT("pst_x", v, (int)pst_x); pst_x = (float)v; }
     { int v; LOAD_INT("pst_y", v, (int)pst_y); pst_y = (float)v; }
     { int v; LOAD_INT("mr_x", v, (int)mr_x); mr_x = (float)v; }
@@ -10170,6 +10854,14 @@ static void vkt_reset_settings(void)
     fx_fbm_mode = 0;
     fx_sobel_mode = 0;
     fx_scanline_mode = 0;
+    fx_smoky_mode = 0;
+    smoke_decay = 1.5f;
+    smoke_depth = 0.8f;
+    smoke_zoom = 2.0f;
+    smoke_hue = 0.0f;
+    smoke_saturation = 0.0f;
+    smoke_value = 1.0f;
+    smk_visible = 0;
     fx_wobble_mode = 0;
     vrt_visible = 0;
     vsb_visible = 0;
@@ -10180,6 +10872,15 @@ static void vkt_reset_settings(void)
     pp_contrast = 1.0f;
     pp_hue = 0.0f;
     pp_saturation = 1.0f;
+    bg_mode = BG_NONE;
+    bg_plasma_speed = 1.0f;
+    bg_plasma_turbulence = 0.5f;
+    bg_plasma_complexity = 4.0f;
+    bg_plasma_hue = 0.0f;
+    bg_plasma_saturation = 0.8f;
+    bg_plasma_brightness = 0.7f;
+    bg_plasma_alpha = 0.35f;
+    bgp_visible = 0;
     apply_theme_palette(current_theme);
     if (api) api->log("[vk_terminal] Settings reset to defaults\n");
 }

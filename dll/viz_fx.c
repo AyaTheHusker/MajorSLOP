@@ -735,7 +735,7 @@ static void viz_update_one_ship(viz_ship_t *s, float dt, float cw, float ch,
         break;
 
     case VIZ_FLY_DRIFT:
-        /* Drifter: slow lazy float, sudden burst-dash on beat */
+        /* Drifter: lazy spiraling float, gentle pulse on beat */
         s->wander_t -= dt;
         if (s->wander_t <= 0) {
             viz_ship_pick_target(s, cw, ch, x_off, top_pad_px);
@@ -746,21 +746,33 @@ static void viz_update_one_ship(viz_ship_t *s, float dt, float cw, float ch,
         ad = ta - s->angle;
         while (ad > 3.14159f) ad -= 6.28318f;
         while (ad < -3.14159f) ad += 6.28318f;
-        s->angle += ad * 1.2f * dt; /* slow lazy turning */
-        /* Gentle drift + sine wobble */
-        thrust_amount = 80.0f;
+        s->angle += ad * 1.5f * dt;
+        /* Lazy spiral: orbit offset that slowly rotates */
+        s->orbit_angle += 0.8f * dt;
+        {
+            float spiral_r = 60.0f + sinf(s->style_phase * 0.3f) * 30.0f;
+            float sx_off = cosf(s->orbit_angle) * spiral_r * dt;
+            float sy_off = sinf(s->orbit_angle) * spiral_r * dt;
+            s->vx += sx_off;
+            s->vy += sy_off;
+        }
+        /* Gentle forward drift */
+        thrust_amount = 100.0f + viz_kick * 60.0f;
         s->vx += cosf(s->angle) * thrust_amount * dt;
         s->vy += sinf(s->angle) * thrust_amount * dt;
-        /* Add gentle sine wobble perpendicular to heading */
-        s->vx += cosf(s->angle + 1.57f) * sinf(s->style_phase * 1.5f) * 40.0f * dt;
-        s->vy += sinf(s->angle + 1.57f) * sinf(s->style_phase * 1.5f) * 40.0f * dt;
-        /* Beat dash: sudden burst toward target */
+        /* Sine wobble perpendicular to heading */
+        s->vx += cosf(s->angle + 1.57f) * sinf(s->style_phase * 1.2f) * 50.0f * dt;
+        s->vy += sinf(s->angle + 1.57f) * sinf(s->style_phase * 1.2f) * 50.0f * dt;
+        /* Beat: gentle pulse outward, not a dash */
         if (viz_beat_hit) {
-            s->vx += cosf(s->angle) * 500.0f;
-            s->vy += sinf(s->angle) * 500.0f;
+            float pulse = 80.0f;
+            s->vx += cosf(s->angle) * pulse;
+            s->vy += sinf(s->angle) * pulse;
+            /* Also nudge orbit angle for variety */
+            s->orbit_angle += 0.5f;
         }
-        s->vx *= (1.0f - 0.8f * dt); /* very low drag = long glides */
-        s->vy *= (1.0f - 0.8f * dt);
+        s->vx *= (1.0f - 2.0f * dt); /* moderate drag, no more infinite glides */
+        s->vy *= (1.0f - 2.0f * dt);
         break;
 
     case VIZ_FLY_PATROL:
@@ -1287,6 +1299,66 @@ static void viz_push_quads(float cw, float ch, float x_off, float top_pad_px,
         if (sr > 1.0f) sr = 1.0f;
         if (sg > 1.0f) sg = 1.0f;
         if (sb > 1.0f) sb = 1.0f;
+
+        /* Phosphor glow layers (drawn first = behind core edges) */
+        {
+            float gnx, gny, glen;
+            /* --- Outer bloom (wide, faint) --- */
+            float gw2 = 10.0f;
+            float ga2 = 0.06f + beat_glow * 0.03f;
+            /* Nose → Left wing */
+            gnx = -(lwing_y - nose_y); gny = (lwing_x - nose_x);
+            glen = sqrtf(gnx*gnx+gny*gny); if(glen>0){gnx/=glen;gny/=glen;}
+            push_quad_free(VPX(nose_x+gnx*gw2), VPY(nose_y+gny*gw2),
+                           VPX(lwing_x+gnx*gw2), VPY(lwing_y+gny*gw2),
+                           VPX(lwing_x-gnx*gw2), VPY(lwing_y-gny*gw2),
+                           VPX(nose_x-gnx*gw2), VPY(nose_y-gny*gw2),
+                           sr, sg, sb, ga2);
+            /* Nose → Right wing */
+            gnx = -(rwing_y - nose_y); gny = (rwing_x - nose_x);
+            glen = sqrtf(gnx*gnx+gny*gny); if(glen>0){gnx/=glen;gny/=glen;}
+            push_quad_free(VPX(nose_x+gnx*gw2), VPY(nose_y+gny*gw2),
+                           VPX(rwing_x+gnx*gw2), VPY(rwing_y+gny*gw2),
+                           VPX(rwing_x-gnx*gw2), VPY(rwing_y-gny*gw2),
+                           VPX(nose_x-gnx*gw2), VPY(nose_y-gny*gw2),
+                           sr, sg, sb, ga2);
+            /* Rear */
+            gnx = -(rwing_y - lwing_y); gny = (rwing_x - lwing_x);
+            glen = sqrtf(gnx*gnx+gny*gny); if(glen>0){gnx/=glen;gny/=glen;}
+            push_quad_free(VPX(lwing_x+gnx*gw2), VPY(lwing_y+gny*gw2),
+                           VPX(rwing_x+gnx*gw2), VPY(rwing_y+gny*gw2),
+                           VPX(rwing_x-gnx*gw2), VPY(rwing_y-gny*gw2),
+                           VPX(lwing_x-gnx*gw2), VPY(lwing_y-gny*gw2),
+                           sr, sg, sb, ga2);
+
+            /* --- Inner glow (medium, soft) --- */
+            float gw1 = 6.0f;
+            float ga1 = 0.15f + beat_glow * 0.06f;
+            /* Nose → Left wing */
+            gnx = -(lwing_y - nose_y); gny = (lwing_x - nose_x);
+            glen = sqrtf(gnx*gnx+gny*gny); if(glen>0){gnx/=glen;gny/=glen;}
+            push_quad_free(VPX(nose_x+gnx*gw1), VPY(nose_y+gny*gw1),
+                           VPX(lwing_x+gnx*gw1), VPY(lwing_y+gny*gw1),
+                           VPX(lwing_x-gnx*gw1), VPY(lwing_y-gny*gw1),
+                           VPX(nose_x-gnx*gw1), VPY(nose_y-gny*gw1),
+                           sr, sg, sb, ga1);
+            /* Nose → Right wing */
+            gnx = -(rwing_y - nose_y); gny = (rwing_x - nose_x);
+            glen = sqrtf(gnx*gnx+gny*gny); if(glen>0){gnx/=glen;gny/=glen;}
+            push_quad_free(VPX(nose_x+gnx*gw1), VPY(nose_y+gny*gw1),
+                           VPX(rwing_x+gnx*gw1), VPY(rwing_y+gny*gw1),
+                           VPX(rwing_x-gnx*gw1), VPY(rwing_y-gny*gw1),
+                           VPX(nose_x-gnx*gw1), VPY(nose_y-gny*gw1),
+                           sr, sg, sb, ga1);
+            /* Rear */
+            gnx = -(rwing_y - lwing_y); gny = (rwing_x - lwing_x);
+            glen = sqrtf(gnx*gnx+gny*gny); if(glen>0){gnx/=glen;gny/=glen;}
+            push_quad_free(VPX(lwing_x+gnx*gw1), VPY(lwing_y+gny*gw1),
+                           VPX(rwing_x+gnx*gw1), VPY(rwing_y+gny*gw1),
+                           VPX(rwing_x-gnx*gw1), VPY(rwing_y-gny*gw1),
+                           VPX(lwing_x-gnx*gw1), VPY(lwing_y-gny*gw1),
+                           sr, sg, sb, ga1);
+        }
 
         float nx, ny;
         /* Nose → Left wing */

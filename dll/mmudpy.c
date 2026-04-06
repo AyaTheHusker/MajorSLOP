@@ -2594,7 +2594,7 @@ static int load_python(void)
                 api->log("[mmudpy] Found %d ext commands in %s\n", cmd_count, fd.cFileName);
 
                 /* Generate Python wrapper: load DLL via ctypes, wrap each command */
-                char py_buf[4096];
+                char py_buf[32768];
                 int pos = 0;
 
                 /* Load the DLL in Python */
@@ -2690,7 +2690,7 @@ static int load_python(void)
                             c->py_name, edoc);
                     }
 
-                    if (pos > 3500) break;  /* safety */
+                    if (pos > 30000) break;  /* safety */
                 }
 
                 api->log("[mmudpy] Running ext wrapper:\n%s\n", py_buf);

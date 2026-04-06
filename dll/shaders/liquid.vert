@@ -19,6 +19,13 @@ layout(push_constant) uniform PushConstants {
     float pp_contrast;   /* 0..2, default 1 */
     float pp_hue;        /* -180..180 degrees shift */
     float pp_saturation; /* 0..2, default 1 */
+    float fx_smoky;      /* 0 = off, 1 = smoky letters */
+    float smoke_decay;   /* how fast smoke fades (0.5-5.0) */
+    float smoke_depth;   /* smoke opacity/strength (0.0-2.0) */
+    float smoke_zoom;    /* noise scale (0.5-4.0) */
+    float smoke_hue;     /* 0..360 degrees */
+    float smoke_sat;     /* 0..2 */
+    float smoke_val;     /* 0..2 brightness */
 } pc;
 
 /* ---- FBM Noise (hash-based, no texture needed) ---- */

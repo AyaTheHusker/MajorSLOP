@@ -19,6 +19,13 @@ layout(push_constant) uniform PushConstants {
     float pp_contrast;   /* 0..2, default 1 */
     float pp_hue;        /* -180..180 degrees shift */
     float pp_saturation; /* 0..2, default 1 */
+    float fx_smoky;      /* 0 = off, 1 = smoky letters */
+    float smoke_decay;   /* how fast smoke fades (0.5-5.0) */
+    float smoke_depth;   /* smoke opacity/strength (0.0-2.0) */
+    float smoke_zoom;    /* noise scale (0.5-4.0) */
+    float smoke_hue;     /* 0..360 degrees */
+    float smoke_sat;     /* 0..2 */
+    float smoke_val;     /* 0..2 brightness */
 } pc;
 
 /* --- Helpers --- */
@@ -94,6 +101,71 @@ void main() {
 
             float alpha = fragColor.a * smoothstep(0.05, 0.3, d);
             outColor = vec4(finalColor, alpha);
+        }
+    }
+
+    /* ---- Smoky Letters pass ---- */
+    /* Smoke emits from letter edges, rises and drifts, never covers letters */
+    if (pc.fx_smoky > 0.5) {
+        vec2 texSize = vec2(textureSize(fontTex, 0));
+        vec2 tx = 1.0 / texSize;
+        float center_a = texture(fontTex, fragUV).a;
+
+        /* Find maximum alpha in neighborhood = proximity to letter edges */
+        float max_near = 0.0;
+        float sum_near = 0.0;
+        const int R = 3;
+        for (int dy = -R; dy <= R; dy++) {
+            for (int dx = -R; dx <= R; dx++) {
+                if (dx == 0 && dy == 0) continue;
+                float sa = texture(fontTex, fragUV + vec2(float(dx), float(dy)) * tx * 2.0).a;
+                max_near = max(max_near, sa);
+                sum_near += sa;
+            }
+        }
+        float edge_prox = max_near * (1.0 - center_a); /* strong near edges, zero on letter body */
+
+        if (edge_prox > 0.01) {
+            /* Smoke noise: time-displaced coords for rising/drifting effect */
+            vec2 smoke_uv = fragUV * pc.smoke_zoom;
+            smoke_uv.y -= pc.time * 0.08;  /* rise upward */
+            smoke_uv.x += sin(pc.time * 0.3 + fragUV.y * 5.0) * 0.05; /* gentle drift */
+
+            /* Multi-octave noise for organic smoke */
+            float n1 = sin(smoke_uv.x * 17.3 + smoke_uv.y * 13.7 + pc.time * 1.1) * 0.5 + 0.5;
+            float n2 = sin(smoke_uv.x * 31.1 - smoke_uv.y * 23.3 + pc.time * 0.7) * 0.5 + 0.5;
+            float n3 = sin(smoke_uv.x * 7.9 + smoke_uv.y * 41.1 - pc.time * 1.3) * 0.5 + 0.5;
+            float smoke_n = n1 * 0.5 + n2 * 0.3 + n3 * 0.2;
+
+            /* Distance-based decay from edges */
+            float dist_factor = pow(edge_prox, pc.smoke_decay);
+
+            float smoke_alpha = smoke_n * dist_factor * pc.smoke_depth;
+            smoke_alpha = clamp(smoke_alpha, 0.0, 0.8);
+
+            /* Only add smoke where there's no letter (don't cover letters) */
+            smoke_alpha *= (1.0 - smoothstep(0.05, 0.4, center_a));
+
+            /* HSV color for smoke */
+            float sh = mod(pc.smoke_hue, 360.0) / 60.0;
+            int shi = int(floor(sh));
+            float sf = sh - float(shi);
+            float sv = clamp(pc.smoke_val, 0.0, 2.0);
+            float ss = clamp(pc.smoke_sat, 0.0, 1.0);
+            float sp = sv * (1.0 - ss);
+            float sq = sv * (1.0 - ss * sf);
+            float st = sv * (1.0 - ss * (1.0 - sf));
+            vec3 smoke_color;
+            if (shi == 0)      smoke_color = vec3(sv, st, sp);
+            else if (shi == 1) smoke_color = vec3(sq, sv, sp);
+            else if (shi == 2) smoke_color = vec3(sp, sv, st);
+            else if (shi == 3) smoke_color = vec3(sp, sq, sv);
+            else if (shi == 4) smoke_color = vec3(st, sp, sv);
+            else               smoke_color = vec3(sv, sp, sq);
+
+            /* Blend smoke under letters — alpha composite */
+            outColor.rgb = mix(smoke_color * smoke_alpha, outColor.rgb, outColor.a);
+            outColor.a = max(outColor.a, smoke_alpha);
         }
     }
 
