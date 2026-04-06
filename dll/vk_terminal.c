@@ -8585,6 +8585,7 @@ static struct {
     int     cr_bs;              /* backstabs this round */
     int     cr_miss;            /* misses this round */
     int     cr_dodge;           /* enemy dodged player's attack this round */
+    int     cr_dmg;             /* total damage this round (all sources incl BS) */
 
     /* Misc */
     int     kills;              /* monster kills */
@@ -8638,14 +8639,13 @@ static void pst_flush_round(void) {
 
 /* Called from vrt_on_round — flush stats and print round totals */
 static void pst_on_round_tick(int round_num) {
-    /* Capture round damage before flush clears it */
-    int round_dmg = pst_s.cur_round_dmg;
     pst_flush_round();
 
     /* Only show recap if there was actual combat this round */
     int had_combat = pst_s.cr_hits || pst_s.cr_crits || pst_s.cr_extra ||
                      pst_s.cr_spell || pst_s.cr_bs || pst_s.cr_miss ||
                      pst_s.cr_dodge;
+    int round_dmg = pst_s.cr_dmg;
 
     /* Always store recap data for MMUDPy access */
     if (had_combat) {
@@ -8658,7 +8658,6 @@ static void pst_on_round_tick(int round_num) {
         pst_recap_miss = pst_s.cr_miss;
         pst_recap_dodge = pst_s.cr_dodge;
         pst_recap_seq++;
-        /* Plain-text recap for MMUDPy */
         _snprintf(pst_last_recap, sizeof(pst_last_recap),
             "%d dmg, %d hit, %d crit, %d xtra, %d spell, %d bs, %d miss, %d dodge",
             round_dmg, pst_s.cr_hits, pst_s.cr_crits, pst_s.cr_extra,
@@ -8667,34 +8666,32 @@ static void pst_on_round_tick(int round_num) {
     }
 
     if (pst_round_recap && had_combat) {
-        /* Build recap string: [409 Damage, 3 crits 1 hit 1 miss, 1 dodge] */
+        /* ALL CAPS, dark bg (blue), bright white damage, solid colors */
         char buf[256];
         int pos = 0;
 
-        /* Use bold yellow for brackets, bold white for damage, colored breakdown */
+        /* Dark blue bg, bold white text for damage total */
         pos += _snprintf(buf + pos, sizeof(buf) - pos,
-            "\x1b[1;33m[\x1b[1;37m%d Damage\x1b[1;33m",
+            "\x1b[44;1;37m[ %d DAMAGE",
             round_dmg);
 
-        /* Append breakdown items separated by spaces */
-        int any = 0;
+        /* Append breakdown items — solid colors, ALL CAPS */
         #define RECAP_ADD(cnt, label, color) \
             if ((cnt) > 0) { \
                 pos += _snprintf(buf + pos, sizeof(buf) - pos, \
-                    "%s\x1b[" color "m%d " label, any ? " " : ", ", (cnt)); \
-                any = 1; \
+                    " \x1b[" color "m%d " label, (cnt)); \
             }
 
-        RECAP_ADD(pst_s.cr_crits,  "crit",  "1;36");  /* bold cyan */
-        RECAP_ADD(pst_s.cr_hits,   "hit",   "1;32");   /* bold green */
-        RECAP_ADD(pst_s.cr_extra,  "xtra",  "1;32");   /* bold green */
-        RECAP_ADD(pst_s.cr_spell,  "spell", "1;35");   /* bold magenta */
-        RECAP_ADD(pst_s.cr_bs,     "bs",    "1;31");    /* bold red */
-        RECAP_ADD(pst_s.cr_miss,   "miss",  "0;33");    /* yellow */
-        RECAP_ADD(pst_s.cr_dodge,  "dodge", "0;33");    /* yellow */
+        RECAP_ADD(pst_s.cr_crits,  "CRIT",  "1;36");  /* bold cyan */
+        RECAP_ADD(pst_s.cr_hits,   "HIT",   "1;32");   /* bold green */
+        RECAP_ADD(pst_s.cr_extra,  "XTRA",  "1;32");   /* bold green */
+        RECAP_ADD(pst_s.cr_spell,  "SPELL", "1;35");   /* bold magenta */
+        RECAP_ADD(pst_s.cr_bs,     "BS",    "1;31");    /* bold red */
+        RECAP_ADD(pst_s.cr_miss,   "MISS",  "0;33");    /* yellow */
+        RECAP_ADD(pst_s.cr_dodge,  "DODGE", "0;33");    /* yellow */
         #undef RECAP_ADD
 
-        pos += _snprintf(buf + pos, sizeof(buf) - pos, "\x1b[1;33m]\x1b[0m");
+        pos += _snprintf(buf + pos, sizeof(buf) - pos, " \x1b[1;37m]\x1b[0m");
         buf[sizeof(buf) - 1] = 0;
 
         /* Inject into terminal as a flowing line */
@@ -8709,7 +8706,7 @@ static void pst_on_round_tick(int round_num) {
     /* Clear per-round breakdown counters */
     pst_s.cr_hits = 0; pst_s.cr_crits = 0; pst_s.cr_extra = 0;
     pst_s.cr_spell = 0; pst_s.cr_bs = 0; pst_s.cr_miss = 0;
-    pst_s.cr_dodge = 0; pst_s.cur_round_dmg = 0;
+    pst_s.cr_dodge = 0; pst_s.cr_dmg = 0;
 }
 
 /* Check if enough time passed to consider this a new round (>1500ms gap) */
@@ -8775,6 +8772,7 @@ static void pst_parse_line(const char *line)
         if (pst_contains(line, "backstab") || pst_contains(line, "You surprise")) {
             pst_record_hit(&pst_s.backstab, dmg);
             pst_s.cr_bs++;
+            pst_s.cr_dmg += dmg;
             /* BS consumes the whole round — flush prev, record BS as complete round */
             pst_flush_round();
             pst_record_hit(&pst_s.rnd, dmg);
@@ -8782,6 +8780,7 @@ static void pst_parse_line(const char *line)
         } else if (pst_contains(line, " critically ")) {
             pst_record_hit(&pst_s.crit, dmg);
             pst_s.cr_crits++;
+            pst_s.cr_dmg += dmg;
             pst_check_round_gap();
             pst_s.cur_round_dmg += dmg;
             pst_s.cur_round_swings++;
@@ -8789,18 +8788,21 @@ static void pst_parse_line(const char *line)
                    pst_contains(line, " burns ") || pst_contains(line, " freezes ") || pst_contains(line, " zaps "))) {
             pst_record_hit(&pst_s.spell, dmg);
             pst_s.cr_spell++;
+            pst_s.cr_dmg += dmg;
             pst_check_round_gap();
             pst_s.cur_round_dmg += dmg;
             pst_s.cur_round_swings++;
         } else if (pst_contains(line, "extra attack")) {
             pst_record_hit(&pst_s.extra, dmg);
             pst_s.cr_extra++;
+            pst_s.cr_dmg += dmg;
             pst_check_round_gap();
             pst_s.cur_round_dmg += dmg;
             pst_s.cur_round_swings++;
         } else {
             pst_record_hit(&pst_s.hit, dmg);
             pst_s.cr_hits++;
+            pst_s.cr_dmg += dmg;
             pst_check_round_gap();
             pst_s.cur_round_dmg += dmg;
             pst_s.cur_round_swings++;

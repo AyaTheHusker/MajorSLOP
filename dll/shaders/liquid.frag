@@ -118,9 +118,10 @@ void main() {
         float cw = max(pc.char_w_px, 4.0);
         float ch = max(pc.char_h_px, 8.0);
 
-        /* Cell-local coordinates (0-1 within this cell) */
-        float cell_x = mod(gl_FragCoord.x, cw) / cw;
-        float cell_y = mod(gl_FragCoord.y, ch) / ch;
+        /* Screen-space position within column (continuous, no cell boundaries) */
+        float col_x = mod(gl_FragCoord.x, cw) / cw;  /* 0-1 within column */
+        /* Absolute screen Y in cell units (continuous across all cells) */
+        float screen_row = gl_FragCoord.y / ch;
 
         float smoke_alpha = 0.0;
 
@@ -129,8 +130,10 @@ void main() {
             float rise_cells = fragColor.g;   /* how many cells above the source letter */
             float col_seed = fragColor.b;     /* unique per-column seed */
 
-            /* Continuous rise height (in cell units, 0 = at letter surface) */
-            float h = (rise_cells - 1.0) + cell_y;
+            /* Source letter's screen row (continuous, derived from this fragment's position) */
+            float source_row = screen_row + rise_cells;
+            /* Continuous rise height from source (0 = at letter, increases upward) */
+            float h = source_row - screen_row;
             float h_norm = h * pc.smoke_zoom * 0.5;
 
             /* Generate 3 wisps per column with different seeds for organic look */
@@ -138,17 +141,18 @@ void main() {
                 float seed = col_seed * 37.0 + float(w) * 13.7;
                 float wisp_x = 0.5 + float(w - 1) * 0.15; /* offset each wisp */
 
-                /* Brownian horizontal displacement — integrated sine waves
-                 * (integral of noise = smooth random walk, connected vertically) */
-                float dx = cos(h_norm * 2.3 + seed + t * 0.6) * 0.12
-                         + cos(h_norm * 5.7 + seed * 1.7 + t * 0.35) * 0.07
-                         + cos(h_norm * 11.3 + seed * 2.9 + t * 0.8) * 0.04
-                         + cos(h_norm * 23.0 + seed * 4.1 + t * 1.1) * 0.02;
+                /* Brownian horizontal displacement — integrated sine waves.
+                 * Uses screen_row (continuous) so wisps flow smoothly across cells */
+                float sr = screen_row * pc.smoke_zoom * 0.5;
+                float dx = cos(sr * 2.3 + seed + t * 0.6) * 0.12
+                         + cos(sr * 5.7 + seed * 1.7 + t * 0.35) * 0.07
+                         + cos(sr * 11.3 + seed * 2.9 + t * 0.8) * 0.04
+                         + cos(sr * 23.0 + seed * 4.1 + t * 1.1) * 0.02;
                 /* Displacement grows with height (wisp wanders more as it rises) */
                 dx *= (1.0 + h * 0.4);
 
                 /* Distance from this wisp's centerline */
-                float dist = abs(cell_x - wisp_x - dx);
+                float dist = abs(col_x - wisp_x - dx);
 
                 /* Gaussian cross-section — thin tendril */
                 float sharpness = 30.0 + float(w) * 15.0; /* inner wisps thinner */
@@ -158,8 +162,8 @@ void main() {
                 float fade = exp(-h * pc.smoke_decay * 0.4);
 
                 /* Add subtle internal turbulence (wisp density variation) */
-                float turb = 0.6 + 0.4 * sin(h_norm * 8.0 + seed * 3.0 + t * 1.5)
-                                       * sin(h_norm * 13.0 - seed * 2.0 + t * 0.9);
+                float turb = 0.6 + 0.4 * sin(sr * 8.0 + seed * 3.0 + t * 1.5)
+                                       * sin(sr * 13.0 - seed * 2.0 + t * 0.9);
 
                 smoke_alpha += wisp * fade * turb * pc.smoke_depth;
             }
@@ -167,20 +171,23 @@ void main() {
 
         } else {
             /* ---- Letter cell: smoke at glyph top edge ---- */
-            /* Detect top edge of glyph (where alpha transitions from solid to transparent) */
             vec2 texSize = vec2(textureSize(fontTex, 0));
             vec2 tx = 1.0 / texSize;
             float above_a = texture(fontTex, fragUV - vec2(0.0, tx.y * 2.0)).a;
             float edge = center_a * (1.0 - above_a); /* high only at top edge */
 
             if (edge > 0.05) {
-                float col_seed = mod(gl_FragCoord.x / cw, 80.0) / 80.0;
-                /* Small wisp base at glyph top — connects to rising wisps above */
+                float col_idx = floor(gl_FragCoord.x / cw);
+                float col_seed = fract(col_idx * 0.2851 + 0.067);
+                float sr = screen_row * pc.smoke_zoom * 0.5;
+                /* Small wisp base at glyph top — continuous with rising wisps above */
                 for (int w = 0; w < 3; w++) {
                     float seed = col_seed * 37.0 + float(w) * 13.7;
                     float wisp_x = 0.5 + float(w - 1) * 0.15;
-                    float dx = cos(seed + t * 0.6) * 0.05;
-                    float dist = abs(cell_x - wisp_x - dx);
+                    float dx = cos(sr * 2.3 + seed + t * 0.6) * 0.12
+                             + cos(sr * 5.7 + seed * 1.7 + t * 0.35) * 0.07;
+                    dx *= 0.3;
+                    float dist = abs(col_x - wisp_x - dx);
                     float wisp = exp(-dist * dist * 40.0);
                     smoke_alpha += wisp * edge * pc.smoke_depth * 0.5;
                 }
