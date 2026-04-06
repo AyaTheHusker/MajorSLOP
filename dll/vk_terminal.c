@@ -678,10 +678,11 @@ static int ttf_loaded[MAX_TTF_FONTS] = {0};
 #define VKM_EXT_COLOR    1   /* Color/Brightness */
 #define VKM_EXT_SEP1     2   /* separator */
 #define VKM_EXT_HIDEMM   3   /* Hide/Show MegaMUD */
-#define VKM_EXT_SEP2     4   /* separator */
-#define VKM_EXT_SAVE     5   /* Save Settings */
-#define VKM_EXT_RESET    6   /* Reset to Defaults */
-#define VKM_EXT_COUNT    7
+#define VKM_EXT_RNDRECAP 4   /* Show Combat Round Totals */
+#define VKM_EXT_SEP2     5   /* separator */
+#define VKM_EXT_SAVE     6   /* Save Settings */
+#define VKM_EXT_RESET    7   /* Reset to Defaults */
+#define VKM_EXT_COUNT    8
 
 /* Extras submenu items */
 #define VKM_SUB_XTRA2    8
@@ -706,6 +707,12 @@ static int megamud_hidden = 0; /* 1 = MegaMUD windows hidden, VK-only mode */
 static int snd_wnd_idx = -1;  /* Sound Settings window index (forward decl) */
 static void snd_open_window(void);
 static int  pst_visible = 0;
+static int  pst_round_recap = 1;  /* Show Combat Round Totals in terminal */
+static char pst_last_recap[256] = "";  /* plain-text last round recap for MMUDPy */
+static int  pst_recap_dmg = 0, pst_recap_hits = 0, pst_recap_crits = 0;
+static int  pst_recap_extra = 0, pst_recap_spell = 0, pst_recap_bs = 0;
+static int  pst_recap_miss = 0, pst_recap_dodge = 0;
+static int  pst_recap_seq = 0;  /* increments each recap, MMUDPy can detect new ones */
 static float pst_x = 100.0f, pst_y = 60.0f;
 static float pst_w = 340.0f, pst_h = 390.0f;
 static int  pst_dragging = 0;
@@ -759,6 +766,8 @@ static void pst_toggle(void);
 static void pst_feed(const char *data, int len);
 static void pst_reset_exp(void);
 static void pst_reset_combat(void);
+static void pst_flush_round(void);
+static void pst_on_round_tick(int round_num);
 
 static int vkm_open = 0;          /* VKM_CLOSED or VKM_ROOT */
 static void vkt_save_settings(void);
@@ -2970,6 +2979,7 @@ static VkDeviceMemory vk_imem = VK_NULL_HANDLE;
 static vertex_t *vk_vdata = NULL;  /* persistently mapped */
 static int quad_count = 0;
 static int fx_split_quad = 0;     /* quads before this = terminal (FX), after = UI (normal) */
+static float last_cw_px = 9.0f, last_ch_px = 17.0f;  /* cell dimensions for smoke shader */
 
 /* ---- Forward declarations ---- */
 
@@ -4001,6 +4011,10 @@ static void vrt_on_round(int round_num)
 
     /* Auto-show on first round */
     if (!vrt_visible) { vrt_visible = 1; }
+
+    /* Flush player stats round immediately on round boundary
+     * and print round totals to console */
+    pst_on_round_tick(round_num);
 }
 
 /* ---- Manual sync: on_line callback ---- */
@@ -4761,6 +4775,9 @@ static void vkm_draw(int vp_w, int vp_h)
                 } else if (i == VKM_EXT_HIDEMM) {
                     label = megamud_hidden ? "Show MegaMUD" : "Hide MegaMUD";
                     is_active = megamud_hidden;
+                } else if (i == VKM_EXT_RNDRECAP) {
+                    label = pst_round_recap ? "\x04 Round Totals" : "  Round Totals";
+                    is_active = pst_round_recap;
                 } else if (i == VKM_EXT_SAVE) {
                     label = "Save Settings";
                 } else if (i == VKM_EXT_RESET) {
@@ -5500,6 +5517,7 @@ static void vkt_build_vertices(void)
     }
     float grid_w = cw * TERM_COLS;
     float x_offset = 0.0f; /* left-justified */
+    last_cw_px = cw; last_ch_px = ch;  /* store for smoke shader push constants */
 
     /* UV constants for font atlas (16x16 grid) with half-texel inset
      * to prevent bilinear filtering from sampling neighboring glyph cells */
@@ -5588,7 +5606,40 @@ static void vkt_build_vertices(void)
         int word_start = -1;
         for (int c = 0; c < TERM_COLS; c++) {
             unsigned char byte = ansi_term.grid[r][c].ch;
-            if (byte == 0 || byte == 32) { word_start = -1; continue; }
+            if (byte == 0 || byte == 32) {
+                word_start = -1;
+                /* When smoke is active, emit wisp quads ABOVE letters in same column.
+                 * Each wisp quad encodes: R=proximity, G=rise_cells, B=col_seed, A=0 */
+                if (fx_smoky_mode) {
+                    /* Look DOWN the same column for nearest letter */
+                    int rise = 0;
+                    for (int dr = 1; dr <= 6; dr++) {
+                        int rr = r + dr;
+                        if (rr >= TERM_ROWS) break;
+                        unsigned char below = ansi_term.grid[rr][c].ch;
+                        if (below != 0 && below != 32) {
+                            rise = dr;
+                            break;
+                        }
+                    }
+                    if (rise > 0) {
+                        float proximity = 1.0f - (float)(rise - 1) / 6.0f;
+                        float col_seed = ((float)(c * 73 + 17) / 256.0f);
+                        col_seed = col_seed - (int)col_seed; /* fract */
+                        float px0 = x_offset + c * cw, py0 = top_pad + r * ch;
+                        float px1 = px0 + cw, py1 = py0 + ch;
+                        float su0 = (32 % 16) * tex_cw + hp_u;
+                        float sv0 = (32 / 16) * tex_ch + hp_v;
+                        float su1 = su0 + tex_cw - 2*hp_u;
+                        float sv1 = sv0 + tex_ch - 2*hp_v;
+                        push_quad(PX2NDC_X(px0), PX2NDC_Y(py0),
+                                  PX2NDC_X(px1), PX2NDC_Y(py1),
+                                  su0, sv0, su1, sv1,
+                                  proximity, (float)rise, col_seed, 0.0f);
+                    }
+                }
+                continue;
+            }
             if (word_start < 0) word_start = c;
 
             /* Skip shattered cells (viz_fx renders fragments instead) */
@@ -7023,7 +7074,7 @@ static int vkt_create_swapchain(void)
         VkPushConstantRange pcr = {0};
         pcr.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
         pcr.offset = 0;
-        pcr.size = sizeof(float) * 17;
+        pcr.size = sizeof(float) * 19;
 
         VkPipelineLayoutCreateInfo lplci = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
         lplci.setLayoutCount = 1;
@@ -7207,7 +7258,7 @@ static void vkt_render_frame(void)
         vkCmdBindPipeline(vk_cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS, vk_liquid_pipeline);
         vkCmdBindDescriptorSets(vk_cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                 vk_liquid_pipe_layout, 0, 1, &vk_desc_set, 0, NULL);
-        float pc_data[17] = { fx_time,
+        float pc_data[19] = { fx_time,
                               fx_liquid_mode ? 1.0f : 0.0f,
                               fx_waves_mode ? 1.0f : 0.0f,
                               fx_scanline_mode ? 1.0f : 0.0f,
@@ -7216,7 +7267,8 @@ static void vkt_render_frame(void)
                               pp_brightness, pp_contrast, pp_hue, pp_saturation,
                               fx_smoky_mode ? 1.0f : 0.0f,
                               smoke_decay, smoke_depth, smoke_zoom,
-                              smoke_hue, smoke_saturation, smoke_value };
+                              smoke_hue, smoke_saturation, smoke_value,
+                              last_cw_px, last_ch_px };
         vkCmdPushConstants(vk_cmd_buf, vk_liquid_pipe_layout,
                            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                            0, sizeof(pc_data), pc_data);
@@ -8042,6 +8094,10 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 }
                 if (api) api->log("[vk_terminal] MegaMUD %s\n",
                                   megamud_hidden ? "HIDDEN" : "SHOWN");
+            } else if (si == VKM_EXT_RNDRECAP) {
+                pst_round_recap = !pst_round_recap;
+                if (api) api->log("[vk_terminal] Round Totals: %s\n",
+                                  pst_round_recap ? "ON" : "OFF");
             } else if (si == VKM_EXT_SAVE) {
                 vkt_save_settings();
             } else if (si == VKM_EXT_RESET) {
@@ -8521,6 +8577,15 @@ static struct {
     int     cur_round_swings;   /* swings this round (hits + misses) */
     DWORD   last_swing_tick;    /* timestamp of last swing for round separation */
 
+    /* Per-round breakdown (cleared after each round recap) */
+    int     cr_hits;            /* normal hits this round */
+    int     cr_crits;           /* crits this round */
+    int     cr_extra;           /* extra attacks this round */
+    int     cr_spell;           /* spell hits this round */
+    int     cr_bs;              /* backstabs this round */
+    int     cr_miss;            /* misses this round */
+    int     cr_dodge;           /* enemy dodged player's attack this round */
+
     /* Misc */
     int     kills;              /* monster kills */
 
@@ -8569,6 +8634,82 @@ static void pst_flush_round(void) {
         pst_s.cur_round_dmg = 0;
         pst_s.cur_round_swings = 0;
     }
+}
+
+/* Called from vrt_on_round — flush stats and print round totals */
+static void pst_on_round_tick(int round_num) {
+    /* Capture round damage before flush clears it */
+    int round_dmg = pst_s.cur_round_dmg;
+    pst_flush_round();
+
+    /* Only show recap if there was actual combat this round */
+    int had_combat = pst_s.cr_hits || pst_s.cr_crits || pst_s.cr_extra ||
+                     pst_s.cr_spell || pst_s.cr_bs || pst_s.cr_miss ||
+                     pst_s.cr_dodge;
+
+    /* Always store recap data for MMUDPy access */
+    if (had_combat) {
+        pst_recap_dmg = round_dmg;
+        pst_recap_hits = pst_s.cr_hits;
+        pst_recap_crits = pst_s.cr_crits;
+        pst_recap_extra = pst_s.cr_extra;
+        pst_recap_spell = pst_s.cr_spell;
+        pst_recap_bs = pst_s.cr_bs;
+        pst_recap_miss = pst_s.cr_miss;
+        pst_recap_dodge = pst_s.cr_dodge;
+        pst_recap_seq++;
+        /* Plain-text recap for MMUDPy */
+        _snprintf(pst_last_recap, sizeof(pst_last_recap),
+            "%d dmg, %d hit, %d crit, %d xtra, %d spell, %d bs, %d miss, %d dodge",
+            round_dmg, pst_s.cr_hits, pst_s.cr_crits, pst_s.cr_extra,
+            pst_s.cr_spell, pst_s.cr_bs, pst_s.cr_miss, pst_s.cr_dodge);
+        pst_last_recap[sizeof(pst_last_recap) - 1] = 0;
+    }
+
+    if (pst_round_recap && had_combat) {
+        /* Build recap string: [409 Damage, 3 crits 1 hit 1 miss, 1 dodge] */
+        char buf[256];
+        int pos = 0;
+
+        /* Use bold yellow for brackets, bold white for damage, colored breakdown */
+        pos += _snprintf(buf + pos, sizeof(buf) - pos,
+            "\x1b[1;33m[\x1b[1;37m%d Damage\x1b[1;33m",
+            round_dmg);
+
+        /* Append breakdown items separated by spaces */
+        int any = 0;
+        #define RECAP_ADD(cnt, label, color) \
+            if ((cnt) > 0) { \
+                pos += _snprintf(buf + pos, sizeof(buf) - pos, \
+                    "%s\x1b[" color "m%d " label, any ? " " : ", ", (cnt)); \
+                any = 1; \
+            }
+
+        RECAP_ADD(pst_s.cr_crits,  "crit",  "1;36");  /* bold cyan */
+        RECAP_ADD(pst_s.cr_hits,   "hit",   "1;32");   /* bold green */
+        RECAP_ADD(pst_s.cr_extra,  "xtra",  "1;32");   /* bold green */
+        RECAP_ADD(pst_s.cr_spell,  "spell", "1;35");   /* bold magenta */
+        RECAP_ADD(pst_s.cr_bs,     "bs",    "1;31");    /* bold red */
+        RECAP_ADD(pst_s.cr_miss,   "miss",  "0;33");    /* yellow */
+        RECAP_ADD(pst_s.cr_dodge,  "dodge", "0;33");    /* yellow */
+        #undef RECAP_ADD
+
+        pos += _snprintf(buf + pos, sizeof(buf) - pos, "\x1b[1;33m]\x1b[0m");
+        buf[sizeof(buf) - 1] = 0;
+
+        /* Inject into terminal as a flowing line */
+        char inject[280];
+        _snprintf(inject, sizeof(inject), "\r\n%s\r\n", buf);
+        inject[sizeof(inject) - 1] = 0;
+        EnterCriticalSection(&ansi_lock);
+        ap_feed(&ansi_term, (const uint8_t *)inject, (int)strlen(inject));
+        LeaveCriticalSection(&ansi_lock);
+    }
+
+    /* Clear per-round breakdown counters */
+    pst_s.cr_hits = 0; pst_s.cr_crits = 0; pst_s.cr_extra = 0;
+    pst_s.cr_spell = 0; pst_s.cr_bs = 0; pst_s.cr_miss = 0;
+    pst_s.cr_dodge = 0; pst_s.cur_round_dmg = 0;
 }
 
 /* Check if enough time passed to consider this a new round (>1500ms gap) */
@@ -8633,32 +8774,48 @@ static void pst_parse_line(const char *line)
 
         if (pst_contains(line, "backstab") || pst_contains(line, "You surprise")) {
             pst_record_hit(&pst_s.backstab, dmg);
+            pst_s.cr_bs++;
             /* BS consumes the whole round — flush prev, record BS as complete round */
             pst_flush_round();
             pst_record_hit(&pst_s.rnd, dmg);
             pst_s.last_swing_tick = GetTickCount();
         } else if (pst_contains(line, " critically ")) {
             pst_record_hit(&pst_s.crit, dmg);
+            pst_s.cr_crits++;
             pst_check_round_gap();
             pst_s.cur_round_dmg += dmg;
             pst_s.cur_round_swings++;
         } else if (pst_contains(line, "Your ") && (pst_contains(line, " hits ") || pst_contains(line, " blasts ") ||
                    pst_contains(line, " burns ") || pst_contains(line, " freezes ") || pst_contains(line, " zaps "))) {
             pst_record_hit(&pst_s.spell, dmg);
+            pst_s.cr_spell++;
             pst_check_round_gap();
             pst_s.cur_round_dmg += dmg;
             pst_s.cur_round_swings++;
         } else if (pst_contains(line, "extra attack")) {
             pst_record_hit(&pst_s.extra, dmg);
+            pst_s.cr_extra++;
             pst_check_round_gap();
             pst_s.cur_round_dmg += dmg;
             pst_s.cur_round_swings++;
         } else {
             pst_record_hit(&pst_s.hit, dmg);
+            pst_s.cr_hits++;
             pst_check_round_gap();
             pst_s.cur_round_dmg += dmg;
             pst_s.cur_round_swings++;
         }
+        return;
+    }
+
+    /* --- Enemy Dodge (monster dodged player's attack) --- */
+    if (pst_contains(line, "dodges your ") ||
+        pst_contains(line, "sidesteps your ") ||
+        pst_contains(line, "evades your ")) {
+        pst_s.miss++;
+        pst_s.cr_dodge++;
+        pst_check_round_gap();
+        pst_s.cur_round_swings++;
         return;
     }
 
@@ -8688,6 +8845,7 @@ static void pst_parse_line(const char *line)
         /* Only count as miss if the line does NOT also contain " damage!" (already handled above) */
         if (!pst_contains(line, " damage!")) {
             pst_s.miss++;
+            pst_s.cr_miss++;
             pst_check_round_gap();
             pst_s.cur_round_swings++;
         }
@@ -10623,6 +10781,22 @@ __declspec(dllexport) void vkt_smoke_help(void) {
     vkw_print(vkw_console_idx, "  smoke.hide_settings() - Hide settings panel");
 }
 
+/* ---- Round Recap MMUDPy exports ---- */
+__declspec(dllexport) const char *vkt_recap_get(void) { return pst_last_recap; }
+__declspec(dllexport) int vkt_recap_seq(void) { return pst_recap_seq; }
+__declspec(dllexport) int vkt_recap_dmg(void) { return pst_recap_dmg; }
+__declspec(dllexport) int vkt_recap_hits(void) { return pst_recap_hits; }
+__declspec(dllexport) int vkt_recap_crits(void) { return pst_recap_crits; }
+__declspec(dllexport) int vkt_recap_extra(void) { return pst_recap_extra; }
+__declspec(dllexport) int vkt_recap_spell(void) { return pst_recap_spell; }
+__declspec(dllexport) int vkt_recap_bs(void) { return pst_recap_bs; }
+__declspec(dllexport) int vkt_recap_miss(void) { return pst_recap_miss; }
+__declspec(dllexport) int vkt_recap_dodge(void) { return pst_recap_dodge; }
+__declspec(dllexport) void vkt_recap_set_show(int v) {
+    pst_round_recap = v ? 1 : 0;
+    if (api) api->log("[vk_terminal] Round Totals: %s\n", pst_round_recap ? "ON" : "OFF");
+}
+
 static slop_command_t vkt_commands[] = {
     { "vkt_show",     "vkt_show",     "",  "v", "Show Vulkan fullscreen terminal" },
     { "vkt_hide",     "vkt_hide",     "",  "v", "Hide Vulkan terminal" },
@@ -10664,6 +10838,18 @@ static slop_command_t vkt_commands[] = {
     { "smoke.show_settings",  "vkt_smoke_show_settings",  "",       "v", "Show smoke settings panel" },
     { "smoke.hide_settings",  "vkt_smoke_hide_settings",  "",       "v", "Hide smoke settings panel" },
     { "smoke.help",           "vkt_smoke_help",           "",       "v", "Show smoke commands help" },
+    /* Round Recap */
+    { "recap.get",     "vkt_recap_get",      "", "s", "Get last round recap string" },
+    { "recap.seq",     "vkt_recap_seq",      "", "i", "Get recap sequence number" },
+    { "recap.dmg",     "vkt_recap_dmg",      "", "i", "Get last round damage" },
+    { "recap.hits",    "vkt_recap_hits",     "", "i", "Get last round hit count" },
+    { "recap.crits",   "vkt_recap_crits",    "", "i", "Get last round crit count" },
+    { "recap.extra",   "vkt_recap_extra",    "", "i", "Get last round extra attack count" },
+    { "recap.spell",   "vkt_recap_spell",    "", "i", "Get last round spell count" },
+    { "recap.bs",      "vkt_recap_bs",       "", "i", "Get last round backstab count" },
+    { "recap.miss",    "vkt_recap_miss",     "", "i", "Get last round miss count" },
+    { "recap.dodge",   "vkt_recap_dodge",    "", "i", "Get last round enemy dodge count" },
+    { "recap.show",    "vkt_recap_set_show", "i","v", "Set round recap display (0=off, 1=on)" },
     /* MUDRadio */
     { "radio.show",        "mr_cmd_show",         "",  "v", "Show MUDRadio panel" },
     { "radio.hide",        "mr_cmd_hide",         "",  "v", "Hide MUDRadio panel" },
@@ -10756,6 +10942,7 @@ static void vkt_save_settings(void)
     SAVE_INT("status_bar", vsb_visible);
     SAVE_INT("exp_bar", vxb_visible);
     SAVE_INT("player_stats", pst_visible);
+    SAVE_INT("round_recap", pst_round_recap);
     SAVE_INT("mudradio", mr_visible);
     SAVE_FLOAT("brightness", pp_brightness);
     SAVE_FLOAT("contrast", pp_contrast);
@@ -10813,6 +11000,7 @@ static void vkt_load_settings(void)
     LOAD_INT("status_bar", vsb_visible, 0);
     LOAD_INT("exp_bar", vxb_visible, 0);
     LOAD_INT("player_stats", pst_visible, 0);
+    LOAD_INT("round_recap", pst_round_recap, 1);
     LOAD_INT("mudradio", mr_visible, 0);
     LOAD_FLOAT("brightness", pp_brightness, 0.0);
     LOAD_FLOAT("contrast", pp_contrast, 1.0);
@@ -10867,6 +11055,7 @@ static void vkt_reset_settings(void)
     vsb_visible = 0;
     vxb_visible = 0;
     pst_visible = 0;
+    pst_round_recap = 1;
     mr_visible = 0;
     pp_brightness = 0.0f;
     pp_contrast = 1.0f;

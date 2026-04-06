@@ -26,6 +26,8 @@ layout(push_constant) uniform PushConstants {
     float smoke_hue;     /* 0..360 degrees */
     float smoke_sat;     /* 0..2 */
     float smoke_val;     /* 0..2 brightness */
+    float char_w_px;     /* cell width in pixels */
+    float char_h_px;     /* cell height in pixels */
 } pc;
 
 /* --- Helpers --- */
@@ -110,57 +112,84 @@ void main() {
      * Letter proximity from font texture controls local intensity.
      * Smoke creeps around letters, never covers them. */
     if (pc.fx_smoky > 0.5) {
-        vec2 texSize = vec2(textureSize(fontTex, 0));
-        vec2 tx = 1.0 / texSize;
         float center_a = texture(fontTex, fragUV).a;
         float t = pc.time;
+        bool is_smoke_quad = (fragColor.a < 0.01);
+        float cw = max(pc.char_w_px, 4.0);
+        float ch = max(pc.char_h_px, 8.0);
 
-        /* Letter proximity within this glyph cell — how close to ink */
-        float near_ink = 0.0;
-        for (int dy = -2; dy <= 2; dy++) {
-            for (int dx = -2; dx <= 2; dx++) {
-                float sa = texture(fontTex, fragUV + vec2(float(dx), float(dy)) * tx * 1.5).a;
-                float w = 1.0 / (1.0 + float(dx*dx + dy*dy));
-                near_ink += sa * w;
+        /* Cell-local coordinates (0-1 within this cell) */
+        float cell_x = mod(gl_FragCoord.x, cw) / cw;
+        float cell_y = mod(gl_FragCoord.y, ch) / ch;
+
+        float smoke_alpha = 0.0;
+
+        if (is_smoke_quad) {
+            /* ---- Wisp rising from letter below ---- */
+            float rise_cells = fragColor.g;   /* how many cells above the source letter */
+            float col_seed = fragColor.b;     /* unique per-column seed */
+
+            /* Continuous rise height (in cell units, 0 = at letter surface) */
+            float h = (rise_cells - 1.0) + cell_y;
+            float h_norm = h * pc.smoke_zoom * 0.5;
+
+            /* Generate 3 wisps per column with different seeds for organic look */
+            for (int w = 0; w < 3; w++) {
+                float seed = col_seed * 37.0 + float(w) * 13.7;
+                float wisp_x = 0.5 + float(w - 1) * 0.15; /* offset each wisp */
+
+                /* Brownian horizontal displacement — integrated sine waves
+                 * (integral of noise = smooth random walk, connected vertically) */
+                float dx = cos(h_norm * 2.3 + seed + t * 0.6) * 0.12
+                         + cos(h_norm * 5.7 + seed * 1.7 + t * 0.35) * 0.07
+                         + cos(h_norm * 11.3 + seed * 2.9 + t * 0.8) * 0.04
+                         + cos(h_norm * 23.0 + seed * 4.1 + t * 1.1) * 0.02;
+                /* Displacement grows with height (wisp wanders more as it rises) */
+                dx *= (1.0 + h * 0.4);
+
+                /* Distance from this wisp's centerline */
+                float dist = abs(cell_x - wisp_x - dx);
+
+                /* Gaussian cross-section — thin tendril */
+                float sharpness = 30.0 + float(w) * 15.0; /* inner wisps thinner */
+                float wisp = exp(-dist * dist * sharpness);
+
+                /* Vertical fade with height — decay controls how fast */
+                float fade = exp(-h * pc.smoke_decay * 0.4);
+
+                /* Add subtle internal turbulence (wisp density variation) */
+                float turb = 0.6 + 0.4 * sin(h_norm * 8.0 + seed * 3.0 + t * 1.5)
+                                       * sin(h_norm * 13.0 - seed * 2.0 + t * 0.9);
+
+                smoke_alpha += wisp * fade * turb * pc.smoke_depth;
             }
+            smoke_alpha = clamp(smoke_alpha, 0.0, 0.85);
+
+        } else {
+            /* ---- Letter cell: smoke at glyph top edge ---- */
+            /* Detect top edge of glyph (where alpha transitions from solid to transparent) */
+            vec2 texSize = vec2(textureSize(fontTex, 0));
+            vec2 tx = 1.0 / texSize;
+            float above_a = texture(fontTex, fragUV - vec2(0.0, tx.y * 2.0)).a;
+            float edge = center_a * (1.0 - above_a); /* high only at top edge */
+
+            if (edge > 0.05) {
+                float col_seed = mod(gl_FragCoord.x / cw, 80.0) / 80.0;
+                /* Small wisp base at glyph top — connects to rising wisps above */
+                for (int w = 0; w < 3; w++) {
+                    float seed = col_seed * 37.0 + float(w) * 13.7;
+                    float wisp_x = 0.5 + float(w - 1) * 0.15;
+                    float dx = cos(seed + t * 0.6) * 0.05;
+                    float dist = abs(cell_x - wisp_x - dx);
+                    float wisp = exp(-dist * dist * 40.0);
+                    smoke_alpha += wisp * edge * pc.smoke_depth * 0.5;
+                }
+            }
+
+            /* Never cover letter body */
+            smoke_alpha *= (1.0 - smoothstep(0.02, 0.3, center_a));
+            smoke_alpha = clamp(smoke_alpha, 0.0, 0.85);
         }
-        near_ink = clamp(near_ink * 0.4, 0.0, 1.0);
-
-        /* Boost: even empty cells get some smoke if depth is high enough.
-         * This lets smoke flow BETWEEN letters across quad boundaries. */
-        float base_smoke = max(near_ink, pc.smoke_depth * 0.15);
-
-        /* Screen-space noise — continuous across ALL quads, no boundaries */
-        vec2 screen_px = gl_FragCoord.xy;
-        vec2 smoke_uv = screen_px * 0.006 * pc.smoke_zoom;
-
-        /* Flowing turbulent distortion */
-        smoke_uv += vec2(
-            sin(smoke_uv.y * 2.7 + t * 0.5) * 0.2 + sin(smoke_uv.y * 6.3 - t * 0.35) * 0.1,
-            cos(smoke_uv.x * 3.1 + t * 0.4) * 0.15 + sin(smoke_uv.x * 7.7 + t * 0.25) * 0.08
-        );
-        smoke_uv.y -= t * 0.12;  /* rise */
-        smoke_uv.x += sin(t * 0.18 + screen_px.y * 0.003) * 0.1; /* drift */
-
-        /* 4-octave FBM noise for billowy organic smoke */
-        float n = 0.0;
-        float amp = 0.5;
-        vec2 p = smoke_uv;
-        for (int i = 0; i < 4; i++) {
-            float v = sin(p.x * 1.7 + p.y * 2.3 + t * (0.25 + float(i) * 0.08))
-                    * sin(p.y * 1.3 - p.x * 3.1 + t * (0.15 - float(i) * 0.04));
-            n += (v * 0.5 + 0.5) * amp;
-            amp *= 0.5;
-            p = vec2(p.x * 0.8 - p.y * 0.6, p.x * 0.6 + p.y * 0.8) * 2.1;
-        }
-
-        /* Combine proximity with continuous noise */
-        float shaped = pow(base_smoke, pc.smoke_decay * 0.6) * n;
-        float smoke_alpha = shaped * pc.smoke_depth * 1.5;
-        smoke_alpha = clamp(smoke_alpha, 0.0, 0.85);
-
-        /* Hard mask: smoke NEVER covers letter bodies */
-        smoke_alpha *= (1.0 - smoothstep(0.02, 0.3, center_a));
 
         if (smoke_alpha > 0.003) {
             /* HSV → RGB */

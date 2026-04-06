@@ -26,6 +26,8 @@ layout(push_constant) uniform PushConstants {
     float smoke_hue;     /* 0..360 degrees */
     float smoke_sat;     /* 0..2 */
     float smoke_val;     /* 0..2 brightness */
+    float char_w_px;     /* cell width in pixels */
+    float char_h_px;     /* cell height in pixels */
 } pc;
 
 /* ---- FBM Noise (hash-based, no texture needed) ---- */
