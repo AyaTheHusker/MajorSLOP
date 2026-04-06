@@ -5576,13 +5576,20 @@ static void vkt_build_vertices(void)
         bg_quad_end = quad_count;
     }
 
-    /* Pass 1: backgrounds using solid glyph */
+    /* Pass 1: backgrounds using solid glyph — merge adjacent same-color cells
+     * into single wide quads to eliminate sub-pixel gaps between columns */
     for (int r = 0; r < TERM_ROWS; r++) {
-        for (int c = 0; c < TERM_COLS; c++) {
+        int c = 0;
+        while (c < TERM_COLS) {
             int bg = ansi_term.grid[r][c].attr.bg & 0x07;
-            if (bg == 0) continue;
-            float px0 = x_offset + c * cw, py0 = top_pad + r * ch;
-            float px1 = px0 + cw, py1 = py0 + ch;
+            if (bg == 0) { c++; continue; }
+            /* Find run of same bg color */
+            int run_start = c;
+            while (c < TERM_COLS && (ansi_term.grid[r][c].attr.bg & 0x07) == bg)
+                c++;
+            /* Emit one quad for the entire run */
+            float px0 = x_offset + run_start * cw, py0 = top_pad + r * ch;
+            float px1 = x_offset + c * cw,         py1 = py0 + ch;
             push_quad(PX2NDC_X(px0), PX2NDC_Y(py0), PX2NDC_X(px1), PX2NDC_Y(py1),
                       bg_u0, bg_v0, bg_u1, bg_v1,
                       palette[bg].r, palette[bg].g, palette[bg].b, 1.0f);
@@ -8670,28 +8677,27 @@ static void pst_on_round_tick(int round_num) {
         char buf[256];
         int pos = 0;
 
-        /* Dark blue bg, bold white text for damage total */
+        /* Single solid color: bold white on blue bg, same color for everything */
         pos += _snprintf(buf + pos, sizeof(buf) - pos,
-            "\x1b[44;1;37m[ %d DAMAGE",
+            "\x1b[44;1;37m[ %d Damage,",
             round_dmg);
 
-        /* Append breakdown items — solid colors, ALL CAPS */
-        #define RECAP_ADD(cnt, label, color) \
+        #define RECAP_ADD(cnt, label) \
             if ((cnt) > 0) { \
                 pos += _snprintf(buf + pos, sizeof(buf) - pos, \
-                    " \x1b[" color "m%d " label, (cnt)); \
+                    " %d " label, (cnt)); \
             }
 
-        RECAP_ADD(pst_s.cr_crits,  "CRIT",  "1;36");  /* bold cyan */
-        RECAP_ADD(pst_s.cr_hits,   "HIT",   "1;32");   /* bold green */
-        RECAP_ADD(pst_s.cr_extra,  "XTRA",  "1;32");   /* bold green */
-        RECAP_ADD(pst_s.cr_spell,  "SPELL", "1;35");   /* bold magenta */
-        RECAP_ADD(pst_s.cr_bs,     "BS",    "1;31");    /* bold red */
-        RECAP_ADD(pst_s.cr_miss,   "MISS",  "0;33");    /* yellow */
-        RECAP_ADD(pst_s.cr_dodge,  "DODGE", "0;33");    /* yellow */
+        RECAP_ADD(pst_s.cr_crits,  "Crit");
+        RECAP_ADD(pst_s.cr_hits,   "Hit");
+        RECAP_ADD(pst_s.cr_extra,  "Xtra");
+        RECAP_ADD(pst_s.cr_spell,  "Spell");
+        RECAP_ADD(pst_s.cr_bs,     "BS");
+        RECAP_ADD(pst_s.cr_miss,   "Miss");
+        RECAP_ADD(pst_s.cr_dodge,  "Dodge");
         #undef RECAP_ADD
 
-        pos += _snprintf(buf + pos, sizeof(buf) - pos, " \x1b[1;37m]\x1b[0m");
+        pos += _snprintf(buf + pos, sizeof(buf) - pos, " ]\x1b[0m");
         buf[sizeof(buf) - 1] = 0;
 
         /* Inject into terminal as a flowing line */
