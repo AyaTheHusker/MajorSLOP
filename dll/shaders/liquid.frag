@@ -28,6 +28,8 @@ layout(push_constant) uniform PushConstants {
     float smoke_val;     /* 0..2 brightness */
     float char_w_px;     /* cell width in pixels */
     float char_h_px;     /* cell height in pixels */
+    float shadow_opacity; /* 0 = no shadow, >0 = shadow alpha */
+    float shadow_blur;    /* 0..4 gaussian blur radius */
 } pc;
 
 /* --- Helpers --- */
@@ -104,6 +106,30 @@ void main() {
             float alpha = fragColor.a * smoothstep(0.05, 0.3, d);
             outColor = vec4(finalColor, alpha);
         }
+    }
+
+    /* ---- Drop Shadow pass ---- */
+    /* Shadow quads have alpha=0.65 signal. Apply gaussian blur to font alpha
+     * for soft shadow edges, then output shadow color at shadow opacity. */
+    bool is_shadow = (fragColor.a > 0.59 && fragColor.a < 0.71);
+    if (is_shadow) {
+        vec2 texSize = vec2(textureSize(fontTex, 0));
+        vec2 tx = 1.0 / texSize;
+        float blurR = max(pc.shadow_blur, 0.1);
+        /* 5x5 gaussian blur on font alpha for soft edges */
+        float totalW = 0.0;
+        float blurAlpha = 0.0;
+        for (int dy = -2; dy <= 2; dy++) {
+            for (int dx = -2; dx <= 2; dx++) {
+                float w = exp(-float(dx*dx + dy*dy) / (blurR * blurR * 2.0));
+                blurAlpha += texture(fontTex, fragUV + vec2(float(dx), float(dy)) * tx * blurR).a * w;
+                totalW += w;
+            }
+        }
+        blurAlpha /= totalW;
+        outColor = vec4(fragColor.rgb, blurAlpha * pc.shadow_opacity);
+        /* Shadow quads skip all subsequent passes */
+        return;
     }
 
     /* ---- Smoky Letters pass ---- */
@@ -251,12 +277,31 @@ void main() {
         if (texAlpha > 0.1) outColor.a = texAlpha;
     }
 
+    /* ---- Subtle text sharpening (always on) ---- */
+    /* Tighten anti-aliased edges so text is crisp without needing sobel.
+     * Uses a gentle unsharp mask on the font alpha only — no lighting. */
+    if (outColor.a > 0.01 && !has_bg_text && pc.fx_mode < 0.5) {
+        vec2 shTexSize = vec2(textureSize(fontTex, 0));
+        vec2 shTx = 1.0 / shTexSize;
+        float shMc = texture(fontTex, fragUV).a;
+        float shBlur = (
+            texture(fontTex, fragUV + vec2(-shTx.x, 0.0)).a +
+            texture(fontTex, fragUV + vec2( shTx.x, 0.0)).a +
+            texture(fontTex, fragUV + vec2(0.0, -shTx.y)).a +
+            texture(fontTex, fragUV + vec2(0.0,  shTx.y)).a
+        ) * 0.25;
+        float shSharp = shMc + (shMc - shBlur) * 1.5;
+        shSharp = clamp(shSharp, 0.0, 1.0);
+        outColor.a = fragColor.a * shSharp;
+    }
+
     /* ---- Sobel/Sharp/Plastic pass ---- */
     /* Applied after recoloring, before scanlines.
      * Computes Sobel edge normals from the font texture, applies:
-     *   1. Unsharp mask sharpening
-     *   2. Directional lighting using Sobel-derived surface normals
-     *   3. Specular highlights for glossy plastic look */
+     *   1. Unsharp mask sharpening (all text)
+     *   2. Directional lighting using Sobel-derived surface normals (skip recap bg)
+     *   3. Specular highlights for glossy plastic look (skip recap bg)
+     * Recap bg text gets sharpening only — no lighting to avoid gradient banding. */
     if (pc.fx_sobel > 0.5 && outColor.a > 0.01) {
         vec2 texSize = vec2(textureSize(fontTex, 0));
         vec2 tx = 1.0 / texSize;
@@ -277,54 +322,48 @@ void main() {
         float sy = (-tl - 2.0*tc - tr) + (bl + 2.0*bc + brr);
         float edgeMag = length(vec2(sx, sy));
 
-        /* --- 1. Unsharp mask sharpening --- */
-        /* Blur = average of 3x3 neighborhood */
+        /* --- 1. Unsharp mask sharpening (applies to ALL text including recap) --- */
         float blur = (tl + tc + tr + ml + mc + mr + bl + bc + brr) / 9.0;
-        /* Sharpen: original + (original - blur) * strength */
         float sharp = mc + (mc - blur) * 2.5;
         sharp = clamp(sharp, 0.0, 1.0);
-        /* Blend sharpened alpha back into output */
         float origAlpha = outColor.a;
         float sharpAlpha = origAlpha * (sharp / max(mc, 0.01));
         sharpAlpha = clamp(sharpAlpha, 0.0, 1.0);
         outColor.a = mix(origAlpha, sharpAlpha, 0.6);
 
-        /* Also sharpen color intensity at edges */
-        outColor.rgb *= 1.0 + edgeMag * 0.8;
+        /* --- 2-3. Plastic lighting — only where there's actual glyph data.
+         * Skip on empty bg fill (mc near 0) to avoid gradient banding on recap edges. */
+        if (mc > 0.15) {
+            /* Sharpen color intensity at edges */
+            outColor.rgb *= 1.0 + edgeMag * 0.8;
 
-        /* --- 2. Surface normal from Sobel gradient --- */
-        vec3 normal = normalize(vec3(-sx * 6.0, -sy * 6.0, 1.0));
+            /* Surface normal from Sobel gradient */
+            vec3 normal = normalize(vec3(-sx * 6.0, -sy * 6.0, 1.0));
 
-        /* --- 3. Directional plastic lighting --- */
-        /* Light from upper-left at ~45 degrees — classic emboss angle */
-        vec3 lightDir = normalize(vec3(-0.5, -0.6, 0.8));
-        vec3 viewDir = vec3(0.0, 0.0, 1.0);
+            /* Directional plastic lighting */
+            vec3 lightDir = normalize(vec3(-0.5, -0.6, 0.8));
+            vec3 viewDir = vec3(0.0, 0.0, 1.0);
 
-        /* Diffuse wrap lighting for soft plastic feel */
-        float NdotL = dot(normal, lightDir);
-        float diffuse = max(NdotL * 0.5 + 0.5, 0.0); /* half-lambert wrap */
+            float NdotL = dot(normal, lightDir);
+            float diffuse = max(NdotL * 0.5 + 0.5, 0.0);
 
-        /* Specular — tight highlight for glossy plastic */
-        vec3 halfVec = normalize(lightDir + viewDir);
-        float spec = pow(max(dot(normal, halfVec), 0.0), 80.0);
+            vec3 halfVec = normalize(lightDir + viewDir);
+            float spec = pow(max(dot(normal, halfVec), 0.0), 80.0);
 
-        /* Rim/edge highlight from the opposing side */
-        float rim = pow(1.0 - max(dot(normal, viewDir), 0.0), 2.5);
+            float rim = pow(1.0 - max(dot(normal, viewDir), 0.0), 2.5);
 
-        /* Combine: modulate existing color with lighting */
-        vec3 litColor = outColor.rgb * (diffuse * 0.85 + 0.15); /* ambient floor */
-        litColor += vec3(1.0, 0.98, 0.95) * spec * 0.7;        /* white specular */
-        litColor += outColor.rgb * rim * 0.25;                   /* colored rim */
+            vec3 litColor = outColor.rgb * (diffuse * 0.85 + 0.15);
+            litColor += vec3(1.0, 0.98, 0.95) * spec * 0.7;
+            litColor += outColor.rgb * rim * 0.25;
 
-        /* Edge darkening for embossed depth */
-        litColor *= 1.0 - edgeMag * 0.15;
+            litColor *= 1.0 - edgeMag * 0.15;
 
-        /* Subtle edge outline for crispness */
-        if (edgeMag > 0.2) {
-            litColor = mix(litColor, litColor * 1.3, smoothstep(0.2, 0.6, edgeMag) * 0.3);
+            if (edgeMag > 0.2) {
+                litColor = mix(litColor, litColor * 1.3, smoothstep(0.2, 0.6, edgeMag) * 0.3);
+            }
+
+            outColor.rgb = litColor;
         }
-
-        outColor.rgb = litColor;
     }
 
     /* ---- Color/Brightness Post-Process (before scanlines) ---- */

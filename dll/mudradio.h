@@ -12,10 +12,13 @@ typedef struct {
     float bpm;
     float bass_energy, mid_energy, treble_energy;
     float spectrum[512];
+    float waveform[256];    /* time-domain PCM samples for oscilloscope */
     int   onset_detected;
     int   beat_count;       /* monotonic counter, increments on each onset */
     DWORD tick;
 } mr_beat_t;
+
+static volatile int mr_viz_mode = 0; /* 0 = spectrum bars, 1 = oscilloscope */
 
 /* ---- Metadata ---- */
 
@@ -34,6 +37,7 @@ typedef enum { MR_STATE_STOPPED, MR_STATE_PLAYING, MR_STATE_PAUSED, MR_STATE_CON
 typedef enum { MR_SRC_NONE, MR_SRC_FILE, MR_SRC_STREAM } mr_src_t;
 typedef enum { MR_TAB_RADIO, MR_TAB_PLAYER } mr_tab_t;
 typedef enum { MR_LIST_FAVORITES, MR_LIST_SEARCH, MR_LIST_GENRES } mr_list_mode_t;
+typedef enum { MR_CODEC_NONE, MR_CODEC_MP3, MR_CODEC_AAC, MR_CODEC_OPUS, MR_CODEC_VORBIS, MR_CODEC_FLAC, MR_CODEC_WAV, MR_CODEC_HLS } mr_codec_t;
 
 /* ---- Data types ---- */
 
@@ -48,6 +52,7 @@ typedef struct { char name[128]; char url[512]; char genre[64]; char country[64]
 /* ---- Global State ---- */
 
 static volatile mr_state_t mr_transport = MR_STATE_STOPPED;
+static volatile mr_codec_t mr_codec = MR_CODEC_NONE;
 static volatile float mr_volume = 0.8f;
 static volatile int mr_shuffle = 0;
 static volatile int mr_repeat = 0;
@@ -94,6 +99,7 @@ static void mr_toggle(void);
 static int  mr_mouse_down(int mx, int my);
 static void mr_mouse_move(int mx, int my);
 static void mr_mouse_up(void);
+static int  mr_scroll_wheel(int mx, int my, int delta);
 static int  mr_key_char(int ch_code);
 static void mr_play_file(const char *path);
 static void mr_play_stream(const char *url);

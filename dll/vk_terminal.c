@@ -564,6 +564,7 @@ static int current_font = -1;
 static uint32_t cur_atlas_w = 576, cur_atlas_h = 1024;
 static volatile int font_change_pending = 0;
 static int pending_font_idx = -1;
+static int term_font_adj = 0;  /* pixel adjustment to cell_h (-8..+16) */
 
 /* CP437 to Unicode mapping for TTF rasterization */
 static const unsigned int cp437_to_unicode[256] = {
@@ -669,8 +670,9 @@ static int ttf_loaded[MAX_TTF_FONTS] = {0};
 #define VKM_FX_SOBEL     3
 #define VKM_FX_SCANLINES 4
 #define VKM_FX_SMOKY     5
-#define VKM_FX_WOBBLE    6
-#define VKM_FX_COUNT     7   /* wobble only shown when vk_experimental=True */
+#define VKM_FX_SHADOW    6
+#define VKM_FX_WOBBLE    7
+#define VKM_FX_COUNT     8   /* wobble only shown when vk_experimental=True */
 
 /* Settings submenu items */
 #define VKM_SUB_EXTRAS   7
@@ -2747,6 +2749,14 @@ static float smoke_hue = 0.0f;        /* 0-360 degrees */
 static float smoke_saturation = 0.0f; /* 0-2 (0 = white smoke) */
 static float smoke_value = 1.0f;      /* brightness 0-2 */
 
+/* Drop Shadow parameters */
+static int   fx_shadow_mode = 0;        /* 0 = off, 1 = on */
+static float shadow_opacity  = 0.6f;    /* 0..1 */
+static float shadow_angle    = 135.0f;  /* 0..360 degrees (135=lower-right) */
+static float shadow_distance = 2.0f;    /* 0..8 pixels */
+static float shadow_blur     = 1.0f;    /* 0..4 blur radius */
+static float shadow_r = 0.0f, shadow_g = 0.0f, shadow_b = 0.0f; /* shadow color */
+
 /* ---- Animated Background System ---- */
 #define BG_NONE     0
 #define BG_PLASMA   1
@@ -2765,14 +2775,37 @@ static float bg_plasma_hue        = 0.0f;
 static float bg_plasma_saturation = 0.8f;
 static float bg_plasma_brightness = 0.7f;
 static float bg_plasma_alpha      = 0.35f;
+/* Sobel/sharpen/edge glow */
+static float bg_plasma_sobel      = 0.0f;   /* 0..2 strength */
+static float bg_plasma_sobel_angle = 135.0f; /* 0..360 light angle */
+static float bg_plasma_edge_glow  = 0.0f;   /* 0..2 edge glow intensity */
+static float bg_plasma_sharpen    = 0.0f;   /* 0..2 sharpen strength */
+/* Material: 0=glossy,1=wet,2=metallic,3=matte */
+#define BGP_MAT_COUNT 4
+static const char *bgp_mat_names[BGP_MAT_COUNT] = { "Glossy", "Wet", "Metallic", "Matte" };
+static int   bg_plasma_material   = 0;
+static float bg_plasma_mat_str    = 1.0f;   /* 0..2 material strength */
+/* Beat response: 0=none,1=hue_shift,2=brightness_burst,3=zoom_pulse */
+#define BGP_BEAT_NONE    0
+#define BGP_BEAT_HUE     1
+#define BGP_BEAT_BRIGHT  2
+#define BGP_BEAT_ZOOM    3
+#define BGP_BEAT_COUNT   4
+static const char *bgp_beat_names[BGP_BEAT_COUNT] = { "None", "Hue Shift", "Brightness", "Zoom Pulse" };
+static int bg_plasma_beat_bass   = 0;
+static int bg_plasma_beat_mid    = 0;
+static int bg_plasma_beat_treble = 0;
+static int bg_plasma_beat_rms    = 0;
 
 /* Background settings panel state */
 static int   bgp_visible = 0;
 static float bgp_x = 140.0f, bgp_y = 100.0f;
-static float bgp_w = 300.0f, bgp_h = 290.0f;
+static float bgp_w = 320.0f, bgp_h = 500.0f;
 static int   bgp_dragging = 0;
 static float bgp_drag_ox, bgp_drag_oy;
 static int   bgp_active_slider = -1;
+static int   bgp_scroll = 0;
+static int   bgp_scroll_dragging = 0;
 static void  bgp_draw(int vp_w, int vp_h);
 static int   bgp_mouse_down(int mx, int my);
 static void  bgp_mouse_move(int mx, int my);
@@ -2795,6 +2828,23 @@ static int   smk_mouse_down(int mx, int my);
 static void  smk_mouse_move(int mx, int my);
 static void  smk_mouse_up(void);
 
+/* Drop shadow settings panel */
+#define SHD_SLIDER_COUNT 5
+static int   shd_visible = 0;
+static float shd_x = 60, shd_y = 120;
+static float shd_w = 280, shd_h = 200;
+static int   shd_dragging = 0;
+static float shd_drag_ox = 0, shd_drag_oy = 0;
+static int   shd_active_slider = -1;
+static float *shd_slider_ptr[SHD_SLIDER_COUNT];
+static const float shd_slider_min[SHD_SLIDER_COUNT] = { 0.0f, 0.0f, 0.0f, 0.0f, 0.0f };
+static const float shd_slider_max[SHD_SLIDER_COUNT] = { 1.0f, 360.0f, 8.0f, 4.0f, 1.0f };
+static const char *shd_labels[SHD_SLIDER_COUNT] = { "Opacity", "Angle", "Distance", "Blur", "Brightness" };
+static void  shd_draw(int vp_w, int vp_h);
+static int   shd_mouse_down(int mx, int my);
+static void  shd_mouse_move(int mx, int my);
+static void  shd_mouse_up(void);
+
 /* Post-process color/brightness settings */
 static float pp_brightness = 0.0f;   /* -1..1 */
 static float pp_contrast = 1.0f;     /* 0..2 */
@@ -2802,6 +2852,7 @@ static float pp_hue = 0.0f;          /* -180..180 degrees */
 static float pp_saturation = 1.0f;   /* 0..2 */
 
 /* Color panel state */
+static int   sp_focus = -1;  /* settings panel focus: 0=clr, 1=bgp, 2=smk, 3=shd */
 static int   clr_visible = 0;
 static float clr_x = 120.0f, clr_y = 80.0f;
 static float clr_w = 280.0f, clr_h = 200.0f;
@@ -4762,6 +4813,7 @@ static void vkm_draw(int vp_w, int vp_h)
                 else if (i == VKM_FX_SOBEL) { label = "Sobel/Sharp"; is_active = fx_sobel_mode; }
                 else if (i == VKM_FX_SCANLINES) { label = "CRT Scanlines"; is_active = fx_scanline_mode; }
                 else if (i == VKM_FX_SMOKY) { label = "Smoky Letters"; is_active = fx_smoky_mode; }
+                else if (i == VKM_FX_SHADOW) { label = "Drop Shadow"; is_active = fx_shadow_mode; }
                 else if (i == VKM_FX_WOBBLE && vk_experimental) { label = "Wobbly Widgets \x1b[33m[EXP]"; is_active = fx_wobble_mode; }
             } else if (vkm_sub == VKM_SUB_EXTRAS) {
                 if (i == VKM_EXT_SOUND) {
@@ -5590,9 +5642,47 @@ static void vkt_build_vertices(void)
             /* Emit one quad for the entire run */
             float px0 = x_offset + run_start * cw, py0 = top_pad + r * ch;
             float px1 = x_offset + c * cw,         py1 = py0 + ch;
+            /* Alpha 0.75 signals shader to skip color post-processing (hue/sat/etc)
+             * so recap/highlighted backgrounds keep their true ANSI color */
             push_quad(PX2NDC_X(px0), PX2NDC_Y(py0), PX2NDC_X(px1), PX2NDC_Y(py1),
                       bg_u0, bg_v0, bg_u1, bg_v1,
-                      palette[bg].r, palette[bg].g, palette[bg].b, 1.0f);
+                      palette[bg].r, palette[bg].g, palette[bg].b, 0.75f);
+        }
+    }
+
+    /* Pass 1.5: drop shadow quads — emitted before text so they render behind.
+     * Each visible character gets a shadow quad at the same glyph UV, offset by
+     * shadow_distance pixels in shadow_angle direction, with shadow color+opacity.
+     * Alpha=0.65 signals the shader to apply gaussian blur for soft shadows. */
+    if (fx_shadow_mode) {
+        float rad = shadow_angle * 3.14159265f / 180.0f;
+        float sdx = cosf(rad) * shadow_distance;
+        float sdy = sinf(rad) * shadow_distance;
+        for (int r = 0; r < TERM_ROWS; r++) {
+            for (int c = 0; c < TERM_COLS; c++) {
+                unsigned char byte = ansi_term.grid[r][c].ch;
+                if (byte == 0 || byte == 32) continue;
+                /* Skip box-drawing chars (they use programmatic rendering) */
+                if (byte >= 0xB0 && byte <= 0xDF) continue;
+                float px0 = x_offset + c * cw + sdx, py0 = top_pad + r * ch + sdy;
+                float px1 = px0 + cw, py1 = py0 + ch;
+                /* Apply viz displacement if active */
+                if (viz_mode != VIZ_NONE && r < VIZ_ROWS && c < VIZ_COLS) {
+                    if (viz_cells[r][c].shattered) continue;
+                    px0 += viz_cells[r][c].dx;
+                    py0 += viz_cells[r][c].dy;
+                    px1 += viz_cells[r][c].dx;
+                    py1 += viz_cells[r][c].dy;
+                }
+                float u0 = (byte % 16) * tex_cw + hp_u;
+                float v0 = (byte / 16) * tex_ch + hp_v;
+                float u1 = u0 + tex_cw - 2*hp_u;
+                float v1 = v0 + tex_ch - 2*hp_v;
+                /* alpha=0.65 signals shader: this is a shadow quad */
+                push_quad(PX2NDC_X(px0), PX2NDC_Y(py0), PX2NDC_X(px1), PX2NDC_Y(py1),
+                          u0, v0, u1, v1,
+                          shadow_r, shadow_g, shadow_b, 0.65f);
+            }
         }
     }
 
@@ -5784,9 +5874,15 @@ static void vkt_build_vertices(void)
     pst_draw(vp_w, vp_h);
     bsp_draw(vp_w, vp_h);
     mr_draw(vp_w, vp_h);
-    clr_draw(vp_w, vp_h);
-    bgp_draw(vp_w, vp_h);
-    smk_draw(vp_w, vp_h);
+    /* Settings panels — draw focused one last (on top) */
+    {
+        void (*sp_draws[])(int,int) = { clr_draw, bgp_draw, smk_draw, shd_draw };
+        int sp_count = 4;
+        for (int i = 0; i < sp_count; i++)
+            if (i != sp_focus) sp_draws[i](vp_w, vp_h);
+        if (sp_focus >= 0 && sp_focus < sp_count)
+            sp_draws[sp_focus](vp_w, vp_h);
+    }
     pl_quad_end = quad_count;
 
     /* Draw context menu on top of EVERYTHING (last = topmost) */
@@ -6250,8 +6346,8 @@ static uint8_t *vkt_build_font_pixels(int font_idx, uint32_t *out_w, uint32_t *o
          * Target: fill 60 rows in the terminal height with 1:2 aspect ratio cells.
          * At 4K (2160p): cell_h ~= 2160/62 ~= 35px, cell_w ~= 17px
          * At 1080p: cell_h ~= 17px, cell_w ~= 9px */
-        int cell_h = fs_height / (TERM_ROWS + 2);
-        if (cell_h < 16) cell_h = 16;
+        int cell_h = fs_height / (TERM_ROWS + 2) + term_font_adj;
+        if (cell_h < 12) cell_h = 12;
         if (cell_h > 64) cell_h = 64;
         int cell_w = (cell_h + 1) / 2; /* 1:2 aspect, round up */
 
@@ -6762,10 +6858,11 @@ static void vkt_init_ui_font(void)
  * after the fence wait, so previous frame is guaranteed complete.
  * No vkDeviceWaitIdle needed (which can deadlock under Wine FIFO present
  * when the message pump isn't running). */
-/* Switch font at runtime — called from render loop after fence wait. */
+/* Switch font at runtime — called from render loop after fence wait.
+ * Also used for font size changes (same font_idx, different term_font_adj). */
 static void vkt_switch_font(int font_idx)
 {
-    if (font_idx == current_font) return;
+    int size_only = (font_idx == current_font);
     current_font = font_idx;
     if (!vk_dev) return;
 
@@ -6774,15 +6871,17 @@ static void vkt_switch_font(int font_idx)
     vkt_upload_font_texture(pixels, aw, ah);
     free(pixels);
 
-    /* Clear terminal so old glyph shapes don't linger */
-    EnterCriticalSection(&ansi_lock);
-    ap_init(&ansi_term, TERM_ROWS, TERM_COLS);
-    ap_set_scroll_cb(&ansi_term, cb_scroll_cb, NULL);
-    LeaveCriticalSection(&ansi_lock);
+    /* Clear terminal so old glyph shapes don't linger (skip for size-only changes) */
+    if (!size_only) {
+        EnterCriticalSection(&ansi_lock);
+        ap_init(&ansi_term, TERM_ROWS, TERM_COLS);
+        ap_set_scroll_cb(&ansi_term, cb_scroll_cb, NULL);
+        LeaveCriticalSection(&ansi_lock);
+    }
 
     const char *fname = (current_font < 0) ? "CP437 Bitmap (VGA)"
                        : ttf_fonts[current_font].name;
-    if (api) api->log("[vk_terminal] Switched to font: %s\n", fname);
+    if (api) api->log("[vk_terminal] Font: %s (adj=%d)\n", fname, term_font_adj);
 }
 
 /* ---- Vertex/Index buffers ---- */
@@ -7088,7 +7187,7 @@ static int vkt_create_swapchain(void)
         VkPushConstantRange pcr = {0};
         pcr.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
         pcr.offset = 0;
-        pcr.size = sizeof(float) * 19;
+        pcr.size = sizeof(float) * 21;
 
         VkPipelineLayoutCreateInfo lplci = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
         lplci.setLayoutCount = 1;
@@ -7135,7 +7234,7 @@ static int vkt_create_swapchain(void)
         VkPushConstantRange pcr = {0};
         pcr.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
         pcr.offset = 0;
-        pcr.size = sizeof(float) * 10; /* BG shader only uses 10 push constants */
+        pcr.size = sizeof(float) * 20; /* BG shader push constants */
 
         VkPipelineLayoutCreateInfo bplci = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
         bplci.setLayoutCount = 1;
@@ -7244,7 +7343,7 @@ static void vkt_render_frame(void)
     vkCmdBeginRenderPass(vk_cmd_buf, &rpbi, VK_SUBPASS_CONTENTS_INLINE);
 
     int pp_active = (pp_brightness != 0.0f || pp_contrast != 1.0f || pp_hue != 0.0f || pp_saturation != 1.0f);
-    int fx_active = (fx_liquid_mode || fx_waves_mode || fx_scanline_mode || fx_fbm_mode || fx_sobel_mode || fx_smoky_mode || pp_active) && vk_liquid_pipeline;
+    int fx_active = (fx_liquid_mode || fx_waves_mode || fx_scanline_mode || fx_fbm_mode || fx_sobel_mode || fx_smoky_mode || fx_shadow_mode || pp_active) && vk_liquid_pipeline;
 
     VkDeviceSize offset = 0;
     vkCmdBindVertexBuffers(vk_cmd_buf, 0, 1, &vk_vbuf, &offset);
@@ -7256,10 +7355,35 @@ static void vkt_render_frame(void)
         vkCmdBindPipeline(vk_cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS, vk_bg_pipeline);
         vkCmdBindDescriptorSets(vk_cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                 vk_bg_pipe_layout, 0, 1, &vk_desc_set, 0, NULL);
-        float bg_pc[10] = { fx_time, bg_plasma_speed, bg_plasma_turbulence,
+        /* Compute beat-reactive modifiers from mr_beat_snap */
+        float beat_hue = 0.0f, beat_bright = 0.0f, beat_zoom = 0.0f;
+        {
+            EnterCriticalSection(&mr_beat_lock);
+            float bass = mr_beat_snap.bass_energy;
+            float mid  = mr_beat_snap.mid_energy;
+            float treb = mr_beat_snap.treble_energy;
+            float rms  = (bass + mid + treb) * 0.33f;
+            LeaveCriticalSection(&mr_beat_lock);
+            struct { int mode; float energy; } bands[4] = {
+                { bg_plasma_beat_bass, bass }, { bg_plasma_beat_mid, mid },
+                { bg_plasma_beat_treble, treb }, { bg_plasma_beat_rms, rms }
+            };
+            for (int i = 0; i < 4; i++) {
+                float e = bands[i].energy;
+                if (bands[i].mode == BGP_BEAT_HUE)    beat_hue    += e * 60.0f;
+                if (bands[i].mode == BGP_BEAT_BRIGHT)  beat_bright += e * 0.5f;
+                if (bands[i].mode == BGP_BEAT_ZOOM)    beat_zoom   += e * 0.3f;
+            }
+        }
+        float bg_pc[20] = { fx_time, bg_plasma_speed, bg_plasma_turbulence,
                             bg_plasma_complexity, bg_plasma_hue, bg_plasma_saturation,
                             bg_plasma_brightness, bg_plasma_alpha,
-                            (float)vk_sc_extent.width, (float)vk_sc_extent.height };
+                            (float)vk_sc_extent.width, (float)vk_sc_extent.height,
+                            bg_plasma_sobel, bg_plasma_sobel_angle,
+                            bg_plasma_edge_glow, bg_plasma_sharpen,
+                            beat_hue, beat_bright, beat_zoom,
+                            (float)bg_plasma_material, bg_plasma_mat_str,
+                            0.0f };
         vkCmdPushConstants(vk_cmd_buf, vk_bg_pipe_layout,
                            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                            0, sizeof(bg_pc), bg_pc);
@@ -7272,7 +7396,7 @@ static void vkt_render_frame(void)
         vkCmdBindPipeline(vk_cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS, vk_liquid_pipeline);
         vkCmdBindDescriptorSets(vk_cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                 vk_liquid_pipe_layout, 0, 1, &vk_desc_set, 0, NULL);
-        float pc_data[19] = { fx_time,
+        float pc_data[21] = { fx_time,
                               fx_liquid_mode ? 1.0f : 0.0f,
                               fx_waves_mode ? 1.0f : 0.0f,
                               fx_scanline_mode ? 1.0f : 0.0f,
@@ -7282,7 +7406,9 @@ static void vkt_render_frame(void)
                               fx_smoky_mode ? 1.0f : 0.0f,
                               smoke_decay, smoke_depth, smoke_zoom,
                               smoke_hue, smoke_saturation, smoke_value,
-                              last_cw_px, last_ch_px };
+                              last_cw_px, last_ch_px,
+                              fx_shadow_mode ? shadow_opacity : 0.0f,
+                              shadow_blur };
         vkCmdPushConstants(vk_cmd_buf, vk_liquid_pipe_layout,
                            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                            0, sizeof(pc_data), pc_data);
@@ -7323,7 +7449,7 @@ static void vkt_render_frame(void)
             vkCmdBindPipeline(vk_cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS, vk_liquid_pipeline);
             vkCmdBindDescriptorSets(vk_cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                     vk_liquid_pipe_layout, 0, 1, &vk_desc_set, 0, NULL);
-            float pc_data[17] = { fx_time,
+            float pc_data[21] = { fx_time,
                                   fx_liquid_mode ? 1.0f : 0.0f,
                                   fx_waves_mode ? 1.0f : 0.0f,
                                   fx_scanline_mode ? 1.0f : 0.0f,
@@ -7332,7 +7458,10 @@ static void vkt_render_frame(void)
                                   pp_brightness, pp_contrast, pp_hue, pp_saturation,
                                   fx_smoky_mode ? 1.0f : 0.0f,
                                   smoke_decay, smoke_depth, smoke_zoom,
-                                  smoke_hue, smoke_saturation, smoke_value };
+                                  smoke_hue, smoke_saturation, smoke_value,
+                                  0.0f, 0.0f, /* cw/ch not needed */
+                                  fx_shadow_mode ? shadow_opacity : 0.0f,
+                                  shadow_blur };
             vkCmdPushConstants(vk_cmd_buf, vk_liquid_pipe_layout,
                                VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                                0, sizeof(pc_data), pc_data);
@@ -7645,6 +7774,10 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             smk_mouse_move(mx2, my2);
             return 0;
         }
+        if (shd_dragging || shd_active_slider >= 0) {
+            shd_mouse_move(mx2, my2);
+            return 0;
+        }
         /* Player Stats drag */
         if (pst_dragging) {
             pst_x = (float)mx2 - pst_drag_ox;
@@ -7904,11 +8037,23 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         if (bsp_mouse_down(mx, my)) return 0;
         /* MUDRadio panel click */
         if (mr_mouse_down(mx, my)) return 0;
-        /* Color/Brightness panel click */
-        if (clr_mouse_down(mx, my)) return 0;
-        /* Background settings panel click */
-        if (bgp_mouse_down(mx, my)) return 0;
-        if (smk_mouse_down(mx, my)) return 0;
+        /* Settings panels — check focused one first for z-order consistency */
+        {
+            struct { int (*fn)(int,int); int idx; } sp[] = {
+                { clr_mouse_down, 0 }, { bgp_mouse_down, 1 }, { smk_mouse_down, 2 }, { shd_mouse_down, 3 }
+            };
+            /* Check focused panel first */
+            if (sp_focus >= 0 && sp_focus < 4 && sp[sp_focus].fn(mx, my)) {
+                return 0;
+            }
+            /* Then check others */
+            for (int i = 0; i < 4; i++) {
+                if (i != sp_focus && sp[i].fn(mx, my)) {
+                    sp_focus = i;
+                    return 0;
+                }
+            }
+        }
         /* Player Stats panel click */
         if (pst_visible && mx >= (int)pst_x && mx < (int)(pst_x + pst_w) &&
             my >= (int)pst_y && my < (int)(pst_y + pst_h)) {
@@ -7982,6 +8127,7 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         if (clr_dragging || clr_active_slider >= 0) { clr_mouse_up(); return 0; }
         if (bgp_dragging || bgp_active_slider >= 0) { bgp_mouse_up(); return 0; }
         if (smk_dragging || smk_active_slider >= 0) { smk_mouse_up(); return 0; }
+        if (shd_dragging || shd_active_slider >= 0) { shd_mouse_up(); return 0; }
         if (pst_dragging) { pst_dragging = 0; return 0; }
         if (bsp_dragging || bsp_resizing || bsp_selecting) { bsp_mouse_up(); return 0; }
         if (vrt_dragging) { vrt_dragging = 0; return 0; }
@@ -8077,6 +8223,12 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 if (!fx_smoky_mode) smk_visible = 0;
                 if (api) api->log("[vk_terminal] Smoky Letters: %s\n",
                                   fx_smoky_mode ? "ON" : "OFF");
+            } else if (si == VKM_FX_SHADOW) {
+                fx_shadow_mode = !fx_shadow_mode;
+                if (fx_shadow_mode && !shd_visible) { shd_visible = 1; sp_focus = 3; }
+                if (!fx_shadow_mode) shd_visible = 0;
+                if (api) api->log("[vk_terminal] Drop Shadow: %s\n",
+                                  fx_shadow_mode ? "ON" : "OFF");
             } else if (si == VKM_FX_WOBBLE && vk_experimental) {
                 fx_wobble_mode = !fx_wobble_mode;
                 if (api) api->log("[vk_terminal] Wobbly Widgets: %s\n",
@@ -8252,6 +8404,25 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         return 0;
     }
     case WM_MOUSEWHEEL: {
+        /* Scroll plasma settings panel */
+        if (bgp_visible) {
+            int wmx = mouse_tx((short)LOWORD(lParam));
+            int wmy = mouse_ty((short)HIWORD(lParam));
+            if (wmx >= (int)bgp_x && wmx < (int)(bgp_x + bgp_w) &&
+                wmy >= (int)bgp_y && wmy < (int)(bgp_y + bgp_h)) {
+                int wd = (short)HIWORD(wParam);
+                bgp_scroll += (wd > 0) ? -2 : 2;
+                if (bgp_scroll < 0) bgp_scroll = 0;
+                return 0;
+            }
+        }
+        /* Scroll MudAMP station list */
+        if (mr_visible) {
+            int wmx = mouse_tx((short)LOWORD(lParam));
+            int wmy = mouse_ty((short)HIWORD(lParam));
+            int wd = (short)HIWORD(wParam);
+            if (mr_scroll_wheel(wmx, wmy, wd)) return 0;
+        }
         /* Scroll backscroll panel */
         if (bsp_visible) {
             int bmx = mouse_tx((short)LOWORD(lParam));
@@ -8686,7 +8857,7 @@ static void pst_on_round_tick(int round_num) {
 
         /* Single solid color: bold white on blue bg, same color for everything */
         pos += _snprintf(buf + pos, sizeof(buf) - pos,
-            "\x1b[44;1;37m[ %d Damage,",
+            "\x1b[44;1;37m %d Damage,",
             round_dmg);
 
         #define RECAP_ADD(cnt, label) \
@@ -8704,7 +8875,7 @@ static void pst_on_round_tick(int round_num) {
         RECAP_ADD(pst_s.cr_dodge,  "Dodge");
         #undef RECAP_ADD
 
-        pos += _snprintf(buf + pos, sizeof(buf) - pos, " ]\x1b[0m");
+        pos += _snprintf(buf + pos, sizeof(buf) - pos, " \x1b[0m");
         buf[sizeof(buf) - 1] = 0;
 
         /* Inject into terminal as a flowing line */
@@ -10341,16 +10512,26 @@ static void clr_mouse_up(void) {
 
 /* ---- Background Settings Panel (bgp_) ---- */
 
-#define BGP_SLIDER_COUNT 7
+#define BGP_SLIDER_COUNT 12
 
 static const char *bgp_labels[BGP_SLIDER_COUNT] = {
-    "Speed", "Turbulence", "Complexity", "Hue", "Saturation", "Brightness", "Opacity"
+    "Speed", "Turbulence", "Complexity", "Hue", "Saturation", "Brightness", "Opacity",
+    "Sobel", "Sobel Angle", "Edge Glow", "Sharpen", "Mat. Str."
 };
 
-static float bgp_slider_min[BGP_SLIDER_COUNT] = { 0.1f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f };
-static float bgp_slider_max[BGP_SLIDER_COUNT] = { 5.0f, 2.0f, 8.0f, 360.0f, 1.0f, 2.0f, 1.0f };
+static float bgp_slider_min[BGP_SLIDER_COUNT] = {
+    0.1f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f,
+    0.0f, 0.0f, 0.0f, 0.0f, 0.0f
+};
+static float bgp_slider_max[BGP_SLIDER_COUNT] = {
+    5.0f, 2.0f, 8.0f, 360.0f, 1.0f, 2.0f, 1.0f,
+    2.0f, 360.0f, 2.0f, 2.0f, 2.0f
+};
 
 static float *bgp_slider_ptr[BGP_SLIDER_COUNT];
+
+/* Total virtual rows = sliders + section labels + dropdown rows */
+#define BGP_TOTAL_ROWS (BGP_SLIDER_COUNT + 8)  /* 12 sliders + 1 material dd + 1 separator + 4 beat dds + 2 section labels */
 
 static void bgp_draw(int vp_w, int vp_h) {
     if (!bgp_visible) return;
@@ -10359,6 +10540,7 @@ static void bgp_draw(int vp_w, int vp_h) {
     float x0 = bgp_x, y0 = bgp_y;
     float pw = bgp_w;
     int titlebar_h = ch + 8;
+    float sb_w = 8.0f;
 
     bgp_slider_ptr[0] = &bg_plasma_speed;
     bgp_slider_ptr[1] = &bg_plasma_turbulence;
@@ -10367,7 +10549,13 @@ static void bgp_draw(int vp_w, int vp_h) {
     bgp_slider_ptr[4] = &bg_plasma_saturation;
     bgp_slider_ptr[5] = &bg_plasma_brightness;
     bgp_slider_ptr[6] = &bg_plasma_alpha;
+    bgp_slider_ptr[7] = &bg_plasma_sobel;
+    bgp_slider_ptr[8] = &bg_plasma_sobel_angle;
+    bgp_slider_ptr[9] = &bg_plasma_edge_glow;
+    bgp_slider_ptr[10] = &bg_plasma_sharpen;
+    bgp_slider_ptr[11] = &bg_plasma_mat_str;
 
+    /* Panel background and border */
     push_solid((int)x0, (int)y0, (int)(x0 + pw), (int)(y0 + bgp_h),
                t->bg[0], t->bg[1], t->bg[2], 0.92f, vp_w, vp_h);
     push_solid((int)x0, (int)y0, (int)(x0 + pw), (int)(y0 + 1),
@@ -10379,6 +10567,7 @@ static void bgp_draw(int vp_w, int vp_h) {
     push_solid((int)(x0 + pw - 1), (int)y0, (int)(x0 + pw), (int)(y0 + bgp_h),
                t->accent[0], t->accent[1], t->accent[2], 0.6f, vp_w, vp_h);
 
+    /* Titlebar */
     {
         float acr = t->accent[0], acg = t->accent[1], acb = t->accent[2];
         float tbr = acr * 0.25f + t->bg[0] * 0.5f;
@@ -10401,36 +10590,162 @@ static void bgp_draw(int vp_w, int vp_h) {
     push_text((int)(x0 + pw - 55), (int)(y0 + 4), "Reset",
               t->text[0] * 0.5f, t->text[1] * 0.5f, t->text[2] * 0.5f, vp_w, vp_h, cw, ch);
 
-    float cy = y0 + titlebar_h + 12;
+    /* Content area with scrolling */
+    float content_top = y0 + titlebar_h + 4;
+    float content_bot = y0 + bgp_h - 4;
+    float content_h = content_bot - content_top;
     float row_h = ch + 14;
+    float slider_w = pw - 16 - sb_w;
     char vbuf[32];
 
-    for (int i = 0; i < BGP_SLIDER_COUNT; i++) {
-        float val = *bgp_slider_ptr[i];
-        if (i == 3)
-            _snprintf(vbuf, sizeof(vbuf), "%.0f\xF8", val);
-        else if (i == 2)
-            _snprintf(vbuf, sizeof(vbuf), "%.0f", val);
-        else
-            _snprintf(vbuf, sizeof(vbuf), "%.2f", val);
+    /* Virtual row index (for scroll) — each slider is a row, plus section headers and dropdowns */
+    int vrow = 0;
+    int max_visible = (int)(content_h / row_h);
+    if (max_visible < 3) max_visible = 3;
+    int max_scroll = BGP_TOTAL_ROWS - max_visible;
+    if (max_scroll < 0) max_scroll = 0;
+    if (bgp_scroll > max_scroll) bgp_scroll = max_scroll;
+    if (bgp_scroll < 0) bgp_scroll = 0;
 
-        clr_draw_slider(x0 + 8, cy, pw - 16, row_h, val,
-                        bgp_slider_min[i], bgp_slider_max[i],
-                        bgp_labels[i], vbuf, vp_w, vp_h, t);
-        cy += row_h;
+    float cy = content_top + 4;
+    int drawn = 0;
+
+    /* Helper: draw a row only if it's in the visible scroll window */
+    #define BGP_ROW_VISIBLE (vrow >= bgp_scroll && drawn < max_visible)
+    #define BGP_NEXT_ROW do { if (vrow >= bgp_scroll && drawn < max_visible) { cy += row_h; drawn++; } vrow++; } while(0)
+
+    /* --- Sliders section --- */
+    for (int i = 0; i < BGP_SLIDER_COUNT; i++) {
+        if (BGP_ROW_VISIBLE) {
+            float val = *bgp_slider_ptr[i];
+            if (i == 3 || i == 8)  /* Hue, Sobel Angle */
+                _snprintf(vbuf, sizeof(vbuf), "%.0f\xF8", val);
+            else if (i == 2)       /* Complexity */
+                _snprintf(vbuf, sizeof(vbuf), "%.0f", val);
+            else
+                _snprintf(vbuf, sizeof(vbuf), "%.2f", val);
+
+            clr_draw_slider(x0 + 8, cy, slider_w, row_h, val,
+                            bgp_slider_min[i], bgp_slider_max[i],
+                            bgp_labels[i], vbuf, vp_w, vp_h, t);
+        }
+        BGP_NEXT_ROW;
     }
 
-    bgp_h = cy - y0 + 8;
+    /* --- Material dropdown --- */
+    if (BGP_ROW_VISIBLE) {
+        push_text((int)(x0 + 10), (int)(cy + 2), "Material:",
+                  t->text[0], t->text[1], t->text[2], vp_w, vp_h, cw, ch);
+        int dd_x = (int)(x0 + 10 + 11 * cw);
+        int dd_w = (int)(slider_w - 11 * cw - 2);
+        int dd_y = (int)cy;
+        int dd_h = ch + 4;
+        push_solid(dd_x, dd_y, dd_x + dd_w, dd_y + dd_h,
+                   t->bg[0] + 0.05f, t->bg[1] + 0.05f, t->bg[2] + 0.05f, 0.9f, vp_w, vp_h);
+        push_solid(dd_x, dd_y, dd_x + dd_w, dd_y + 1,
+                   1.0f, 1.0f, 1.0f, 0.08f, vp_w, vp_h);
+        push_solid(dd_x, dd_y + dd_h - 1, dd_x + dd_w, dd_y + dd_h,
+                   0.0f, 0.0f, 0.0f, 0.15f, vp_w, vp_h);
+        int mat = bg_plasma_material;
+        if (mat < 0 || mat >= BGP_MAT_COUNT) mat = 0;
+        push_text(dd_x + 4, dd_y + 2, bgp_mat_names[mat],
+                  t->accent[0], t->accent[1], t->accent[2], vp_w, vp_h, cw, ch);
+        push_text(dd_x + dd_w - cw - 2, dd_y + 2, "\x1F",
+                  t->text[0] * 0.5f, t->text[1] * 0.5f, t->text[2] * 0.5f, vp_w, vp_h, cw, ch);
+    }
+    BGP_NEXT_ROW;
+
+    /* --- Beat Response section header --- */
+    if (BGP_ROW_VISIBLE) {
+        push_solid((int)(x0 + 8), (int)(cy + row_h * 0.3f),
+                   (int)(x0 + pw - sb_w - 8), (int)(cy + row_h * 0.35f),
+                   t->accent[0], t->accent[1], t->accent[2], 0.3f, vp_w, vp_h);
+        push_text((int)(x0 + 8), (int)(cy + 2), "Beat Response",
+                  t->accent[0], t->accent[1], t->accent[2], vp_w, vp_h, cw, ch);
+    }
+    BGP_NEXT_ROW;
+
+    /* --- Beat dropdown rows --- */
+    {
+        struct { const char *label; int *val; } beats[4] = {
+            { "Bass/Kick:", &bg_plasma_beat_bass },
+            { "Mid:",       &bg_plasma_beat_mid },
+            { "Treble:",    &bg_plasma_beat_treble },
+            { "RMS:",       &bg_plasma_beat_rms }
+        };
+        for (int b = 0; b < 4; b++) {
+            if (BGP_ROW_VISIBLE) {
+                push_text((int)(x0 + 10), (int)(cy + 2), beats[b].label,
+                          t->text[0], t->text[1], t->text[2], vp_w, vp_h, cw, ch);
+                /* Dropdown button */
+                int dd_x = (int)(x0 + 10 + 11 * cw);
+                int dd_w = (int)(slider_w - 11 * cw - 2);
+                int dd_y = (int)cy;
+                int dd_h = ch + 4;
+                /* Button bg */
+                push_solid(dd_x, dd_y, dd_x + dd_w, dd_y + dd_h,
+                           t->bg[0] + 0.05f, t->bg[1] + 0.05f, t->bg[2] + 0.05f, 0.9f, vp_w, vp_h);
+                /* Top highlight */
+                push_solid(dd_x, dd_y, dd_x + dd_w, dd_y + 1,
+                           1.0f, 1.0f, 1.0f, 0.08f, vp_w, vp_h);
+                /* Bottom shadow */
+                push_solid(dd_x, dd_y + dd_h - 1, dd_x + dd_w, dd_y + dd_h,
+                           0.0f, 0.0f, 0.0f, 0.15f, vp_w, vp_h);
+                /* Current value text */
+                int mode = *beats[b].val;
+                if (mode < 0 || mode >= BGP_BEAT_COUNT) mode = 0;
+                push_text(dd_x + 4, dd_y + 2, bgp_beat_names[mode],
+                          t->accent[0], t->accent[1], t->accent[2], vp_w, vp_h, cw, ch);
+                /* Arrow */
+                push_text(dd_x + dd_w - cw - 2, dd_y + 2, "\x1F",
+                          t->text[0] * 0.5f, t->text[1] * 0.5f, t->text[2] * 0.5f, vp_w, vp_h, cw, ch);
+            }
+            BGP_NEXT_ROW;
+        }
+    }
+
+    #undef BGP_ROW_VISIBLE
+    #undef BGP_NEXT_ROW
+
+    /* --- Scrollbar --- */
+    {
+        float sb_x0 = x0 + pw - sb_w - 2;
+        float sb_y0 = content_top;
+        float sb_y1 = content_bot;
+        float track_h = sb_y1 - sb_y0;
+
+        /* Track bg */
+        push_solid((int)sb_x0, (int)sb_y0, (int)(sb_x0 + sb_w), (int)sb_y1,
+                   0.0f, 0.0f, 0.0f, 0.15f, vp_w, vp_h);
+
+        if (max_scroll > 0) {
+            float thumb_frac = (float)max_visible / (float)BGP_TOTAL_ROWS;
+            float thumb_h = track_h * thumb_frac;
+            if (thumb_h < 16.0f) thumb_h = 16.0f;
+            float thumb_pos = ((float)bgp_scroll / (float)max_scroll) * (track_h - thumb_h);
+            float ty0 = sb_y0 + thumb_pos;
+            float ty1 = ty0 + thumb_h;
+            push_solid((int)(sb_x0 + 1), (int)ty0, (int)(sb_x0 + sb_w - 1), (int)ty1,
+                       t->accent[0], t->accent[1], t->accent[2], 0.4f, vp_w, vp_h);
+            push_solid((int)(sb_x0 + 1), (int)ty0, (int)(sb_x0 + sb_w - 1), (int)(ty0 + 1),
+                       1.0f, 1.0f, 1.0f, 0.1f, vp_w, vp_h);
+        }
+    }
 }
 
 static int bgp_hit_slider(int mx, int my, float *out_pct) {
     int cw = VKM_CHAR_W, ch = VKM_CHAR_H;
     int titlebar_h = ch + 8;
     float row_h = ch + 14;
+    float sb_w = 8.0f;
+    float slider_w = bgp_w - 16 - sb_w;
     float sx0 = bgp_x + 8 + 110;
-    float sx1 = bgp_x + bgp_w - 16 - 50 + 8;
+    float sx1 = bgp_x + 8 + slider_w - 50 + 8;
+    float content_top = bgp_y + titlebar_h + 4;
     for (int i = 0; i < BGP_SLIDER_COUNT; i++) {
-        float sy = bgp_y + titlebar_h + 12 + i * row_h;
+        int vrow = i - bgp_scroll;
+        if (vrow < 0) continue;
+        float sy = content_top + 4 + vrow * row_h;
         if (my >= (int)sy && my < (int)(sy + row_h) &&
             mx >= (int)(sx0 - 4) && mx <= (int)(sx1 + 4)) {
             float pct = ((float)mx - sx0) / (sx1 - sx0);
@@ -10446,6 +10761,35 @@ static void bgp_set_from_pct(int slider, float pct) {
     if (slider < 0 || slider >= BGP_SLIDER_COUNT) return;
     float val = bgp_slider_min[slider] + pct * (bgp_slider_max[slider] - bgp_slider_min[slider]);
     *bgp_slider_ptr[slider] = val;
+}
+
+/* Returns dropdown index: -1=none, 0=material, 1-4=beat bands */
+static int bgp_hit_dropdown(int mx, int my) {
+    int cw = VKM_CHAR_W, ch = VKM_CHAR_H;
+    int titlebar_h = ch + 8;
+    float row_h = ch + 14;
+    float sb_w = 8.0f;
+    float slider_w = bgp_w - 16 - sb_w;
+    float content_top = bgp_y + titlebar_h + 4;
+    int dd_x = (int)(bgp_x + 10 + 11 * cw);
+    int dd_w = (int)(slider_w - 11 * cw - 2);
+    if (mx < dd_x || mx >= dd_x + dd_w) return -1;
+    /* Material dropdown at virtual row BGP_SLIDER_COUNT */
+    {
+        int vrow = BGP_SLIDER_COUNT - bgp_scroll;
+        if (vrow >= 0) {
+            float ry = content_top + 4 + vrow * row_h;
+            if (my >= (int)ry && my < (int)(ry + row_h)) return 0;
+        }
+    }
+    /* Beat dropdowns at virtual rows BGP_SLIDER_COUNT + 2..5 */
+    for (int b = 0; b < 4; b++) {
+        int vrow = BGP_SLIDER_COUNT + 2 + b - bgp_scroll;
+        if (vrow < 0) continue;
+        float ry = content_top + 4 + vrow * row_h;
+        if (my >= (int)ry && my < (int)(ry + row_h)) return b + 1;
+    }
+    return -1;
 }
 
 static int bgp_mouse_down(int mx, int my) {
@@ -10464,6 +10808,11 @@ static int bgp_mouse_down(int mx, int my) {
         bg_plasma_complexity = 4.0f; bg_plasma_hue = 0.0f;
         bg_plasma_saturation = 0.8f; bg_plasma_brightness = 0.7f;
         bg_plasma_alpha = 0.35f;
+        bg_plasma_sobel = 0.0f; bg_plasma_sobel_angle = 135.0f;
+        bg_plasma_edge_glow = 0.0f; bg_plasma_sharpen = 0.0f;
+        bg_plasma_material = 0; bg_plasma_mat_str = 1.0f;
+        bg_plasma_beat_bass = 0; bg_plasma_beat_mid = 0;
+        bg_plasma_beat_treble = 0; bg_plasma_beat_rms = 0;
         return 1;
     }
     if (ly < titlebar_h) {
@@ -10472,11 +10821,29 @@ static int bgp_mouse_down(int mx, int my) {
         bgp_drag_oy = (float)my - bgp_y;
         return 1;
     }
+    /* Slider click */
     float pct;
     int s = bgp_hit_slider(mx, my, &pct);
     if (s >= 0) {
         bgp_active_slider = s;
         bgp_set_from_pct(s, pct);
+        return 1;
+    }
+    /* Dropdown click — cycle to next mode */
+    int dd = bgp_hit_dropdown(mx, my);
+    if (dd >= 0) {
+        if (dd == 0) {
+            /* Material dropdown */
+            bg_plasma_material = (bg_plasma_material + 1) % BGP_MAT_COUNT;
+        } else {
+            /* Beat dropdowns (1-4 maps to bass/mid/treble/rms) */
+            int *val = NULL;
+            if (dd == 1) val = &bg_plasma_beat_bass;
+            else if (dd == 2) val = &bg_plasma_beat_mid;
+            else if (dd == 3) val = &bg_plasma_beat_treble;
+            else if (dd == 4) val = &bg_plasma_beat_rms;
+            if (val) *val = (*val + 1) % BGP_BEAT_COUNT;
+        }
         return 1;
     }
     return 1;
@@ -10489,8 +10856,10 @@ static void bgp_mouse_move(int mx, int my) {
         return;
     }
     if (bgp_active_slider >= 0) {
+        float sb_w = 8.0f;
+        float slider_w = bgp_w - 16 - sb_w;
         float sx0 = bgp_x + 8 + 110;
-        float sx1 = bgp_x + bgp_w - 16 - 50 + 8;
+        float sx1 = bgp_x + 8 + slider_w - 50 + 8;
         float pct = ((float)mx - sx0) / (sx1 - sx0);
         if (pct < 0) pct = 0; if (pct > 1) pct = 1;
         bgp_set_from_pct(bgp_active_slider, pct);
@@ -10500,6 +10869,7 @@ static void bgp_mouse_move(int mx, int my) {
 static void bgp_mouse_up(void) {
     bgp_dragging = 0;
     bgp_active_slider = -1;
+    bgp_scroll_dragging = 0;
 }
 
 /* ---- Smoky Letters Settings Panel ---- */
@@ -10648,6 +11018,189 @@ static void smk_mouse_move(int mx, int my) {
 static void smk_mouse_up(void) {
     smk_dragging = 0;
     smk_active_slider = -1;
+}
+
+/* ============ Drop Shadow Settings Panel ============ */
+
+static void shd_draw(int vp_w, int vp_h) {
+    if (!shd_visible) return;
+    const ui_theme_t *t = &ui_themes[current_theme];
+    int cw = VKM_CHAR_W, ch = VKM_CHAR_H;
+    float x0 = shd_x, y0 = shd_y;
+    float pw = shd_w;
+    int titlebar_h = ch + 8;
+
+    /* The 5th slider controls shadow brightness (combined R=G=B) */
+    float shd_bright = (shadow_r + shadow_g + shadow_b) / 3.0f;
+    shd_slider_ptr[0] = &shadow_opacity;
+    shd_slider_ptr[1] = &shadow_angle;
+    shd_slider_ptr[2] = &shadow_distance;
+    shd_slider_ptr[3] = &shadow_blur;
+    shd_slider_ptr[4] = &shd_bright; /* temporary, applied in set */
+
+    /* Panel background */
+    push_solid((int)x0, (int)y0, (int)(x0 + pw), (int)(y0 + shd_h),
+               t->bg[0], t->bg[1], t->bg[2], 0.92f, vp_w, vp_h);
+    /* Border */
+    push_solid((int)x0, (int)y0, (int)(x0 + pw), (int)(y0 + 1),
+               t->accent[0], t->accent[1], t->accent[2], 0.6f, vp_w, vp_h);
+    push_solid((int)x0, (int)(y0 + shd_h - 1), (int)(x0 + pw), (int)(y0 + shd_h),
+               t->accent[0], t->accent[1], t->accent[2], 0.6f, vp_w, vp_h);
+    push_solid((int)x0, (int)y0, (int)(x0 + 1), (int)(y0 + shd_h),
+               t->accent[0], t->accent[1], t->accent[2], 0.6f, vp_w, vp_h);
+    push_solid((int)(x0 + pw - 1), (int)y0, (int)(x0 + pw), (int)(y0 + shd_h),
+               t->accent[0], t->accent[1], t->accent[2], 0.6f, vp_w, vp_h);
+    /* Titlebar */
+    {
+        float acr = t->accent[0], acg = t->accent[1], acb = t->accent[2];
+        float tbr = acr * 0.25f + t->bg[0] * 0.5f;
+        float tbg = acg * 0.25f + t->bg[1] * 0.5f;
+        float tbb = acb * 0.25f + t->bg[2] * 0.5f;
+        int ty0 = (int)y0 + 2, ty1 = (int)y0 + titlebar_h;
+        push_solid((int)x0 + 2, ty0, (int)(x0 + pw) - 2, ty1,
+                   tbr, tbg, tbb, 0.95f, vp_w, vp_h);
+        push_solid((int)x0 + 2, ty0, (int)(x0 + pw) - 2, ty0 + titlebar_h / 2,
+                   1.0f, 1.0f, 1.0f, 0.06f, vp_w, vp_h);
+        push_solid((int)x0 + 2, ty1 - 1, (int)(x0 + pw) - 2, ty1,
+                   acr, acg, acb, 0.5f, vp_w, vp_h);
+    }
+    push_text((int)(x0 + 6) + 1, (int)(y0 + 4) + 1, "Drop Shadow",
+              0.0f, 0.0f, 0.0f, vp_w, vp_h, cw, ch);
+    push_text((int)(x0 + 6), (int)(y0 + 4), "Drop Shadow",
+              t->text[0], t->text[1], t->text[2], vp_w, vp_h, cw, ch);
+    push_text((int)(x0 + pw - 16), (int)(y0 + 4), "X",
+              t->text[0] * 0.6f, t->text[1] * 0.6f, t->text[2] * 0.6f, vp_w, vp_h, cw, ch);
+    push_text((int)(x0 + pw - 55), (int)(y0 + 4), "Reset",
+              t->text[0] * 0.5f, t->text[1] * 0.5f, t->text[2] * 0.5f, vp_w, vp_h, cw, ch);
+
+    float cy = y0 + titlebar_h + 12;
+    float row_h = ch + 14;
+
+    /* Color preview box */
+    {
+        push_text((int)(x0 + 8), (int)cy + 2, "Color",
+                  t->text[0] * 0.8f, t->text[1] * 0.8f, t->text[2] * 0.8f, vp_w, vp_h, cw, ch);
+        int bx0 = (int)(x0 + 60), by0 = (int)cy;
+        int bx1 = bx0 + 24, by1 = by0 + (int)row_h - 4;
+        push_solid(bx0, by0, bx1, by1, shadow_r, shadow_g, shadow_b, 1.0f, vp_w, vp_h);
+        /* Border around color box */
+        push_solid(bx0 - 1, by0 - 1, bx1 + 1, by0, 0.5f, 0.5f, 0.5f, 0.8f, vp_w, vp_h);
+        push_solid(bx0 - 1, by1, bx1 + 1, by1 + 1, 0.5f, 0.5f, 0.5f, 0.8f, vp_w, vp_h);
+        push_solid(bx0 - 1, by0, bx0, by1, 0.5f, 0.5f, 0.5f, 0.8f, vp_w, vp_h);
+        push_solid(bx1, by0, bx1 + 1, by1, 0.5f, 0.5f, 0.5f, 0.8f, vp_w, vp_h);
+        cy += row_h;
+    }
+
+    /* Sliders */
+    char vbuf[32];
+    for (int i = 0; i < SHD_SLIDER_COUNT; i++) {
+        float val;
+        if (i == 4)
+            val = (shadow_r + shadow_g + shadow_b) / 3.0f;
+        else
+            val = *shd_slider_ptr[i];
+
+        if (i == 1)
+            _snprintf(vbuf, sizeof(vbuf), "%.0f\xF8", val);
+        else if (i == 2)
+            _snprintf(vbuf, sizeof(vbuf), "%.1fpx", val);
+        else
+            _snprintf(vbuf, sizeof(vbuf), "%.2f", val);
+
+        clr_draw_slider(x0 + 8, cy, pw - 16, row_h, val,
+                        shd_slider_min[i], shd_slider_max[i],
+                        shd_labels[i], vbuf, vp_w, vp_h, t);
+        cy += row_h;
+    }
+
+    shd_h = cy - y0 + 8;
+}
+
+static int shd_hit_slider(int mx, int my, float *out_pct) {
+    int cw = VKM_CHAR_W, ch = VKM_CHAR_H;
+    int titlebar_h = ch + 8;
+    float row_h = ch + 14;
+    float color_row_h = row_h; /* skip color preview row */
+    float sx0 = shd_x + 8 + 110;
+    float sx1 = shd_x + shd_w - 16 - 50 + 8;
+    for (int i = 0; i < SHD_SLIDER_COUNT; i++) {
+        float sy = shd_y + titlebar_h + 12 + color_row_h + i * row_h;
+        if (my >= (int)sy && my < (int)(sy + row_h) &&
+            mx >= (int)(sx0 - 4) && mx <= (int)(sx1 + 4)) {
+            float pct = ((float)mx - sx0) / (sx1 - sx0);
+            if (pct < 0) pct = 0; if (pct > 1) pct = 1;
+            *out_pct = pct;
+            return i;
+        }
+    }
+    return -1;
+}
+
+static void shd_set_from_pct(int slider, float pct) {
+    if (slider < 0 || slider >= SHD_SLIDER_COUNT) return;
+    float val = shd_slider_min[slider] + pct * (shd_slider_max[slider] - shd_slider_min[slider]);
+    if (slider == 4) {
+        /* Brightness: set R=G=B uniformly */
+        shadow_r = shadow_g = shadow_b = val;
+    } else {
+        *shd_slider_ptr[slider] = val;
+    }
+}
+
+static int shd_mouse_down(int mx, int my) {
+    if (!shd_visible) return 0;
+    if (mx < (int)shd_x || mx >= (int)(shd_x + shd_w) ||
+        my < (int)shd_y || my >= (int)(shd_y + shd_h)) return 0;
+    int ch = VKM_CHAR_H;
+    int titlebar_h = ch + 8;
+    int ly = my - (int)shd_y;
+    /* Close button */
+    if (ly < titlebar_h && mx >= (int)(shd_x + shd_w - 20)) {
+        shd_visible = 0;
+        return 1;
+    }
+    /* Reset button */
+    if (ly < titlebar_h && mx >= (int)(shd_x + shd_w - 60) && mx < (int)(shd_x + shd_w - 20)) {
+        shadow_opacity = 0.6f; shadow_angle = 135.0f;
+        shadow_distance = 2.0f; shadow_blur = 1.0f;
+        shadow_r = shadow_g = shadow_b = 0.0f;
+        return 1;
+    }
+    /* Titlebar drag */
+    if (ly < titlebar_h) {
+        shd_dragging = 1;
+        shd_drag_ox = (float)mx - shd_x;
+        shd_drag_oy = (float)my - shd_y;
+        return 1;
+    }
+    float pct;
+    int s = shd_hit_slider(mx, my, &pct);
+    if (s >= 0) {
+        shd_active_slider = s;
+        shd_set_from_pct(s, pct);
+        return 1;
+    }
+    return 1;
+}
+
+static void shd_mouse_move(int mx, int my) {
+    if (shd_dragging) {
+        shd_x = (float)mx - shd_drag_ox;
+        shd_y = (float)my - shd_drag_oy;
+        return;
+    }
+    if (shd_active_slider >= 0) {
+        float sx0 = shd_x + 8 + 110;
+        float sx1 = shd_x + shd_w - 16 - 50 + 8;
+        float pct = ((float)mx - sx0) / (sx1 - sx0);
+        if (pct < 0) pct = 0; if (pct > 1) pct = 1;
+        shd_set_from_pct(shd_active_slider, pct);
+    }
+}
+
+static void shd_mouse_up(void) {
+    shd_dragging = 0;
+    shd_active_slider = -1;
 }
 
 /* ---- Background MMUDPy Exports ---- */
@@ -10952,6 +11505,7 @@ static void vkt_save_settings(void)
     SAVE_INT("fx_sobel", fx_sobel_mode);
     SAVE_INT("fx_scanlines", fx_scanline_mode);
     SAVE_INT("fx_smoky", fx_smoky_mode);
+    SAVE_INT("fx_shadow", fx_shadow_mode);
     SAVE_INT("fx_wobble", fx_wobble_mode);
     SAVE_INT("round_timer", vrt_visible);
     SAVE_INT("status_bar", vsb_visible);
@@ -10959,6 +11513,7 @@ static void vkt_save_settings(void)
     SAVE_INT("player_stats", pst_visible);
     SAVE_INT("round_recap", pst_round_recap);
     SAVE_INT("mudradio", mr_visible);
+    SAVE_INT("font_adj", term_font_adj);
     SAVE_FLOAT("brightness", pp_brightness);
     SAVE_FLOAT("contrast", pp_contrast);
     SAVE_FLOAT("hue", pp_hue);
@@ -10972,6 +11527,24 @@ static void vkt_save_settings(void)
     SAVE_FLOAT("bg_plasma_saturation", bg_plasma_saturation);
     SAVE_FLOAT("bg_plasma_brightness", bg_plasma_brightness);
     SAVE_FLOAT("bg_plasma_alpha", bg_plasma_alpha);
+    SAVE_FLOAT("bg_plasma_sobel", bg_plasma_sobel);
+    SAVE_FLOAT("bg_plasma_sobel_angle", bg_plasma_sobel_angle);
+    SAVE_FLOAT("bg_plasma_edge_glow", bg_plasma_edge_glow);
+    SAVE_FLOAT("bg_plasma_sharpen", bg_plasma_sharpen);
+    SAVE_INT("bg_material", bg_plasma_material);
+    SAVE_FLOAT("bg_mat_str", bg_plasma_mat_str);
+    SAVE_INT("bg_beat_bass", bg_plasma_beat_bass);
+    SAVE_INT("bg_beat_mid", bg_plasma_beat_mid);
+    SAVE_INT("bg_beat_treble", bg_plasma_beat_treble);
+    SAVE_INT("bg_beat_rms", bg_plasma_beat_rms);
+    /* Drop shadow settings */
+    SAVE_FLOAT("shadow_opacity", shadow_opacity);
+    SAVE_FLOAT("shadow_angle", shadow_angle);
+    SAVE_FLOAT("shadow_distance", shadow_distance);
+    SAVE_FLOAT("shadow_blur", shadow_blur);
+    SAVE_FLOAT("shadow_r", shadow_r);
+    SAVE_FLOAT("shadow_g", shadow_g);
+    SAVE_FLOAT("shadow_b", shadow_b);
     /* Smoke settings */
     SAVE_FLOAT("smoke_decay", smoke_decay);
     SAVE_FLOAT("smoke_depth", smoke_depth);
@@ -11017,6 +11590,7 @@ static void vkt_load_settings(void)
     LOAD_INT("player_stats", pst_visible, 0);
     LOAD_INT("round_recap", pst_round_recap, 1);
     LOAD_INT("mudradio", mr_visible, 0);
+    LOAD_INT("font_adj", term_font_adj, 0);
     LOAD_FLOAT("brightness", pp_brightness, 0.0);
     LOAD_FLOAT("contrast", pp_contrast, 1.0);
     LOAD_FLOAT("hue", pp_hue, 0.0);
@@ -11030,6 +11604,25 @@ static void vkt_load_settings(void)
     LOAD_FLOAT("bg_plasma_saturation", bg_plasma_saturation, 0.8);
     LOAD_FLOAT("bg_plasma_brightness", bg_plasma_brightness, 0.7);
     LOAD_FLOAT("bg_plasma_alpha", bg_plasma_alpha, 0.35);
+    LOAD_FLOAT("bg_plasma_sobel", bg_plasma_sobel, 0.0);
+    LOAD_FLOAT("bg_plasma_sobel_angle", bg_plasma_sobel_angle, 135.0);
+    LOAD_FLOAT("bg_plasma_edge_glow", bg_plasma_edge_glow, 0.0);
+    LOAD_FLOAT("bg_plasma_sharpen", bg_plasma_sharpen, 0.0);
+    LOAD_INT("bg_material", bg_plasma_material, 0);
+    LOAD_FLOAT("bg_mat_str", bg_plasma_mat_str, 1.0);
+    LOAD_INT("bg_beat_bass", bg_plasma_beat_bass, 0);
+    LOAD_INT("bg_beat_mid", bg_plasma_beat_mid, 0);
+    LOAD_INT("bg_beat_treble", bg_plasma_beat_treble, 0);
+    LOAD_INT("bg_beat_rms", bg_plasma_beat_rms, 0);
+    /* Drop shadow settings */
+    LOAD_INT("fx_shadow", fx_shadow_mode, 0);
+    LOAD_FLOAT("shadow_opacity", shadow_opacity, 0.6);
+    LOAD_FLOAT("shadow_angle", shadow_angle, 135.0);
+    LOAD_FLOAT("shadow_distance", shadow_distance, 2.0);
+    LOAD_FLOAT("shadow_blur", shadow_blur, 1.0);
+    LOAD_FLOAT("shadow_r", shadow_r, 0.0);
+    LOAD_FLOAT("shadow_g", shadow_g, 0.0);
+    LOAD_FLOAT("shadow_b", shadow_b, 0.0);
     LOAD_FLOAT("smoke_decay", smoke_decay, 1.5);
     LOAD_FLOAT("smoke_depth", smoke_depth, 0.8);
     LOAD_FLOAT("smoke_zoom", smoke_zoom, 2.0);
@@ -11065,6 +11658,13 @@ static void vkt_reset_settings(void)
     smoke_saturation = 0.0f;
     smoke_value = 1.0f;
     smk_visible = 0;
+    fx_shadow_mode = 0;
+    shadow_opacity = 0.6f;
+    shadow_angle = 135.0f;
+    shadow_distance = 2.0f;
+    shadow_blur = 1.0f;
+    shadow_r = shadow_g = shadow_b = 0.0f;
+    shd_visible = 0;
     fx_wobble_mode = 0;
     vrt_visible = 0;
     vsb_visible = 0;
@@ -11072,6 +11672,11 @@ static void vkt_reset_settings(void)
     pst_visible = 0;
     pst_round_recap = 1;
     mr_visible = 0;
+    if (term_font_adj != 0) {
+        term_font_adj = 0;
+        pending_font_idx = current_font;
+        font_change_pending = 1;
+    }
     pp_brightness = 0.0f;
     pp_contrast = 1.0f;
     pp_hue = 0.0f;

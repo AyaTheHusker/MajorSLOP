@@ -110,6 +110,25 @@ static void mr_analyze_audio(const float *pcm_stereo, int frames)
                 mr_last_onset_tick = now;
             }
 
+            /* Fill spectrum magnitudes (normalized) */
+            float spec_peak = 0.001f;
+            for (int b = 0; b < 512 && b < n_bins; b++) {
+                float mag = sqrtf(freq[b].r * freq[b].r + freq[b].i * freq[b].i);
+                if (mag > spec_peak) spec_peak = mag;
+                mr_beat.spectrum[b] = mag;
+            }
+            /* Normalize spectrum to 0-1 */
+            static float spectrum_peak = 1.0f;
+            if (spec_peak > spectrum_peak) spectrum_peak = spec_peak;
+            else spectrum_peak *= 0.999f;
+            if (spectrum_peak < 0.001f) spectrum_peak = 0.001f;
+            for (int b = 0; b < 512; b++)
+                mr_beat.spectrum[b] /= spectrum_peak;
+
+            /* Copy time-domain waveform (downsample 1024 → 256 samples) */
+            for (int w = 0; w < 256; w++)
+                mr_beat.waveform[w] = mr_fft_buf[w * 4];
+
             /* Update beat snapshot */
             EnterCriticalSection(&mr_beat_lock);
             mr_beat_snap.bass_energy   = bass_n;
@@ -119,6 +138,8 @@ static void mr_analyze_audio(const float *pcm_stereo, int frames)
             if (onset) mr_beat_snap.beat_count++;
             mr_beat_snap.onset_strength = kick_n;
             mr_beat_snap.tick = now;
+            memcpy(mr_beat_snap.spectrum, mr_beat.spectrum, sizeof(mr_beat_snap.spectrum));
+            memcpy(mr_beat_snap.waveform, mr_beat.waveform, sizeof(mr_beat_snap.waveform));
             LeaveCriticalSection(&mr_beat_lock);
 
             mr_prev_kick = kick_n;
@@ -542,7 +563,7 @@ static int mr_aac_decode_frame(mr_aac_dec_t *d) {
     /* Init FAAD2 on first valid frame */
     if (!d->inited) {
         long rc = NeAACDecInit(d->hDec, d->inbuf, d->inbuf_fill, &d->aac_sr, &d->aac_ch);
-        if (rc < 0) { mr_aac_consume(d, 1); return 0; }
+        if (rc < 0 || d->aac_ch == 0 || d->aac_sr == 0) { mr_aac_consume(d, 1); return 0; }
         /* NeAACDecInit returns bytes consumed for init */
         d->inited = 1;
         /* Don't consume here — the frame is still valid, decode it */
@@ -693,9 +714,11 @@ static ma_result mr_aac_backend_init(
 
     /* Init FAAD2 with the ADTS header */
     long init_rc = NeAACDecInit(d->hDec, d->inbuf, d->inbuf_fill, &d->aac_sr, &d->aac_ch);
-    if (init_rc < 0) {
+    if (init_rc < 0 || d->aac_ch == 0 || d->aac_sr == 0) {
+        /* ch=0 or sr=0 means FAAD2 found a sync-like pattern but it's not real AAC
+         * (MP3 shares the 0xFF 0xFx sync byte — let miniaudio try MP3 instead) */
         FILE *ef = fopen("C:\\MegaMUD\\radio_error.txt", "a");
-        if (ef) { fprintf(ef, "AAC: NeAACDecInit failed rc=%ld\n", init_rc); fclose(ef); }
+        if (ef) { fprintf(ef, "AAC: rejected — rc=%ld sr=%lu ch=%u (not real AAC)\n", init_rc, d->aac_sr, d->aac_ch); fclose(ef); }
         NeAACDecClose(d->hDec);
         ma_data_source_uninit(&d->ds_base);
         ma_free(d, pAllocationCallbacks);
@@ -707,6 +730,7 @@ static ma_result mr_aac_backend_init(
         FILE *ef = fopen("C:\\MegaMUD\\radio_error.txt", "a");
         if (ef) { fprintf(ef, "AAC: init OK sr=%lu ch=%u\n", d->aac_sr, d->aac_ch); fclose(ef); }
     }
+    mr_codec = MR_CODEC_AAC;
 
     *ppBackend = (ma_data_source *)d;
     return MA_SUCCESS;
@@ -905,6 +929,7 @@ static ma_result mr_opus_backend_init(
         FILE *ef = fopen("C:\\MegaMUD\\radio_error.txt", "a");
         if (ef) { fprintf(ef, "Opus: init OK ch=%d sr=%d\n", d->channels, d->sample_rate); fclose(ef); }
     }
+    mr_codec = MR_CODEC_OPUS;
 
     *ppBackend = (ma_data_source *)d;
     return MA_SUCCESS;
@@ -955,8 +980,31 @@ static int mr_open_decoder(void) {
     }
     mr_dec_inited = 1;
     mr_ma_dec_ready = 1;
+    /* If no custom backend set the codec, it's a built-in miniaudio decoder.
+     * Detect which one from the decoder's output format. miniaudio built-ins
+     * handle MP3, FLAC, Vorbis, and WAV. MP3 is by far the most common for radio. */
+    if (mr_codec == MR_CODEC_NONE) {
+        /* Check first ring bytes for format magic (best effort) */
+        int avail = mr_net_avail();
+        if (avail >= 4) {
+            unsigned char b0 = mr_net_ring[mr_net_r % MR_NET_RING_SZ];
+            unsigned char b1 = mr_net_ring[(mr_net_r + 1) % MR_NET_RING_SZ];
+            unsigned char b2 = mr_net_ring[(mr_net_r + 2) % MR_NET_RING_SZ];
+            unsigned char b3 = mr_net_ring[(mr_net_r + 3) % MR_NET_RING_SZ];
+            if (b0 == 'f' && b1 == 'L' && b2 == 'a' && b3 == 'C')
+                mr_codec = MR_CODEC_FLAC;
+            else if (b0 == 'O' && b1 == 'g' && b2 == 'g' && b3 == 'S')
+                mr_codec = MR_CODEC_VORBIS; /* OGG container, likely Vorbis */
+            else if (b0 == 'R' && b1 == 'I' && b2 == 'F' && b3 == 'F')
+                mr_codec = MR_CODEC_WAV;
+            else
+                mr_codec = MR_CODEC_MP3; /* most likely for radio streams */
+        } else {
+            mr_codec = MR_CODEC_MP3;
+        }
+    }
     FILE *f = fopen("C:\\MegaMUD\\radio_error.txt", "a");
-    if (f) { fprintf(f, "decoder OK, net_avail=%d\n", mr_net_avail()); fclose(f); }
+    if (f) { fprintf(f, "decoder OK, codec=%d, net_avail=%d\n", mr_codec, mr_net_avail()); fclose(f); }
     return 1;
 }
 
@@ -1116,6 +1164,264 @@ static DWORD WINAPI mr_net_thread_fn(LPVOID arg) {
     /* Signal decode thread that connection is good */
     mr_net_connected = 1;
 
+    /* ---- Peek at first bytes to detect HLS (M3U8 playlist) ---- */
+    {
+        DWORD peek_got = 0;
+        if (pInternetReadFile(hurl, sbuf, 7, &peek_got) && peek_got >= 7 &&
+            memcmp(sbuf, "#EXTM3U", 7) == 0) {
+            /* HLS detected — read entire playlist, then download segments */
+            if (mr_dbg) { fprintf(mr_dbg, "HLS: detected #EXTM3U playlist\n"); fflush(mr_dbg); }
+            mr_codec = MR_CODEC_HLS;
+            sbuf_fill = (int)peek_got;
+            /* Read rest of playlist */
+            while (sbuf_fill < MR_STREAM_BUF_SZ - 1 && mr_net_running) {
+                DWORD rr = 0;
+                if (!pInternetReadFile(hurl, sbuf + sbuf_fill, MR_STREAM_BUF_SZ - 1 - sbuf_fill, &rr) || rr == 0)
+                    break;
+                sbuf_fill += rr;
+            }
+            sbuf[sbuf_fill] = 0;
+            /* Close the playlist connection */
+            pInternetCloseHandle(hurl);
+            mr_net_hurl = NULL;
+            hurl = NULL;
+
+            /* Parse M3U8 for segment URLs — extract all lines that don't start with '#' */
+            #define MR_HLS_MAX_SEGS 256
+            char *seg_urls[MR_HLS_MAX_SEGS];
+            int seg_count = 0;
+            char *base_url = NULL;
+
+            /* Derive base URL from original stream path for relative URLs */
+            {
+                int slen = (int)strlen(mr_src_path);
+                base_url = (char *)malloc(slen + 1);
+                strcpy(base_url, mr_src_path);
+                /* Strip filename: find last '/' */
+                char *last_slash = strrchr(base_url, '/');
+                if (last_slash) last_slash[1] = 0;
+                else { base_url[0] = 0; }
+            }
+
+            /* Check if this is a master playlist (contains #EXT-X-STREAM-INF) —
+             * if so, pick the highest bandwidth variant */
+            char *variant_url = NULL;
+            int best_bw = 0;
+            {
+                char *p = (char *)sbuf;
+                while (*p) {
+                    if (strncmp(p, "#EXT-X-STREAM-INF:", 18) == 0) {
+                        /* Extract BANDWIDTH= */
+                        char *bw_str = strstr(p, "BANDWIDTH=");
+                        int bw = bw_str ? atoi(bw_str + 10) : 0;
+                        /* Skip to next line (the URL) */
+                        while (*p && *p != '\n') p++;
+                        if (*p == '\n') p++;
+                        /* Get the URL line */
+                        char *line_end = p;
+                        while (*line_end && *line_end != '\n' && *line_end != '\r') line_end++;
+                        if (line_end > p && (bw > best_bw || !variant_url)) {
+                            best_bw = bw;
+                            int url_len = (int)(line_end - p);
+                            if (variant_url) free(variant_url);
+                            if (p[0] == 'h' && p[1] == 't' && p[2] == 't' && p[3] == 'p') {
+                                /* Absolute URL */
+                                variant_url = (char *)malloc(url_len + 1);
+                                memcpy(variant_url, p, url_len);
+                                variant_url[url_len] = 0;
+                            } else {
+                                /* Relative URL */
+                                variant_url = (char *)malloc((int)strlen(base_url) + url_len + 1);
+                                sprintf(variant_url, "%s%.*s", base_url, url_len, p);
+                            }
+                        }
+                    }
+                    while (*p && *p != '\n') p++;
+                    if (*p == '\n') p++;
+                }
+            }
+
+            /* If master playlist, fetch the variant playlist */
+            if (variant_url) {
+                if (mr_dbg) { fprintf(mr_dbg, "HLS: master playlist, variant: %s (bw=%d)\n", variant_url, best_bw); fflush(mr_dbg); }
+                /* Update base_url for variant */
+                {
+                    int vlen = (int)strlen(variant_url);
+                    free(base_url);
+                    base_url = (char *)malloc(vlen + 1);
+                    strcpy(base_url, variant_url);
+                    char *ls = strrchr(base_url, '/');
+                    if (ls) ls[1] = 0; else base_url[0] = 0;
+                }
+                HINTERNET vurl = pInternetOpenUrlA(hinet, variant_url, NULL, 0,
+                    INTERNET_FLAG_NO_CACHE_WRITE | INTERNET_FLAG_RELOAD | INTERNET_FLAG_NO_UI, 0);
+                free(variant_url); variant_url = NULL;
+                if (vurl) {
+                    sbuf_fill = 0;
+                    while (sbuf_fill < MR_STREAM_BUF_SZ - 1) {
+                        DWORD rr = 0;
+                        if (!pInternetReadFile(vurl, sbuf + sbuf_fill, MR_STREAM_BUF_SZ - 1 - sbuf_fill, &rr) || rr == 0)
+                            break;
+                        sbuf_fill += rr;
+                    }
+                    sbuf[sbuf_fill] = 0;
+                    pInternetCloseHandle(vurl);
+                } else {
+                    if (mr_dbg) { fprintf(mr_dbg, "HLS: failed to fetch variant playlist\n"); fflush(mr_dbg); }
+                }
+            }
+
+            /* Parse media playlist for segment URLs */
+            {
+                char *p = (char *)sbuf;
+                while (*p && seg_count < MR_HLS_MAX_SEGS) {
+                    /* Skip whitespace/newlines */
+                    while (*p == '\n' || *p == '\r' || *p == ' ') p++;
+                    if (*p == 0) break;
+                    if (*p == '#') {
+                        /* Comment/tag line — skip */
+                        while (*p && *p != '\n') p++;
+                        continue;
+                    }
+                    /* This is a segment URL line */
+                    char *line_start = p;
+                    while (*p && *p != '\n' && *p != '\r') p++;
+                    int line_len = (int)(p - line_start);
+                    if (line_len > 0) {
+                        /* Strip trailing whitespace */
+                        while (line_len > 0 && (line_start[line_len-1] == ' ' || line_start[line_len-1] == '\r'))
+                            line_len--;
+                        if (line_start[0] == 'h' && line_start[1] == 't' && line_start[2] == 't' && line_start[3] == 'p') {
+                            seg_urls[seg_count] = (char *)malloc(line_len + 1);
+                            memcpy(seg_urls[seg_count], line_start, line_len);
+                            seg_urls[seg_count][line_len] = 0;
+                        } else {
+                            seg_urls[seg_count] = (char *)malloc((int)strlen(base_url) + line_len + 1);
+                            sprintf(seg_urls[seg_count], "%s%.*s", base_url, line_len, line_start);
+                        }
+                        seg_count++;
+                    }
+                }
+            }
+
+            if (mr_dbg) { fprintf(mr_dbg, "HLS: %d segments found\n", seg_count); fflush(mr_dbg); }
+
+            /* Download segments sequentially, feed raw audio into net ring */
+            int hls_loop = 1;
+            while (hls_loop && mr_net_running) {
+                for (int si = 0; si < seg_count && mr_net_running; si++) {
+                    if (mr_dbg && si < 3) { fprintf(mr_dbg, "HLS: seg[%d] %s\n", si, seg_urls[si]); fflush(mr_dbg); }
+                    HINTERNET seg_h = pInternetOpenUrlA(hinet, seg_urls[si], NULL, 0,
+                        INTERNET_FLAG_NO_CACHE_WRITE | INTERNET_FLAG_RELOAD | INTERNET_FLAG_NO_UI, 0);
+                    if (!seg_h) {
+                        if (mr_dbg) { fprintf(mr_dbg, "HLS: failed to open seg[%d]\n", si); fflush(mr_dbg); }
+                        continue;
+                    }
+                    /* Read segment data and write to net ring */
+                    while (mr_net_running) {
+                        DWORD sg = 0;
+                        unsigned char seg_buf[16384];
+                        if (!pInternetReadFile(seg_h, seg_buf, sizeof(seg_buf), &sg) || sg == 0)
+                            break;
+                        /* Wait for ring space */
+                        while (mr_net_free() < (int)sg && mr_net_running) Sleep(5);
+                        if (mr_net_running) mr_net_write(seg_buf, (int)sg);
+                    }
+                    pInternetCloseHandle(seg_h);
+                }
+
+                /* For live HLS: re-fetch the playlist and get new segments.
+                 * For VOD: we played all segments, check if playlist has #EXT-X-ENDLIST */
+                char *endlist = strstr((char *)sbuf, "#EXT-X-ENDLIST");
+                if (endlist) {
+                    hls_loop = 0; /* VOD — done */
+                } else {
+                    /* Live stream — re-fetch playlist for new segments */
+                    if (mr_dbg) { fprintf(mr_dbg, "HLS: live stream, re-fetching playlist\n"); fflush(mr_dbg); }
+                    /* Remember last segment URL to avoid re-downloading */
+                    char last_seg[2048] = {0};
+                    if (seg_count > 0) strncpy(last_seg, seg_urls[seg_count - 1], sizeof(last_seg) - 1);
+
+                    /* Free old segments */
+                    for (int i = 0; i < seg_count; i++) free(seg_urls[i]);
+                    seg_count = 0;
+
+                    Sleep(2000); /* typical HLS target duration */
+
+                    /* Re-fetch media playlist */
+                    HINTERNET pl_h = pInternetOpenUrlA(hinet, mr_src_path, NULL, 0,
+                        INTERNET_FLAG_NO_CACHE_WRITE | INTERNET_FLAG_RELOAD | INTERNET_FLAG_NO_UI, 0);
+                    if (!pl_h) { hls_loop = 0; break; }
+                    sbuf_fill = 0;
+                    while (sbuf_fill < MR_STREAM_BUF_SZ - 1) {
+                        DWORD rr = 0;
+                        if (!pInternetReadFile(pl_h, sbuf + sbuf_fill, MR_STREAM_BUF_SZ - 1 - sbuf_fill, &rr) || rr == 0)
+                            break;
+                        sbuf_fill += rr;
+                    }
+                    sbuf[sbuf_fill] = 0;
+                    pInternetCloseHandle(pl_h);
+
+                    /* Re-parse for new segments */
+                    char *p = (char *)sbuf;
+                    while (*p && seg_count < MR_HLS_MAX_SEGS) {
+                        while (*p == '\n' || *p == '\r' || *p == ' ') p++;
+                        if (*p == 0) break;
+                        if (*p == '#') { while (*p && *p != '\n') p++; continue; }
+                        char *ls2 = p;
+                        while (*p && *p != '\n' && *p != '\r') p++;
+                        int ll = (int)(p - ls2);
+                        while (ll > 0 && (ls2[ll-1] == ' ' || ls2[ll-1] == '\r')) ll--;
+                        if (ll > 0) {
+                            if (ls2[0] == 'h' && ls2[1] == 't' && ls2[2] == 't' && ls2[3] == 'p') {
+                                seg_urls[seg_count] = (char *)malloc(ll + 1);
+                                memcpy(seg_urls[seg_count], ls2, ll);
+                                seg_urls[seg_count][ll] = 0;
+                            } else {
+                                seg_urls[seg_count] = (char *)malloc((int)strlen(base_url) + ll + 1);
+                                sprintf(seg_urls[seg_count], "%s%.*s", base_url, ll, ls2);
+                            }
+                            seg_count++;
+                        }
+                    }
+                    /* Skip segments we already played (find ones after last_seg) */
+                    if (last_seg[0] && seg_count > 0) {
+                        int skip_to = 0;
+                        for (int i = 0; i < seg_count; i++) {
+                            if (strcmp(seg_urls[i], last_seg) == 0) { skip_to = i + 1; break; }
+                        }
+                        if (skip_to > 0 && skip_to < seg_count) {
+                            for (int i = 0; i < skip_to; i++) free(seg_urls[i]);
+                            memmove(seg_urls, seg_urls + skip_to, (seg_count - skip_to) * sizeof(char *));
+                            seg_count -= skip_to;
+                        }
+                    }
+                    if (seg_count == 0) {
+                        Sleep(1000);
+                        /* If no new segments after retry, give up */
+                        hls_loop = 0;
+                    }
+                }
+            }
+
+            /* Cleanup HLS */
+            for (int i = 0; i < seg_count; i++) free(seg_urls[i]);
+            if (base_url) free(base_url);
+            if (variant_url) free(variant_url);
+            free(sbuf);
+
+            /* Close handles */
+            if (hurl) { mr_net_hurl = NULL; pInternetCloseHandle(hurl); }
+            mr_net_hinet = NULL;
+            pInternetCloseHandle(hinet);
+            mr_net_running = 0;
+            mr_dbg_close();
+            return 0;
+        }
+        /* Not HLS — put peeked bytes into sbuf and continue with normal stream path */
+        sbuf_fill = (int)peek_got;
+    }
+
     while (mr_net_running) {
         /* Wait if net ring is mostly full */
         if (mr_net_free() < 16384) {
@@ -1223,6 +1529,7 @@ static void mr_stream_radio(void) {
     mr_net_connected = 0;
     mr_net_error = 0;
     mr_net_running = 1;
+    mr_codec = MR_CODEC_NONE;
     mr_transport = MR_STATE_CONNECTING;
     mr_net_thread = CreateThread(NULL, 0, mr_net_thread_fn, NULL, 0, NULL);
     if (!mr_net_thread) {

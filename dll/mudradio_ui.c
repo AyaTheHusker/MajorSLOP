@@ -1,11 +1,11 @@
-/* mudradio_ui.c — MUDRadio Panel Rendering + Mouse/Key Handling
+/* mudradio_ui.c — MudAMP Panel Rendering + Mouse/Key Handling
  * Vulkan-rendered floating panel, themed by ui_themes[current_theme].
  * Included into vk_terminal.c
  */
 
 /* ---- Resize constants ---- */
-#define MR_MIN_W 280.0f
-#define MR_MIN_H 300.0f
+#define MR_MIN_W 300.0f
+#define MR_MIN_H 340.0f
 #define MR_RESIZE_GRIP 12  /* pixels for resize handle corner */
 
 /* ---- Toggle ---- */
@@ -21,10 +21,10 @@ static void mr_toggle(void) {
 
 /* ---- Transport layout: all buttons same width ---- */
 
-#define MR_BTN_W  32
-#define MR_BTN_H  22
-#define MR_BTN_GAP 3
-#define MR_NUM_BTNS 5  /* prev, play/pause, stop, next */
+#define MR_BTN_W  38
+#define MR_BTN_H  26
+#define MR_BTN_GAP 4
+#define MR_NUM_BTNS 5  /* prev, play/pause, stop, next, shuffle */
 
 /* ---- Panel Draw ---- */
 
@@ -87,8 +87,8 @@ static void mr_draw(int vp_w, int vp_h)
 
     int title_tx = (int)x0 + pad;
     int title_ty = (int)tb_y0 + (titlebar_h - ch) / 2;
-    ptext(title_tx + 1, title_ty + 1, "MUDRadio", 0.0f, 0.0f, 0.0f, vp_w, vp_h, cw, ch);
-    ptext(title_tx, title_ty, "MUDRadio", txr, txg, txb, vp_w, vp_h, cw, ch);
+    ptext(title_tx + 1, title_ty + 1, "MudAMP", 0.0f, 0.0f, 0.0f, vp_w, vp_h, cw, ch);
+    ptext(title_tx, title_ty, "MudAMP", acr, acg, acb, vp_w, vp_h, cw, ch);
 
     /* Close [X] */
     int close_tx = (int)x1 - pad - cw;
@@ -211,23 +211,37 @@ static void mr_draw(int vp_w, int vp_h)
             float bx0f = (float)bx, bx1f = (float)(bx + MR_BTN_W);
             float by0f = (float)by, by1f = (float)(by + MR_BTN_H);
 
-            /* Button background with subtle bevel */
+            /* Button background — raised 3D look */
             psolid(bx0f, by0f, bx1f, by1f,
-                   bgr + 0.10f, bgg + 0.10f, bgb + 0.10f, 0.92f, vp_w, vp_h);
-            /* Top highlight */
-            psolid(bx0f, by0f, bx1f, by0f + 1.0f,
-                   1.0f, 1.0f, 1.0f, 0.08f, vp_w, vp_h);
-            /* Bottom shadow */
-            psolid(bx0f, by1f - 1.0f, bx1f, by1f,
-                   0.0f, 0.0f, 0.0f, 0.12f, vp_w, vp_h);
+                   bgr + 0.12f, bgg + 0.12f, bgb + 0.12f, 0.95f, vp_w, vp_h);
+            /* Top highlight (bright) */
+            psolid(bx0f, by0f, bx1f, by0f + 2.0f,
+                   1.0f, 1.0f, 1.0f, 0.12f, vp_w, vp_h);
             /* Left highlight */
             psolid(bx0f, by0f, bx0f + 1.0f, by1f,
-                   1.0f, 1.0f, 1.0f, 0.04f, vp_w, vp_h);
+                   1.0f, 1.0f, 1.0f, 0.08f, vp_w, vp_h);
+            /* Bottom shadow (dark) */
+            psolid(bx0f, by1f - 2.0f, bx1f, by1f,
+                   0.0f, 0.0f, 0.0f, 0.20f, vp_w, vp_h);
+            /* Right shadow */
+            psolid(bx1f - 1.0f, by0f, bx1f, by1f,
+                   0.0f, 0.0f, 0.0f, 0.15f, vp_w, vp_h);
+            /* Inner glow for play button when playing */
+            if (i == 1 && mr_transport == MR_STATE_PLAYING) {
+                psolid(bx0f + 2.0f, by0f + 2.0f, bx1f - 2.0f, by1f - 2.0f,
+                       0.2f, 0.8f, 0.2f, 0.10f, vp_w, vp_h);
+            }
+            /* Inner glow for stop button when active */
+            if (i == 2 && (mr_transport == MR_STATE_PLAYING || mr_transport == MR_STATE_PAUSED)) {
+                psolid(bx0f + 2.0f, by0f + 2.0f, bx1f - 2.0f, by1f - 2.0f,
+                       0.8f, 0.2f, 0.2f, 0.08f, vp_w, vp_h);
+            }
 
-            /* Center glyph */
+            /* Center glyph with shadow */
             int glyph_w = (int)strlen(glyphs[i]) * cw;
             int gx = bx + (MR_BTN_W - glyph_w) / 2;
             int gy = by + (MR_BTN_H - ch) / 2;
+            ptext(gx + 1, gy + 1, glyphs[i], 0.0f, 0.0f, 0.0f, vp_w, vp_h, cw, ch);
             ptext(gx, gy, glyphs[i], btn_r[i], btn_g[i], btn_b[i], vp_w, vp_h, cw, ch);
 
             bx += MR_BTN_W + MR_BTN_GAP;
@@ -250,75 +264,200 @@ static void mr_draw(int vp_w, int vp_h)
     {
         int vx0 = (int)x0 + pad;
         int vx1 = (int)x1 - pad;
-        int vy = cy + 2;
-        int slider_h = 6;
+        int vy = cy + 4;
+        int slider_h = 8;
 
-        /* Track background */
-        psolid((float)vx0, (float)vy, (float)vx1, (float)(vy + slider_h),
-               bgr * 0.5f, bgg * 0.5f, bgb * 0.5f, 0.9f, vp_w, vp_h);
-        /* Filled portion */
-        float fill_x = (float)vx0 + (float)(vx1 - vx0) * mr_volume;
-        psolid((float)vx0, (float)vy, fill_x, (float)(vy + slider_h),
-               acr, acg, acb, 0.8f, vp_w, vp_h);
-        /* Knob */
-        psolid(fill_x - 3.0f, (float)(vy - 2), fill_x + 3.0f, (float)(vy + slider_h + 2),
-               txr, txg, txb, 0.95f, vp_w, vp_h);
-
-        /* Volume % label */
+        /* Volume label (left) */
+        ptext(vx0, vy - ch - 2, "VOL", dmr, dmg, dmb, vp_w, vp_h, cw, ch);
+        /* Volume % label (right) */
         char vol_buf[8];
         _snprintf(vol_buf, sizeof(vol_buf), "%d%%", (int)(mr_volume * 100.0f + 0.5f));
-        ptext(vx1 - (int)strlen(vol_buf) * cw, vy - ch - 1, vol_buf,
-              dmr, dmg, dmb, vp_w, vp_h, cw, ch);
+        ptext(vx1 - (int)strlen(vol_buf) * cw, vy - ch - 2, vol_buf,
+              txr, txg, txb, vp_w, vp_h, cw, ch);
 
-        cy += slider_h + 8;
+        /* Track background — inset groove */
+        psolid((float)vx0, (float)vy, (float)vx1, (float)(vy + slider_h),
+               0.0f, 0.0f, 0.0f, 0.5f, vp_w, vp_h);
+        psolid((float)vx0, (float)vy, (float)vx1, (float)(vy + 1),
+               0.0f, 0.0f, 0.0f, 0.3f, vp_w, vp_h);
+        /* Filled portion with gradient */
+        float fill_x = (float)vx0 + (float)(vx1 - vx0) * mr_volume;
+        psolid((float)vx0 + 1.0f, (float)(vy + 1), fill_x, (float)(vy + slider_h - 1),
+               acr, acg, acb, 0.85f, vp_w, vp_h);
+        /* Gloss on filled portion */
+        psolid((float)vx0 + 1.0f, (float)(vy + 1), fill_x, (float)(vy + slider_h / 2),
+               1.0f, 1.0f, 1.0f, 0.12f, vp_w, vp_h);
+        /* Knob — larger, raised look */
+        float knob_w = 5.0f;
+        psolid(fill_x - knob_w, (float)(vy - 3), fill_x + knob_w, (float)(vy + slider_h + 3),
+               bgr + 0.25f, bgg + 0.25f, bgb + 0.25f, 0.98f, vp_w, vp_h);
+        /* Knob highlight */
+        psolid(fill_x - knob_w, (float)(vy - 3), fill_x + knob_w, (float)(vy - 1),
+               1.0f, 1.0f, 1.0f, 0.15f, vp_w, vp_h);
+        /* Knob center line */
+        psolid(fill_x - 0.5f, (float)(vy), fill_x + 0.5f, (float)(vy + slider_h),
+               txr, txg, txb, 0.3f, vp_w, vp_h);
+
+        cy += slider_h + 6;
     }
 
-    /* ---- Mini Spectrum Visualizer (32 bars) ---- */
+    /* ---- Codec Indicator (glowing badge) ---- */
     {
-        int viz_h = 40;
+        const char *codec_str = "";
+        float cr = dmr, cg = dmg, cb = dmb;
+        float glow_a = 0.0f;
+        switch (mr_codec) {
+            case MR_CODEC_MP3:    codec_str = "MP3";  cr = 0.2f; cg = 0.8f; cb = 1.0f; glow_a = 0.15f; break;
+            case MR_CODEC_AAC:    codec_str = "AAC";  cr = 1.0f; cg = 0.6f; cb = 0.2f; glow_a = 0.15f; break;
+            case MR_CODEC_OPUS:   codec_str = "OPUS"; cr = 0.3f; cg = 1.0f; cb = 0.4f; glow_a = 0.18f; break;
+            case MR_CODEC_VORBIS: codec_str = "OGG";  cr = 0.8f; cg = 0.4f; cb = 1.0f; glow_a = 0.15f; break;
+            case MR_CODEC_FLAC:   codec_str = "FLAC"; cr = 1.0f; cg = 0.9f; cb = 0.3f; glow_a = 0.15f; break;
+            case MR_CODEC_WAV:    codec_str = "WAV";  cr = 0.7f; cg = 0.7f; cb = 0.7f; glow_a = 0.10f; break;
+            case MR_CODEC_HLS:    codec_str = "HLS";  cr = 1.0f; cg = 0.3f; cb = 0.7f; glow_a = 0.15f; break;
+            default: break;
+        }
+        if (mr_transport == MR_STATE_PLAYING && codec_str[0]) {
+            int codec_len = (int)strlen(codec_str);
+            int badge_w = codec_len * cw + 10;
+            int badge_x = (int)x1 - pad - badge_w;
+            int badge_y = cy - 2;
+            int badge_h = ch + 6;
+            /* Glow behind badge */
+            psolid((float)(badge_x - 3), (float)(badge_y - 2),
+                   (float)(badge_x + badge_w + 3), (float)(badge_y + badge_h + 2),
+                   cr, cg, cb, glow_a, vp_w, vp_h);
+            /* Badge background */
+            psolid((float)badge_x, (float)badge_y,
+                   (float)(badge_x + badge_w), (float)(badge_y + badge_h),
+                   cr * 0.15f, cg * 0.15f, cb * 0.15f, 0.9f, vp_w, vp_h);
+            /* Badge border */
+            psolid((float)badge_x, (float)badge_y,
+                   (float)(badge_x + badge_w), (float)(badge_y + 1),
+                   cr, cg, cb, 0.5f, vp_w, vp_h);
+            psolid((float)badge_x, (float)(badge_y + badge_h - 1),
+                   (float)(badge_x + badge_w), (float)(badge_y + badge_h),
+                   cr, cg, cb, 0.3f, vp_w, vp_h);
+            /* Codec text */
+            ptext(badge_x + 5, badge_y + 3, codec_str, cr, cg, cb, vp_w, vp_h, cw, ch);
+            cy += badge_h + 2;
+        }
+    }
+
+    /* ---- Visualizer (spectrum bars or oscilloscope waveform) ---- */
+    {
+        int viz_h = 48;
         float viz_y0 = (float)cy, viz_y1 = (float)(cy + viz_h);
 
-        /* Background */
+        /* Background — darker inset */
         psolid(x0 + 3.0f, viz_y0, x1 - 3.0f, viz_y1,
-               bgr * 0.5f, bgg * 0.5f, bgb * 0.5f, 0.8f, vp_w, vp_h);
+               0.0f, 0.0f, 0.0f, 0.5f, vp_w, vp_h);
+        /* Top inset shadow */
+        psolid(x0 + 3.0f, viz_y0, x1 - 3.0f, viz_y0 + 1.0f,
+               0.0f, 0.0f, 0.0f, 0.3f, vp_w, vp_h);
 
-        /* Bars */
-        int num_bars = 32;
-        float bar_area = pw - 6.0f - (float)(num_bars - 1) * 1.0f;
-        float bar_w = bar_area / (float)num_bars;
+        /* OSC toggle button (top-right corner of viz) */
+        {
+            const char *mode_txt = mr_viz_mode ? "OSC" : "FFT";
+            int btn_w = 3 * cw + 6;
+            int btn_x = (int)x1 - 3 - btn_w;
+            int btn_y = (int)viz_y0 + 2;
+            psolid((float)btn_x, (float)btn_y,
+                   (float)(btn_x + btn_w), (float)(btn_y + ch + 2),
+                   bgr + 0.08f, bgg + 0.08f, bgb + 0.08f, 0.85f, vp_w, vp_h);
+            psolid((float)btn_x, (float)btn_y,
+                   (float)(btn_x + btn_w), (float)(btn_y + 1),
+                   1.0f, 1.0f, 1.0f, 0.08f, vp_w, vp_h);
+            ptext(btn_x + 3, btn_y + 1, mode_txt, acr, acg, acb, vp_w, vp_h, cw, ch);
+        }
 
         EnterCriticalSection(&mr_beat_lock);
         mr_beat_t snap = mr_beat_snap;
         LeaveCriticalSection(&mr_beat_lock);
 
-        for (int i = 0; i < num_bars; i++) {
-            int bin_start = (i * i * 256) / (num_bars * num_bars);
-            int bin_end = ((i + 1) * (i + 1) * 256) / (num_bars * num_bars);
-            if (bin_end <= bin_start) bin_end = bin_start + 1;
-            if (bin_end > 512) bin_end = 512;
+        float viz_area_w = pw - 6.0f;
 
-            float mag = 0.0f;
-            for (int b = bin_start; b < bin_end; b++)
-                if (snap.spectrum[b] > mag) mag = snap.spectrum[b];
+        if (mr_viz_mode == 0) {
+            /* ---- Spectrum Bars ---- */
+            int num_bars = 32;
+            float bar_gap = 1.0f;
+            float bar_w = (viz_area_w - (float)(num_bars - 1) * bar_gap) / (float)num_bars;
 
-            if (mag > 1.0f) mag = 1.0f;
-            float bar_h = mag * (float)viz_h;
-            if (bar_h < 1.0f && mag > 0.01f) bar_h = 1.0f;
+            for (int i = 0; i < num_bars; i++) {
+                int bin_start = (i * i * 256) / (num_bars * num_bars);
+                int bin_end = ((i + 1) * (i + 1) * 256) / (num_bars * num_bars);
+                if (bin_end <= bin_start) bin_end = bin_start + 1;
+                if (bin_end > 512) bin_end = 512;
 
-            float bx0 = x0 + 3.0f + (float)i * (bar_w + 1.0f);
-            float bx1 = bx0 + bar_w;
+                float mag = 0.0f;
+                for (int b = bin_start; b < bin_end; b++)
+                    if (snap.spectrum[b] > mag) mag = snap.spectrum[b];
 
-            float grad = (float)i / (float)(num_bars - 1);
-            float br = acr * (1.0f - grad * 0.3f) + grad * 0.3f;
-            float bg2 = acg * (1.0f - grad * 0.3f) + grad * 0.3f;
-            float bb = acb * (1.0f - grad * 0.3f) + grad * 0.3f;
+                if (mag > 1.0f) mag = 1.0f;
+                float bar_h = mag * (float)viz_h;
+                if (bar_h < 1.0f && mag > 0.01f) bar_h = 1.0f;
 
-            if (i < 8 && snap.onset_detected) {
-                br += 0.3f; bg2 += 0.1f; bb += 0.1f;
+                float bx0 = x0 + 3.0f + (float)i * (bar_w + bar_gap);
+                float bx1 = bx0 + bar_w;
+
+                float grad = (float)i / (float)(num_bars - 1);
+                float br = acr * (1.0f - grad * 0.3f) + grad * 0.3f;
+                float bg2 = acg * (1.0f - grad * 0.3f) + grad * 0.3f;
+                float bb = acb * (1.0f - grad * 0.3f) + grad * 0.3f;
+
+                if (i < 8 && snap.onset_detected) {
+                    br += 0.3f; bg2 += 0.1f; bb += 0.1f;
+                }
+
+                /* Bar with gloss */
+                psolid(bx0, viz_y1 - bar_h, bx1, viz_y1,
+                       br, bg2, bb, 0.9f, vp_w, vp_h);
+                if (bar_h > 4.0f) {
+                    psolid(bx0, viz_y1 - bar_h, bx1, viz_y1 - bar_h + 2.0f,
+                           1.0f, 1.0f, 1.0f, 0.12f, vp_w, vp_h);
+                }
             }
+        } else {
+            /* ---- Oscilloscope Waveform ---- */
+            float mid_y = (viz_y0 + viz_y1) * 0.5f;
+            float amp = (float)viz_h * 0.45f;
 
-            psolid(bx0, viz_y1 - bar_h, bx1, viz_y1,
-                   br, bg2, bb, 0.9f, vp_w, vp_h);
+            /* Center line (dim) */
+            psolid(x0 + 3.0f, mid_y - 0.5f, x1 - 3.0f, mid_y + 0.5f,
+                   acr * 0.3f, acg * 0.3f, acb * 0.3f, 0.3f, vp_w, vp_h);
+
+            /* Draw waveform as connected vertical bars between adjacent samples */
+            int num_pts = 256;
+            float step = viz_area_w / (float)(num_pts - 1);
+            for (int i = 0; i < num_pts - 1; i++) {
+                float s0 = snap.waveform[i];
+                float s1 = snap.waveform[i + 1];
+                if (s0 > 1.0f) s0 = 1.0f; if (s0 < -1.0f) s0 = -1.0f;
+                if (s1 > 1.0f) s1 = 1.0f; if (s1 < -1.0f) s1 = -1.0f;
+
+                float px0 = x0 + 3.0f + (float)i * step;
+                float px1 = px0 + step;
+                float py0 = mid_y - s0 * amp;
+                float py1 = mid_y - s1 * amp;
+
+                /* Draw a filled quad between the two sample points */
+                float top = (py0 < py1) ? py0 : py1;
+                float bot = (py0 > py1) ? py0 : py1;
+                if (bot - top < 2.0f) { top -= 1.0f; bot += 1.0f; }
+
+                /* Color based on amplitude */
+                float intensity = (fabsf(s0) + fabsf(s1)) * 0.5f;
+                float wr = acr + intensity * 0.3f;
+                float wg = acg + intensity * 0.2f;
+                float wb = acb + intensity * 0.1f;
+                if (wr > 1.0f) wr = 1.0f;
+                if (wg > 1.0f) wg = 1.0f;
+                if (wb > 1.0f) wb = 1.0f;
+
+                psolid(px0, top, px1, bot, wr, wg, wb, 0.85f, vp_w, vp_h);
+                /* Glow around waveform */
+                psolid(px0, top - 2.0f, px1, bot + 2.0f,
+                       wr, wg, wb, 0.12f, vp_w, vp_h);
+            }
         }
 
         cy += viz_h + 4;
@@ -384,23 +523,37 @@ static void mr_draw(int vp_w, int vp_h)
                 ? "No favorites yet." : (mr_searching ? "Searching..." : "No results.");
             ptext((int)x0 + pad, cy + 2, empty_msg, dmr, dmg, dmb, vp_w, vp_h, cw, ch);
         } else {
+            /* Clamp scroll to valid range */
+            int max_scroll = count - max_visible;
+            if (max_scroll < 0) max_scroll = 0;
+            if (mr_scroll > max_scroll) mr_scroll = max_scroll;
+            if (mr_scroll < 0) mr_scroll = 0;
+
+            int list_top_y = cy;
+            float sb_w = 6.0f; /* scrollbar width */
+            float list_right = x1 - 3.0f;
+            int need_scrollbar = (count > max_visible);
+
             for (int i = mr_scroll; i < count && i < mr_scroll + max_visible; i++) {
+                float row_right = need_scrollbar ? (list_right - sb_w - 2.0f) : list_right;
                 if (i == mr_hover_item) {
-                    psolid(x0 + 3.0f, (float)cy, x1 - 3.0f, (float)(cy + row_h),
+                    psolid(x0 + 3.0f, (float)cy, row_right, (float)(cy + row_h),
                            acr, acg, acb, 0.08f, vp_w, vp_h);
                 }
                 if ((i - mr_scroll) & 1) {
-                    psolid(x0 + 3.0f, (float)cy, x1 - 3.0f, (float)(cy + row_h),
+                    psolid(x0 + 3.0f, (float)cy, row_right, (float)(cy + row_h),
                            1.0f, 1.0f, 1.0f, 0.015f, vp_w, vp_h);
                 }
-                int name_max = ((int)pw - pad * 2 - 4 * cw) / cw;
+                int sb_chars = need_scrollbar ? (int)(sb_w / cw + 3) : 0;
+                int name_max = ((int)pw - pad * 2 - 4 * cw - sb_chars * cw) / cw;
                 char name_buf[128];
                 _snprintf(name_buf, sizeof(name_buf), "%.*s", name_max, list[i].name);
                 name_buf[sizeof(name_buf) - 1] = 0;
                 ptext((int)x0 + pad, cy + 2, name_buf, txr, txg, txb, vp_w, vp_h, cw, ch);
 
                 /* Favorite star */
-                ptext((int)x1 - pad - 2 * cw, cy + 2,
+                int star_x = need_scrollbar ? (int)(row_right - 2 * cw) : (int)x1 - pad - 2 * cw;
+                ptext(star_x, cy + 2,
                       list[i].is_favorite ? "\x0F" : "\xF9",
                       list[i].is_favorite ? 1.0f : dmr,
                       list[i].is_favorite ? 0.85f : dmg,
@@ -408,6 +561,35 @@ static void mr_draw(int vp_w, int vp_h)
                       vp_w, vp_h, cw, ch);
 
                 cy += row_h;
+            }
+
+            /* ---- Scrollbar ---- */
+            if (need_scrollbar) {
+                float sb_x0 = list_right - sb_w;
+                float sb_y0 = (float)list_top_y;
+                float sb_y1 = (float)(list_top_y + max_visible * row_h);
+                float track_h = sb_y1 - sb_y0;
+
+                /* Track background */
+                psolid(sb_x0, sb_y0, list_right, sb_y1,
+                       0.0f, 0.0f, 0.0f, 0.2f, vp_w, vp_h);
+
+                /* Thumb */
+                float thumb_frac = (float)max_visible / (float)count;
+                float thumb_h = track_h * thumb_frac;
+                if (thumb_h < 12.0f) thumb_h = 12.0f;
+                float thumb_pos = (max_scroll > 0)
+                    ? ((float)mr_scroll / (float)max_scroll) * (track_h - thumb_h)
+                    : 0.0f;
+                float thumb_y0 = sb_y0 + thumb_pos;
+                float thumb_y1 = thumb_y0 + thumb_h;
+
+                /* Thumb body */
+                psolid(sb_x0 + 1.0f, thumb_y0, list_right - 1.0f, thumb_y1,
+                       acr, acg, acb, 0.4f, vp_w, vp_h);
+                /* Thumb highlight */
+                psolid(sb_x0 + 1.0f, thumb_y0, list_right - 1.0f, thumb_y0 + 1.0f,
+                       1.0f, 1.0f, 1.0f, 0.1f, vp_w, vp_h);
             }
         }
     } else {
@@ -433,7 +615,18 @@ static void mr_draw(int vp_w, int vp_h)
         else if (mr_transport == MR_STATE_PAUSED) { status = "Paused"; sr = 1.0f; sg = 0.85f; sb = 0.2f; }
         else if (mr_transport == MR_STATE_CONNECTING) { status = "Connecting..."; sr = acr; sg = acg; sb = acb; }
         else if (mr_transport == MR_STATE_ERROR) { status = "Error"; sr = 1.0f; sg = 0.3f; sb = 0.3f; }
-        ptext((int)x0 + pad, (int)y1 - ch - 4, status, sr, sg, sb, vp_w, vp_h, cw, ch);
+        /* Status bar background */
+        psolid(x0 + 2.0f, y1 - (float)ch - 8.0f, x1 - 2.0f, y1 - 2.0f,
+               bgr * 0.5f, bgg * 0.5f, bgb * 0.5f, 0.6f, vp_w, vp_h);
+        /* Status dot (pulsing green when playing) */
+        if (mr_transport == MR_STATE_PLAYING) {
+            psolid((float)((int)x0 + pad), y1 - (float)ch - 4.0f,
+                   (float)((int)x0 + pad + cw / 2), y1 - 4.0f,
+                   0.3f, 1.0f, 0.3f, 0.9f, vp_w, vp_h);
+            ptext((int)x0 + pad + cw, (int)y1 - ch - 4, status, sr, sg, sb, vp_w, vp_h, cw, ch);
+        } else {
+            ptext((int)x0 + pad, (int)y1 - ch - 4, status, sr, sg, sb, vp_w, vp_h, cw, ch);
+        }
     }
 }
 
@@ -446,8 +639,8 @@ static void mr_get_layout(int *out_transport_y, int *out_vol_y, int *out_search_
     int titlebar_h = ch + 10;
     int tab_h = ch + 8;
     int row_h = ch + 4;
-    int slider_h = 6;
-    int viz_h = 40;
+    int slider_h = 8;
+    int viz_h = 48;
 
     int cy = titlebar_h + 2;       /* after title bar */
     cy += tab_h + 2;               /* after tab bar */
@@ -456,8 +649,11 @@ static void mr_get_layout(int *out_transport_y, int *out_vol_y, int *out_search_
     cy += row_h + 2;              /* artist/BPM row */
     *out_transport_y = cy;
     cy += MR_BTN_H + 4;           /* after transport */
-    *out_vol_y = cy + 2;
-    cy += slider_h + 8;           /* after volume slider */
+    *out_vol_y = cy + 4;
+    cy += slider_h + 6;           /* after volume slider */
+    /* codec badge (variable height, approximate) */
+    if (mr_transport == MR_STATE_PLAYING && mr_codec != MR_CODEC_NONE)
+        cy += VSB_CHAR_H + 6 + 2;
     cy += viz_h + 4;              /* after spectrum viz */
     cy += 1 + 3;                  /* after divider */
     *out_search_y = cy;
@@ -557,6 +753,21 @@ static int mr_mouse_down(int mx, int my) {
         return 1;
     }
 
+    /* OSC/FFT toggle button — sits at top-right of viz area */
+    {
+        int viz_top = vol_y + 12;  /* after volume slider */
+        if (mr_transport == MR_STATE_PLAYING && mr_codec != MR_CODEC_NONE)
+            viz_top += ch + 6 + 2; /* skip codec badge */
+        int btn_w = 3 * cw + 6;
+        int btn_x = (int)mr_w - pad - btn_w - 3;
+        int btn_y = viz_top + 2;
+        if (lx >= btn_x && lx < btn_x + btn_w &&
+            ly >= btn_y && ly < btn_y + ch + 2) {
+            mr_viz_mode = !mr_viz_mode;
+            return 1;
+        }
+    }
+
     /* Radio tab content */
     if (mr_tab == MR_TAB_RADIO) {
         /* Search box click */
@@ -654,6 +865,29 @@ static void mr_mouse_up(void) {
     mr_dragging = 0;
     mr_resizing = 0;
     mr_vol_dragging = 0;
+}
+
+/* ---- Scroll Wheel ---- */
+static int mr_scroll_wheel(int mx, int my, int delta) {
+    if (!mr_visible) return 0;
+    if (mx < (int)mr_x || mx >= (int)(mr_x + mr_w) ||
+        my < (int)mr_y || my >= (int)(mr_y + mr_h))
+        return 0;
+    if (mr_tab != MR_TAB_RADIO) return 0;
+
+    int count = (mr_list_mode == MR_LIST_FAVORITES) ? mr_fav_count : mr_search_count;
+    int row_h = VSB_CHAR_H + 4;
+    int transport_y, vol_y, search_y, subtab_y, list_y;
+    mr_get_layout(&transport_y, &vol_y, &search_y, &subtab_y, &list_y);
+    int max_visible = ((int)mr_h - list_y - 20) / row_h;
+    if (max_visible < 1) max_visible = 1;
+    int max_scroll = count - max_visible;
+    if (max_scroll < 0) max_scroll = 0;
+
+    mr_scroll += (delta > 0) ? -2 : 2;
+    if (mr_scroll < 0) mr_scroll = 0;
+    if (mr_scroll > max_scroll) mr_scroll = max_scroll;
+    return 1;
 }
 
 /* ---- Keyboard (when search focused) ---- */
