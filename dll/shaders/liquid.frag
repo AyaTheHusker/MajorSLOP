@@ -110,8 +110,10 @@ void main() {
     /* Screen-space smoke field that flows continuously across the terminal.
      * Uses gl_FragCoord for noise (no quad boundary artifacts).
      * Letter proximity from font texture controls local intensity.
-     * Smoke creeps around letters, never covers them. */
-    if (pc.fx_smoky > 0.5) {
+     * Smoke creeps around letters, never covers them.
+     * Skip smoke entirely for text with background (recap etc: alpha=0.75) */
+    bool has_bg_text = (fragColor.a > 0.7 && fragColor.a < 0.8);
+    if (pc.fx_smoky > 0.5 && !has_bg_text) {
         float center_a = texture(fontTex, fragUV).a;
         float t = pc.time;
         bool is_smoke_quad = (fragColor.a < 0.01);
@@ -170,17 +172,19 @@ void main() {
             smoke_alpha = clamp(smoke_alpha, 0.0, 0.85);
 
         } else {
-            /* ---- Letter cell: smoke at glyph top edge ---- */
-            vec2 texSize = vec2(textureSize(fontTex, 0));
-            vec2 tx = 1.0 / texSize;
-            float above_a = texture(fontTex, fragUV - vec2(0.0, tx.y * 2.0)).a;
-            float edge = center_a * (1.0 - above_a); /* high only at top edge */
-
-            if (edge > 0.05) {
+            /* ---- Letter cell: smoke in empty space around glyph ---- */
+            /* The glyph IS the smoke source. Empty space (low center_a) in
+             * this cell should show wisp bases, matching the wisps in smoke
+             * quads directly above. This eliminates the black gap between
+             * glyph body and rising smoke. */
+            float empty = 1.0 - smoothstep(0.02, 0.25, center_a);
+            if (empty > 0.01) {
                 float col_idx = floor(gl_FragCoord.x / cw);
                 float col_seed = fract(col_idx * 0.2851 + 0.067);
+                float cell_y = mod(gl_FragCoord.y, ch) / ch; /* 0=top, 1=bottom */
+                /* Stronger at top of cell (closer to smoke quads above) */
+                float top_fade = 1.0 - cell_y * 0.6;
                 float sr = screen_row * pc.smoke_zoom * 0.5;
-                /* Small wisp base at glyph top — continuous with rising wisps above */
                 for (int w = 0; w < 3; w++) {
                     float seed = col_seed * 37.0 + float(w) * 13.7;
                     float wisp_x = 0.5 + float(w - 1) * 0.15;
@@ -188,13 +192,10 @@ void main() {
                              + cos(sr * 5.7 + seed * 1.7 + t * 0.35) * 0.07;
                     dx *= 0.3;
                     float dist = abs(col_x - wisp_x - dx);
-                    float wisp = exp(-dist * dist * 40.0);
-                    smoke_alpha += wisp * edge * pc.smoke_depth * 0.5;
+                    float wisp = exp(-dist * dist * 35.0);
+                    smoke_alpha += wisp * empty * top_fade * pc.smoke_depth * 0.4;
                 }
             }
-
-            /* Never cover letter body */
-            smoke_alpha *= (1.0 - smoothstep(0.02, 0.3, center_a));
             smoke_alpha = clamp(smoke_alpha, 0.0, 0.85);
         }
 
@@ -219,6 +220,35 @@ void main() {
             outColor.rgb = mix(smoke_color * smoke_alpha, outColor.rgb, outColor.a);
             outColor.a = max(outColor.a, smoke_alpha);
         }
+    }
+
+    /* ---- Dark outline for bg-highlighted text (recap etc.) ---- */
+    /* alpha=0.75 signals text-on-bg: sample neighbors to create dark stroke,
+     * making text readable regardless of hue shift or background color.
+     * Restore alpha to 1.0 after applying outline so blending works normally. */
+    if (has_bg_text) {
+        float texAlpha = texture(fontTex, fragUV).a;
+        vec2 texSize = vec2(textureSize(fontTex, 0));
+        vec2 tx = 1.5 / texSize;  /* 1.5 texel spread for outline */
+        /* Sample 8 neighbors for dilated glyph mask */
+        float nb = 0.0;
+        nb = max(nb, texture(fontTex, fragUV + vec2(-tx.x, 0.0)).a);
+        nb = max(nb, texture(fontTex, fragUV + vec2( tx.x, 0.0)).a);
+        nb = max(nb, texture(fontTex, fragUV + vec2(0.0, -tx.y)).a);
+        nb = max(nb, texture(fontTex, fragUV + vec2(0.0,  tx.y)).a);
+        nb = max(nb, texture(fontTex, fragUV + vec2(-tx.x, -tx.y)).a);
+        nb = max(nb, texture(fontTex, fragUV + vec2( tx.x, -tx.y)).a);
+        nb = max(nb, texture(fontTex, fragUV + vec2(-tx.x,  tx.y)).a);
+        nb = max(nb, texture(fontTex, fragUV + vec2( tx.x,  tx.y)).a);
+        /* Outline: where neighbors have glyph but this pixel doesn't */
+        float outline = smoothstep(0.1, 0.5, nb) * (1.0 - smoothstep(0.05, 0.3, texAlpha));
+        /* Composite: dark outline behind, then text color on top */
+        if (outline > 0.01) {
+            outColor.rgb = mix(outColor.rgb, vec3(0.0), outline * 0.9);
+            outColor.a = max(outColor.a, outline * 0.85);
+        }
+        /* Fix alpha back to 1 for proper text compositing */
+        if (texAlpha > 0.1) outColor.a = texAlpha;
     }
 
     /* ---- Sobel/Sharp/Plastic pass ---- */
@@ -298,7 +328,8 @@ void main() {
     }
 
     /* ---- Color/Brightness Post-Process (before scanlines) ---- */
-    if (outColor.a > 0.01) {
+    /* Skip post-process for bg-highlighted text (recap) so it stays readable */
+    if (outColor.a > 0.01 && !has_bg_text) {
         /* Brightness: shift RGB */
         outColor.rgb += pc.pp_brightness;
 

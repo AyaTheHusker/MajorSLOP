@@ -5616,8 +5616,10 @@ static void vkt_build_vertices(void)
             if (byte == 0 || byte == 32) {
                 word_start = -1;
                 /* When smoke is active, emit wisp quads ABOVE letters in same column.
-                 * Each wisp quad encodes: R=proximity, G=rise_cells, B=col_seed, A=0 */
-                if (fx_smoky_mode) {
+                 * Each wisp quad encodes: R=proximity, G=rise_cells, B=col_seed, A=0
+                 * Skip cells with background color (recap/highlight areas) */
+                int cell_bg = ansi_term.grid[r][c].attr.bg & 0x07;
+                if (fx_smoky_mode && cell_bg == 0) {
                     /* Look DOWN the same column for nearest letter */
                     int rise = 0;
                     for (int dr = 1; dr <= 6; dr++) {
@@ -5633,8 +5635,9 @@ static void vkt_build_vertices(void)
                         float proximity = 1.0f - (float)(rise - 1) / 6.0f;
                         float col_seed = ((float)(c * 73 + 17) / 256.0f);
                         col_seed = col_seed - (int)col_seed; /* fract */
-                        float px0 = x_offset + c * cw, py0 = top_pad + r * ch;
-                        float px1 = px0 + cw, py1 = py0 + ch;
+                        /* Overlap smoke quads by 0.5px to eliminate sub-pixel gaps */
+                        float px0 = x_offset + c * cw - 0.5f, py0 = top_pad + r * ch - 0.5f;
+                        float px1 = px0 + cw + 1.0f, py1 = py0 + ch + 1.0f;
                         float su0 = (32 % 16) * tex_cw + hp_u;
                         float sv0 = (32 / 16) * tex_ch + hp_v;
                         float su1 = su0 + tex_cw - 2*hp_u;
@@ -5686,9 +5689,13 @@ static void vkt_build_vertices(void)
             float v0 = (byte / 16) * tex_ch + hp_v;
             float u1 = u0 + tex_cw - 2*hp_u;
             float v1 = v0 + tex_ch - 2*hp_v;
+            /* alpha=0.75 signals "has bg color" → shader adds dark outline
+             * and skips hue shift for readability (recap text etc.) */
+            int text_bg = a->bg & 0x07;
+            float text_alpha = (text_bg != 0) ? 0.75f : 1.0f;
             push_quad(PX2NDC_X(px0), PX2NDC_Y(py0), PX2NDC_X(px1), PX2NDC_Y(py1),
                       u0, v0, u1, v1,
-                      col.r, col.g, col.b, 1.0f);
+                      col.r, col.g, col.b, text_alpha);
         }
     }
 

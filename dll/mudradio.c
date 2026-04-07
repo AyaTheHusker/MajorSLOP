@@ -314,6 +314,9 @@ static void mr_do_search(const char *query) {
 #include "neaacdec.h"
 #undef NEAACDECAPI
 
+/* ---- Opus decoder (via opusfile) ---- */
+#include "opus_inc/opusfile.h"
+
 /* ---- miniaudio-based audio output + MP3 decoding ---- */
 #define MA_NO_ENCODING
 #define MA_NO_GENERATION
@@ -727,16 +730,227 @@ static ma_decoding_backend_vtable mr_aac_backend_vtable = {
 
 /* ==== End AAC backend ==== */
 
+/* ==== Opus (Ogg Opus) custom decoding backend via opusfile ==== */
+
+typedef struct {
+    ma_data_source_base ds_base;   /* MUST be first */
+    ma_read_proc  onRead;
+    ma_seek_proc  onSeek;
+    ma_tell_proc  onTell;
+    void         *pReadSeekTellUserData;
+    OggOpusFile  *of;              /* opusfile handle */
+    int           channels;
+    opus_int32    sample_rate;     /* always 48000 for Opus */
+    /* Pre-read buffer for format detection */
+    unsigned char prebuf[8192];
+    int           prebuf_fill;
+    int           prebuf_pos;      /* how much of prebuf consumed by opusfile */
+} mr_opus_dec_t;
+
+/* ---- opusfile I/O callbacks ---- */
+
+static int mr_opus_read_cb(void *_stream, unsigned char *_ptr, int _nbytes) {
+    mr_opus_dec_t *d = (mr_opus_dec_t *)_stream;
+    int total = 0;
+    /* Drain prebuf first (used during op_open_callbacks) */
+    if (d->prebuf_pos < d->prebuf_fill) {
+        int avail = d->prebuf_fill - d->prebuf_pos;
+        int take = (_nbytes < avail) ? _nbytes : avail;
+        memcpy(_ptr, d->prebuf + d->prebuf_pos, take);
+        d->prebuf_pos += take;
+        _ptr += take;
+        _nbytes -= take;
+        total += take;
+    }
+    /* Read rest from stream */
+    if (_nbytes > 0) {
+        size_t got = 0;
+        d->onRead(d->pReadSeekTellUserData, _ptr, _nbytes, &got);
+        total += (int)got;
+    }
+    return total;
+}
+
+static int mr_opus_seek_cb(void *_stream, opus_int64 _offset, int _whence) {
+    (void)_stream; (void)_offset; (void)_whence;
+    return -1; /* unseekable stream */
+}
+
+static int mr_opus_close_cb(void *_stream) {
+    (void)_stream;
+    return 0; /* we handle cleanup ourselves */
+}
+
+static OpusFileCallbacks mr_opus_file_cbs = {
+    mr_opus_read_cb,
+    mr_opus_seek_cb,
+    NULL, /* tell — NULL for unseekable */
+    mr_opus_close_cb
+};
+
+/* ---- ma_data_source vtable for Opus ---- */
+
+static ma_result mr_opus_ds_read(ma_data_source *pDS, void *pFramesOut, ma_uint64 frameCount, ma_uint64 *pFramesRead) {
+    mr_opus_dec_t *d = (mr_opus_dec_t *)pDS;
+    float *out = (float *)pFramesOut;
+    ma_uint64 total = 0;
+
+    while (total < frameCount) {
+        int want = (int)(frameCount - total);
+        if (want > 960) want = 960; /* Opus max frame size */
+        /* op_read_float_stereo always outputs stereo interleaved float */
+        int got = op_read_float_stereo(d->of, out + total * 2, want * 2);
+        if (got <= 0) break; /* error or EOF */
+        total += got;
+    }
+    *pFramesRead = total;
+    return (total > 0) ? MA_SUCCESS : MA_AT_END;
+}
+
+static ma_result mr_opus_ds_seek(ma_data_source *pDS, ma_uint64 frameIndex) {
+    (void)pDS; (void)frameIndex;
+    return MA_SUCCESS;
+}
+
+static ma_result mr_opus_ds_get_format(ma_data_source *pDS, ma_format *pFormat, ma_uint32 *pChannels, ma_uint32 *pSampleRate, ma_channel *pChannelMap, size_t channelMapCap) {
+    (void)pDS;
+    if (pFormat)     *pFormat = ma_format_f32;
+    if (pChannels)   *pChannels = 2;
+    if (pSampleRate) *pSampleRate = 48000; /* Opus always decodes at 48kHz */
+    if (pChannelMap && channelMapCap >= 2) {
+        pChannelMap[0] = MA_CHANNEL_FRONT_LEFT;
+        pChannelMap[1] = MA_CHANNEL_FRONT_RIGHT;
+    }
+    return MA_SUCCESS;
+}
+
+static ma_result mr_opus_ds_get_cursor(ma_data_source *pDS, ma_uint64 *pCursor) {
+    (void)pDS; *pCursor = 0; return MA_SUCCESS;
+}
+
+static ma_result mr_opus_ds_get_length(ma_data_source *pDS, ma_uint64 *pLength) {
+    (void)pDS; *pLength = 0; return MA_SUCCESS;
+}
+
+static ma_data_source_vtable mr_opus_ds_vtable = {
+    mr_opus_ds_read,
+    mr_opus_ds_seek,
+    mr_opus_ds_get_format,
+    mr_opus_ds_get_cursor,
+    mr_opus_ds_get_length,
+    NULL, 0
+};
+
+/* ---- Opus miniaudio decoding backend ---- */
+
+static ma_result mr_opus_backend_init(
+    void *pUserData,
+    ma_read_proc onRead, ma_seek_proc onSeek, ma_tell_proc onTell,
+    void *pReadSeekTellUserData,
+    const ma_decoding_backend_config *pConfig,
+    const ma_allocation_callbacks *pAllocationCallbacks,
+    ma_data_source **ppBackend)
+{
+    (void)pUserData; (void)pConfig;
+    mr_opus_dec_t *d = (mr_opus_dec_t *)ma_malloc(sizeof(mr_opus_dec_t), pAllocationCallbacks);
+    if (!d) return MA_OUT_OF_MEMORY;
+    memset(d, 0, sizeof(*d));
+
+    ma_data_source_config ds_cfg = ma_data_source_config_init();
+    ds_cfg.vtable = &mr_opus_ds_vtable;
+    ma_result rc = ma_data_source_init(&ds_cfg, &d->ds_base);
+    if (rc != MA_SUCCESS) { ma_free(d, pAllocationCallbacks); return rc; }
+
+    d->onRead = onRead;
+    d->onSeek = onSeek;
+    d->onTell = onTell;
+    d->pReadSeekTellUserData = pReadSeekTellUserData;
+
+    /* Pre-read initial data for Ogg page detection.
+     * opusfile's op_open_callbacks takes initial_data + initial_bytes which
+     * it processes FIRST before calling our read callback, so we must NOT
+     * also serve this data from the read callback. Set prebuf_pos = prebuf_fill
+     * before calling op_open_callbacks so the read callback skips past prebuf. */
+    size_t got = 0;
+    onRead(pReadSeekTellUserData, d->prebuf, sizeof(d->prebuf), &got);
+    d->prebuf_fill = (int)got;
+    d->prebuf_pos = d->prebuf_fill; /* already consumed by initial_data param */
+
+    /* Check for OggS magic */
+    if (d->prebuf_fill < 4 ||
+        d->prebuf[0] != 'O' || d->prebuf[1] != 'g' ||
+        d->prebuf[2] != 'g' || d->prebuf[3] != 'S') {
+        ma_data_source_uninit(&d->ds_base);
+        ma_free(d, pAllocationCallbacks);
+        return MA_INVALID_FILE;
+    }
+
+    /* Open with opusfile — initial_data avoids seeking back to start */
+    int err = 0;
+    d->of = op_open_callbacks(d, &mr_opus_file_cbs,
+                              d->prebuf, d->prebuf_fill, &err);
+    if (!d->of) {
+        FILE *ef = fopen("C:\\MegaMUD\\radio_error.txt", "a");
+        if (ef) { fprintf(ef, "Opus: op_open_callbacks failed err=%d prebuf=%d\n", err, d->prebuf_fill); fclose(ef); }
+        ma_data_source_uninit(&d->ds_base);
+        ma_free(d, pAllocationCallbacks);
+        return MA_INVALID_FILE;
+    }
+
+    const OpusHead *head = op_head(d->of, -1);
+    d->channels = head ? head->channel_count : 2;
+    d->sample_rate = 48000; /* Opus always decodes at 48kHz */
+
+    {
+        FILE *ef = fopen("C:\\MegaMUD\\radio_error.txt", "a");
+        if (ef) { fprintf(ef, "Opus: init OK ch=%d sr=%d\n", d->channels, d->sample_rate); fclose(ef); }
+    }
+
+    *ppBackend = (ma_data_source *)d;
+    return MA_SUCCESS;
+}
+
+static void mr_opus_backend_uninit(void *pUserData, ma_data_source *pBackend, const ma_allocation_callbacks *pAllocationCallbacks) {
+    (void)pUserData;
+    mr_opus_dec_t *d = (mr_opus_dec_t *)pBackend;
+    if (d->of) op_free(d->of);
+    ma_data_source_uninit(&d->ds_base);
+    ma_free(d, pAllocationCallbacks);
+}
+
+static ma_decoding_backend_vtable mr_opus_backend_vtable = {
+    mr_opus_backend_init,
+    NULL, NULL, NULL,
+    mr_opus_backend_uninit
+};
+
+/* ==== End Opus backend ==== */
+
 static int mr_open_decoder(void) {
-    ma_decoding_backend_vtable *custom_backends[] = { &mr_aac_backend_vtable };
+    ma_decoding_backend_vtable *custom_backends[] = { &mr_opus_backend_vtable, &mr_aac_backend_vtable };
     ma_decoder_config dec_cfg = ma_decoder_config_init(ma_format_f32, 2, MR_SAMPLE_RATE);
     dec_cfg.ppCustomBackendVTables = custom_backends;
-    dec_cfg.customBackendCount = 1;
-    /* Let miniaudio try built-in decoders first (mp3/flac/wav/vorbis), then our AAC backend */
+    dec_cfg.customBackendCount = 2;
+    /* Try built-in decoders first (mp3/flac/wav/vorbis), then Opus, then AAC */
     ma_result rc = ma_decoder_init(mr_ma_read_cb, mr_ma_seek_cb, NULL, &dec_cfg, &mr_ma_dec);
     if (rc != MA_SUCCESS) {
         FILE *f = fopen("C:\\MegaMUD\\radio_error.txt", "a");
-        if (f) { fprintf(f, "ma_decoder_init failed: %d, net_avail=%d\n", rc, mr_net_avail()); fclose(f); }
+        if (f) {
+            /* Log the first bytes to help identify unknown formats */
+            int avail = mr_net_avail();
+            fprintf(f, "ma_decoder_init FAILED: rc=%d, net_avail=%d, first bytes:", rc, avail);
+            int peek = (avail > 32) ? 32 : avail;
+            for (int i = 0; i < peek; i++)
+                fprintf(f, " %02X", mr_net_ring[(mr_net_r + i) % MR_NET_RING_SZ]);
+            /* Also print as ASCII for content-type hints */
+            fprintf(f, " \"");
+            for (int i = 0; i < peek; i++) {
+                unsigned char b = mr_net_ring[(mr_net_r + i) % MR_NET_RING_SZ];
+                fprintf(f, "%c", (b >= 32 && b < 127) ? b : '.');
+            }
+            fprintf(f, "\"\n");
+            fclose(f);
+        }
         return 0;
     }
     mr_dec_inited = 1;
