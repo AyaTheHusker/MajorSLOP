@@ -98,8 +98,9 @@ typedef struct {
 /* Hex-to-float helper: RGB(0xCC, 0xAA, 0x44) */
 #define F3(r,g,b) {(r)/255.0f, (g)/255.0f, (b)/255.0f}
 
-#define NUM_THEMES 17
+#define NUM_THEMES 18
 static const ui_theme_t ui_themes[NUM_THEMES] = {
+    {"Classic ANSI",   F3(24,24,24),   F3(192,192,192), F3(128,128,128), F3(85,85,255)},
     {"Grey Lord",      F3(12,12,28),   F3(200,200,224), F3(102,102,170), F3(68,68,204)},
     {"Black Fort",     F3(4,4,10),     F3(153,154,176), F3(68,68,102),   F3(51,51,102)},
     {"Khazarad",       F3(18,14,8),    F3(212,196,160), F3(138,122,86),  F3(170,136,68)},
@@ -123,6 +124,8 @@ static const ui_theme_t ui_themes[NUM_THEMES] = {
 
 typedef struct { int w, h; const char *name; } res_t;
 static res_t resolutions[] = {
+    { 3840, 2160, "3840x2160 (4K UHD)" },
+    { 2560, 1440, "2560x1440 (QHD)" },
     { 1920, 1080, "1920x1080 (Full HD)" },
     { 1600,  900, "1600x900" },
     { 1366,  768, "1366x768" },
@@ -242,7 +245,19 @@ static void apply_theme_palette(int theme_idx)
 
     static const float specs[NUM_THEMES][8][5][4] = {
 
-    /* 0: Grey Lord — cold steel blues, icy silvers */
+    /* 0: Classic ANSI — exact standard ANSI colors, no tinting */
+    {
+     /*blk*/ {KF(0,0,0.0,0.02), KF(1,0,0.0,0.02), {0},{0},{0}},
+     /*red*/ {KF(0,0,1.0,0.67), KF(1,0,1.0,0.67), {0},{0},{0}},
+     /*grn*/ {KF(0,120,1.0,0.67), KF(1,120,1.0,0.67), {0},{0},{0}},
+     /*brn*/ {KF(0,30,1.0,0.67), KF(1,30,1.0,0.67), {0},{0},{0}},
+     /*blu*/ {KF(0,240,1.0,0.67), KF(1,240,1.0,0.67), {0},{0},{0}},
+     /*mag*/ {KF(0,300,1.0,0.67), KF(1,300,1.0,0.67), {0},{0},{0}},
+     /*cyn*/ {KF(0,180,1.0,0.67), KF(1,180,1.0,0.67), {0},{0},{0}},
+     /*wht*/ {KF(0,0,0.0,0.67), KF(1,0,0.0,0.67), {0},{0},{0}},
+    },
+
+    /* 1: Grey Lord — cold steel blues, icy silvers */
     {
      /*blk*/ {KF(0,220,0.1,0.04), KF(0.5,230,0.15,0.06), KF(1,220,0.1,0.04), {0},{0}},
      /*red*/ {KF(0,200,0.5,0.50), KF(0.3,215,0.6,0.65), KF(0.6,230,0.55,0.70), KF(0.8,240,0.5,0.60), KF(1,220,0.4,0.55)},
@@ -254,7 +269,7 @@ static void apply_theme_palette(int theme_idx)
      /*wht*/ {KF(0,220,0.12,0.70), KF(0.3,225,0.15,0.80), KF(0.6,230,0.1,0.85), KF(1,220,0.08,0.75), {0}},
     },
 
-    /* 1: Black Fort — deep indigo, cold steel, midnight */
+    /* 2: Black Fort — deep indigo, cold steel, midnight */
     {
      {KF(0,240,0.1,0.02), KF(1,240,0.1,0.03), {0},{0},{0}},
      {KF(0,250,0.5,0.35), KF(0.3,260,0.55,0.45), KF(0.7,275,0.5,0.50), KF(1,265,0.45,0.40), {0}},
@@ -266,7 +281,7 @@ static void apply_theme_palette(int theme_idx)
      {KF(0,235,0.1,0.55), KF(0.5,240,0.12,0.65), KF(1,235,0.08,0.58), {0},{0}},
     },
 
-    /* 2: Khazarad — warm amber, burnished gold, aged leather */
+    /* 3: Khazarad — warm amber, burnished gold, aged leather */
     {
      {KF(0,30,0.15,0.04), KF(1,35,0.2,0.06), {0},{0},{0}},
      {KF(0,5,0.7,0.55), KF(0.3,15,0.75,0.65), KF(0.6,25,0.7,0.72), KF(0.8,35,0.65,0.68), KF(1,20,0.6,0.58)},
@@ -278,7 +293,7 @@ static void apply_theme_palette(int theme_idx)
      {KF(0,35,0.15,0.72), KF(0.4,40,0.2,0.82), KF(0.7,45,0.15,0.85), KF(1,38,0.1,0.78), {0}},
     },
 
-    /* 3: Silvermere — silver, lavender, moonlight */
+    /* 4: Silvermere — silver, lavender, moonlight */
     {
      {KF(0,250,0.05,0.04), KF(1,250,0.05,0.05), {0},{0},{0}},
      {KF(0,260,0.35,0.60), KF(0.3,270,0.4,0.72), KF(0.7,280,0.35,0.68), KF(1,265,0.3,0.62), {0}},
@@ -290,7 +305,7 @@ static void apply_theme_palette(int theme_idx)
      {KF(0,240,0.08,0.78), KF(0.3,245,0.1,0.85), KF(0.7,250,0.06,0.88), KF(1,242,0.05,0.82), {0}},
     },
 
-    /* 4: Annora — soft lavender, pink, ethereal */
+    /* 5: Annora — soft lavender, pink, ethereal */
     {
      {KF(0,270,0.05,0.05), KF(1,270,0.05,0.06), {0},{0},{0}},
      {KF(0,310,0.45,0.65), KF(0.3,320,0.5,0.75), KF(0.6,330,0.45,0.78), KF(0.8,340,0.4,0.72), KF(1,325,0.38,0.68)},
@@ -302,7 +317,7 @@ static void apply_theme_palette(int theme_idx)
      {KF(0,270,0.08,0.82), KF(0.3,275,0.1,0.88), KF(0.7,280,0.06,0.92), KF(1,272,0.05,0.85), {0}},
     },
 
-    /* 5: Jorah — deep ocean blue, sapphire, wave crests */
+    /* 6: Jorah — deep ocean blue, sapphire, wave crests */
     {
      {KF(0,220,0.15,0.03), KF(1,225,0.15,0.05), {0},{0},{0}},
      {KF(0,210,0.6,0.50), KF(0.3,220,0.7,0.62), KF(0.6,230,0.65,0.68), KF(0.8,240,0.6,0.60), KF(1,225,0.55,0.55)},
@@ -314,7 +329,7 @@ static void apply_theme_palette(int theme_idx)
      {KF(0,215,0.1,0.68), KF(0.4,220,0.15,0.78), KF(0.7,225,0.1,0.82), KF(1,218,0.08,0.72), {0}},
     },
 
-    /* 6: Putakwa — emerald jungle, teal, tropical */
+    /* 7: Putakwa — emerald jungle, teal, tropical */
     {
      {KF(0,160,0.15,0.03), KF(1,165,0.15,0.05), {0},{0},{0}},
      {KF(0,140,0.6,0.50), KF(0.3,150,0.7,0.62), KF(0.6,165,0.65,0.68), KF(0.8,155,0.6,0.60), KF(1,145,0.55,0.55)},
@@ -326,7 +341,7 @@ static void apply_theme_palette(int theme_idx)
      {KF(0,160,0.1,0.72), KF(0.4,168,0.15,0.82), KF(0.7,175,0.1,0.85), KF(1,165,0.08,0.76), {0}},
     },
 
-    /* 7: Void — deep purple, violet nebula, cosmic */
+    /* 8: Void — deep purple, violet nebula, cosmic */
     {
      {KF(0,280,0.15,0.03), KF(1,285,0.15,0.04), {0},{0},{0}},
      {KF(0,320,0.6,0.50), KF(0.3,335,0.65,0.62), KF(0.6,350,0.6,0.58), KF(1,330,0.55,0.52), {0}},
@@ -338,7 +353,7 @@ static void apply_theme_palette(int theme_idx)
      {KF(0,278,0.1,0.68), KF(0.4,285,0.12,0.78), KF(0.7,290,0.08,0.82), KF(1,282,0.06,0.72), {0}},
     },
 
-    /* 8: Ozzrinom — crimson blood, dark ruby, embers */
+    /* 9: Ozzrinom — crimson blood, dark ruby, embers */
     {
      {KF(0,355,0.15,0.03), KF(1,0,0.15,0.05), {0},{0},{0}},
      {KF(0,350,0.75,0.55), KF(0.3,0,0.8,0.68), KF(0.6,10,0.75,0.72), KF(0.8,5,0.7,0.65), KF(1,355,0.65,0.58)},
@@ -350,7 +365,7 @@ static void apply_theme_palette(int theme_idx)
      {KF(0,358,0.1,0.70), KF(0.4,2,0.15,0.80), KF(0.7,5,0.1,0.82), KF(1,0,0.08,0.75), {0}},
     },
 
-    /* 9: Phoenix — fire orange, solar flare, molten gold */
+    /* 10: Phoenix — fire orange, solar flare, molten gold */
     {
      {KF(0,20,0.2,0.04), KF(1,25,0.2,0.06), {0},{0},{0}},
      {KF(0,0,0.8,0.58), KF(0.25,10,0.85,0.72), KF(0.5,25,0.82,0.80), KF(0.75,40,0.78,0.85), KF(1,15,0.7,0.65)},
@@ -362,7 +377,7 @@ static void apply_theme_palette(int theme_idx)
      {KF(0,28,0.12,0.78), KF(0.3,35,0.18,0.88), KF(0.6,42,0.15,0.92), KF(1,32,0.1,0.82), {0}},
     },
 
-    /* 10: Mad Wizard — electric cyan, neon, arcane */
+    /* 11: Mad Wizard — electric cyan, neon, arcane */
     {
      {KF(0,190,0.15,0.03), KF(1,195,0.15,0.05), {0},{0},{0}},
      {KF(0,180,0.7,0.55), KF(0.25,190,0.8,0.70), KF(0.5,200,0.75,0.78), KF(0.75,210,0.7,0.72), KF(1,195,0.65,0.60)},
@@ -374,7 +389,7 @@ static void apply_theme_palette(int theme_idx)
      {KF(0,192,0.12,0.78), KF(0.3,198,0.18,0.88), KF(0.7,205,0.12,0.92), KF(1,195,0.08,0.82), {0}},
     },
 
-    /* 11: Tasloi — deep forest, moss, woodland */
+    /* 12: Tasloi — deep forest, moss, woodland */
     {
      {KF(0,110,0.15,0.03), KF(1,115,0.15,0.05), {0},{0},{0}},
      {KF(0,80,0.6,0.45), KF(0.3,95,0.65,0.55), KF(0.7,110,0.6,0.52), KF(1,90,0.55,0.48), {0}},
@@ -386,7 +401,7 @@ static void apply_theme_palette(int theme_idx)
      {KF(0,115,0.08,0.65), KF(0.4,120,0.12,0.75), KF(0.7,125,0.08,0.78), KF(1,118,0.06,0.70), {0}},
     },
 
-    /* 12: Frostborn — ice blue, arctic frost, glacial */
+    /* 13: Frostborn — ice blue, arctic frost, glacial */
     {
      {KF(0,200,0.1,0.04), KF(1,205,0.1,0.05), {0},{0},{0}},
      {KF(0,195,0.45,0.58), KF(0.3,205,0.5,0.72), KF(0.6,215,0.48,0.78), KF(0.8,210,0.42,0.72), KF(1,200,0.4,0.62)},
@@ -398,7 +413,7 @@ static void apply_theme_palette(int theme_idx)
      {KF(0,200,0.06,0.82), KF(0.3,205,0.08,0.90), KF(0.7,210,0.05,0.92), KF(1,202,0.04,0.85), {0}},
     },
 
-    /* 13: Sandstorm — golden sand, desert sun, dune */
+    /* 14: Sandstorm — golden sand, desert sun, dune */
     {
      {KF(0,40,0.2,0.04), KF(1,45,0.2,0.06), {0},{0},{0}},
      {KF(0,15,0.7,0.55), KF(0.3,25,0.75,0.68), KF(0.6,38,0.72,0.75), KF(0.8,30,0.68,0.70), KF(1,20,0.62,0.60)},
@@ -410,7 +425,7 @@ static void apply_theme_palette(int theme_idx)
      {KF(0,42,0.1,0.78), KF(0.3,48,0.15,0.88), KF(0.7,52,0.1,0.90), KF(1,45,0.08,0.82), {0}},
     },
 
-    /* 14: Crystal Cavern — amethyst purple, crystal facets */
+    /* 15: Crystal Cavern — amethyst purple, crystal facets */
     {
      {KF(0,270,0.12,0.04), KF(1,275,0.12,0.05), {0},{0},{0}},
      {KF(0,290,0.6,0.52), KF(0.3,305,0.65,0.65), KF(0.6,318,0.62,0.70), KF(0.8,310,0.58,0.65), KF(1,298,0.55,0.55)},
@@ -422,7 +437,7 @@ static void apply_theme_palette(int theme_idx)
      {KF(0,270,0.08,0.75), KF(0.3,278,0.12,0.85), KF(0.7,285,0.08,0.88), KF(1,275,0.06,0.80), {0}},
     },
 
-    /* 15: Afroman / Giovanni — RED WHITE BLUE patriot, always R-W-B with slight hue shifts */
+    /* 16: Afroman / Giovanni — RED WHITE BLUE patriot, always R-W-B with slight hue shifts */
     {
      /*blk*/ {KF(0,230,0.2,0.05), KF(1,225,0.15,0.07), {0},{0},{0}},
      /*red*/ {KF(0,0,0.90,0.72), KF(0.25,0,0.06,0.95), KF(0.5,220,0.85,0.68), KF(0.75,355,0.08,0.93), KF(1,5,0.88,0.70)},
@@ -434,7 +449,7 @@ static void apply_theme_palette(int theme_idx)
      /*wht*/ {KF(0,0,0.06,0.94), KF(0.25,0,0.85,0.70), KF(0.5,355,0.06,0.96), KF(0.75,225,0.82,0.66), KF(1,5,0.05,0.95)},
     },
 
-    /* 16: Bog Lord — murky marsh, sickly green, swamp gas */
+    /* 17: Bog Lord — murky marsh, sickly green, swamp gas */
     {
      {KF(0,90,0.2,0.03), KF(1,95,0.2,0.05), {0},{0},{0}},
      {KF(0,60,0.55,0.40), KF(0.3,75,0.6,0.50), KF(0.7,90,0.55,0.48), KF(1,72,0.5,0.42), {0}},
@@ -480,7 +495,7 @@ static void apply_theme_palette(int theme_idx)
 
     /* Afroman override: ALL 16 ANSI colors get their own WILDLY distinct R-W-B gradient.
      * Each entry: {red_rgb, white_rgb, blue_rgb} — must look completely different. */
-    if (theme_idx == 15) {
+    if (theme_idx == 16) {
         static const float afro[16][3][3] = {
             /* 0  dark black:  dim brick,         grey-white,       dim slate */
             {{0.40f,0.08f,0.08f}, {0.65f,0.65f,0.68f}, {0.15f,0.18f,0.40f}},
@@ -554,6 +569,7 @@ static void apply_theme_palette(int theme_idx)
 static int fs_res_idx = 0;     /* fullscreen resolution index */
 static int fs_width = 1920;
 static int fs_height = 1080;
+
 
 /* ---- Font system ----
  * current_font: -1 = original CP437 bitmap, 0+ = TTF font index.
@@ -681,10 +697,11 @@ static int ttf_loaded[MAX_TTF_FONTS] = {0};
 #define VKM_EXT_SEP1     2   /* separator */
 #define VKM_EXT_HIDEMM   3   /* Hide/Show MegaMUD */
 #define VKM_EXT_RNDRECAP 4   /* Show Combat Round Totals */
-#define VKM_EXT_SEP2     5   /* separator */
-#define VKM_EXT_SAVE     6   /* Save Settings */
-#define VKM_EXT_RESET    7   /* Reset to Defaults */
-#define VKM_EXT_COUNT    8
+#define VKM_EXT_HDR      5   /* HDR Toggle */
+#define VKM_EXT_SEP2     6   /* separator */
+#define VKM_EXT_SAVE     7   /* Save Settings */
+#define VKM_EXT_RESET    8   /* Reset to Defaults */
+#define VKM_EXT_COUNT    9
 
 /* Extras submenu items */
 #define VKM_SUB_XTRA2    8
@@ -706,8 +723,50 @@ static int ttf_loaded[MAX_TTF_FONTS] = {0};
 #define VKM_BG_COUNT     1
 
 static int megamud_hidden = 0; /* 1 = MegaMUD windows hidden, VK-only mode */
-static int snd_wnd_idx = -1;  /* Sound Settings window index (forward decl) */
-static void snd_open_window(void);
+
+/* ---- PTT Voice Overlay ---- */
+/* Pointers into voice.dll exported data (resolved lazily) */
+static volatile float *vox_level_ptr = NULL;
+static volatile int   *vox_active_ptr = NULL;
+static char           *vox_text_ptr = NULL;
+static volatile DWORD *vox_text_tick_ptr = NULL;
+static float          *vox_wave_ptr = NULL;
+static volatile int   *vox_wave_pos_ptr = NULL;
+static int vox_resolved = 0;
+static float vox_fade = 0.0f; /* fade-out alpha after PTT release */
+
+static void vox_resolve(void) {
+    if (vox_resolved) return;
+    HMODULE vm = GetModuleHandleA("voice.dll");
+    if (!vm) vm = LoadLibraryA("voice.dll");
+    if (!vm) { vox_resolved = -1; return; }
+    vox_level_ptr     = (volatile float *)GetProcAddress(vm, "voice_audio_level");
+    vox_active_ptr    = (volatile int *)GetProcAddress(vm, "voice_ptt_active");
+    vox_text_ptr      = (char *)GetProcAddress(vm, "voice_last_text");
+    vox_text_tick_ptr = (volatile DWORD *)GetProcAddress(vm, "voice_last_text_tick");
+    vox_wave_ptr      = (float *)GetProcAddress(vm, "voice_waveform");
+    vox_wave_pos_ptr  = (volatile int *)GetProcAddress(vm, "voice_wave_pos");
+    vox_resolved = (vox_level_ptr && vox_active_ptr) ? 1 : -1;
+}
+
+/* Sound settings panel state */
+static int   snd_visible = 0;
+static float snd_x = 80, snd_y = 60;
+static float snd_w = 440, snd_h = 520;
+static int   snd_dragging = 0;
+static float snd_drag_ox = 0, snd_drag_oy = 0;
+static int   snd_active_slider = -1;  /* 0 = volume */
+static int   snd_scroll = 0;
+static void  snd_open_window(void);
+static void  snd_draw(int vp_w, int vp_h);
+static int   snd_mouse_down(int mx, int my);
+static void  snd_mouse_move(int mx, int my);
+static void  snd_mouse_up(void);
+/* Forward declaration for slider helper used by multiple panels */
+static void clr_draw_slider(float x0, float y0, float w, float h,
+                             float val, float vmin, float vmax,
+                             const char *label, const char *fmt_val,
+                             int vp_w, int vp_h, const ui_theme_t *t);
 static int  pst_visible = 0;
 static int  pst_round_recap = 1;  /* Show Combat Round Totals in terminal */
 static char pst_last_recap[256] = "";  /* plain-text last round recap for MMUDPy */
@@ -848,7 +907,8 @@ static void push_text(int px, int py, const char *str,
 #define VKW_CHAR_H       18
 #define VKW_PAD          4
 #define VKW_CLOSE_W      20     /* close button width */
-#define VKW_RESIZE_ZONE  8      /* pixels from edge = resize grab */
+#define VKW_RESIZE_ZONE  6      /* pixels from edge = resize grab */
+#define VKW_CORNER_ZONE  14     /* larger zone at corners for diagonal resize */
 #define VKW_INPUT_H      20     /* input line height */
 #define VKW_MIN_W        160
 #define VKW_MIN_H        100
@@ -1591,17 +1651,55 @@ static int vkw_hit_titlebar(vkw_window_t *w, int mx, int my)
             my >= (int)w->y && my < (int)(w->y + titlebar_h));
 }
 
-/* Returns edge bitmask: 1=left, 2=right, 4=top, 8=bottom, 0=none */
+/* Returns edge bitmask: 1=left, 2=right, 4=top, 8=bottom, 0=none.
+ * Corners use a larger grab zone for diagonal resize. Titlebar area
+ * is excluded from top-edge resize to prevent drag/resize confusion. */
 static int vkw_hit_resize(vkw_window_t *w, int mx, int my)
 {
     int ix = (int)w->x, iy = (int)w->y;
     int iw = (int)w->w, ih = (int)w->h;
+    int rz = VKW_RESIZE_ZONE;
+    int cz = VKW_CORNER_ZONE;
     int edge = 0;
-    /* Must be inside outer zone but outside inner area (except titlebar handled separately) */
-    if (mx >= ix && mx < ix + VKW_RESIZE_ZONE) edge |= 1; /* left */
-    if (mx >= ix + iw - VKW_RESIZE_ZONE && mx < ix + iw) edge |= 2; /* right */
-    if (my >= iy && my < iy + VKW_RESIZE_ZONE) edge |= 4; /* top */
-    if (my >= iy + ih - VKW_RESIZE_ZONE && my < iy + ih) edge |= 8; /* bottom */
+
+    /* Check if point is even near this window */
+    if (mx < ix - 2 || mx > ix + iw + 2 || my < iy - 2 || my > iy + iw + 2) return 0;
+
+    int near_left   = (mx >= ix && mx < ix + rz);
+    int near_right  = (mx >= ix + iw - rz && mx < ix + iw);
+    int near_top    = (my >= iy && my < iy + rz);
+    int near_bottom = (my >= iy + ih - rz && my < iy + ih);
+
+    /* Corner zones: larger grab area at the 4 corners */
+    int corner_left   = (mx >= ix && mx < ix + cz);
+    int corner_right  = (mx >= ix + iw - cz && mx < ix + iw);
+    int corner_top    = (my >= iy && my < iy + cz);
+    int corner_bottom = (my >= iy + ih - cz && my < iy + ih);
+
+    /* Bottom-right corner (most common resize) */
+    if (corner_bottom && corner_right) return 2 | 8;
+    /* Bottom-left corner */
+    if (corner_bottom && corner_left) return 1 | 8;
+    /* Top-right corner */
+    if (corner_top && corner_right) return 2 | 4;
+    /* Top-left corner */
+    if (corner_top && corner_left) return 1 | 4;
+
+    /* Edges — but exclude top edge in titlebar area to prevent drag confusion */
+    if (near_left)   edge |= 1;
+    if (near_right)  edge |= 2;
+    if (near_bottom) edge |= 8;
+    if (near_top) {
+        /* Only allow top resize outside the titlebar zone */
+        int ch = (int)(VKW_CHAR_H * w->font_scale);
+        if (ch < 8) ch = 8;
+        int titlebar_h = ch + 8;
+        if (my < iy + titlebar_h) {
+            /* In titlebar — don't treat as top resize */
+        } else {
+            edge |= 4;
+        }
+    }
     return edge;
 }
 
@@ -1622,6 +1720,14 @@ static int vkw_mouse_down(int mx, int my)
         vkw_close(idx);
         return 1;
     }
+    /* Titlebar drag takes priority over edge resize to prevent confusion */
+    if (vkw_hit_titlebar(w, mx, my)) {
+        w->dragging = 1;
+        w->drag_ox = (float)mx - w->x;
+        w->drag_oy = (float)my - w->y;
+        return 1;
+    }
+    /* Edge resize (checked after titlebar so drag wins near top) */
     {
         int edge = vkw_hit_resize(w, mx, my);
         if (edge) {
@@ -1635,12 +1741,6 @@ static int vkw_mouse_down(int mx, int my)
             w->resize_sy = w->y;
             return 1;
         }
-    }
-    if (vkw_hit_titlebar(w, mx, my)) {
-        w->dragging = 1;
-        w->drag_ox = (float)mx - w->x;
-        w->drag_oy = (float)my - w->y;
-        return 1;
     }
 
     /* Click in content area = start text selection */
@@ -1663,6 +1763,48 @@ static int vkw_mouse_down(int mx, int my)
     return 1;
 }
 
+/* Returns the appropriate resize cursor for a VKW window edge, or NULL */
+static HCURSOR vkw_resize_cursor(int edge) {
+    if (!edge) return NULL;
+    int lr = edge & 3;  /* left/right bits */
+    int tb = edge & 12; /* top/bottom bits */
+    if (lr && tb) {
+        /* Corner — diagonal */
+        if ((lr == 1 && tb == 4) || (lr == 2 && tb == 8))
+            return LoadCursor(NULL, IDC_SIZENWSE); /* NW-SE: top-left or bottom-right */
+        else
+            return LoadCursor(NULL, IDC_SIZENESW); /* NE-SW: top-right or bottom-left */
+    }
+    if (lr) return LoadCursor(NULL, IDC_SIZEWE);   /* left or right edge */
+    if (tb) return LoadCursor(NULL, IDC_SIZENS);   /* top or bottom edge */
+    return NULL;
+}
+
+/* Check all VKW windows for hover cursor, returns 1 if cursor was set */
+static int vkw_update_cursor(int mx, int my) {
+    for (int i = VKW_MAX_WINDOWS - 1; i >= 0; i--) {
+        vkw_window_t *w = &vkw_windows[i];
+        if (!w->active) continue;
+        /* Check if mouse is in this window's bounds at all */
+        if (mx < (int)w->x || mx >= (int)(w->x + w->w) ||
+            my < (int)w->y || my >= (int)(w->y + w->h)) continue;
+        /* Check titlebar first — show normal arrow for drag area */
+        if (vkw_hit_titlebar(w, mx, my)) {
+            SetCursor(LoadCursor(NULL, IDC_ARROW));
+            return 1;
+        }
+        int edge = vkw_hit_resize(w, mx, my);
+        if (edge) {
+            HCURSOR c = vkw_resize_cursor(edge);
+            if (c) { SetCursor(c); return 1; }
+        }
+        /* Inside window but not on edge — normal cursor */
+        SetCursor(LoadCursor(NULL, IDC_ARROW));
+        return 1;
+    }
+    return 0;
+}
+
 static int vkw_mouse_move(int mx, int my)
 {
     for (int i = 0; i < VKW_MAX_WINDOWS; i++) {
@@ -1681,6 +1823,8 @@ static int vkw_mouse_move(int mx, int my)
             float dx = (float)mx - w->resize_ox;
             float dy = (float)my - w->resize_oy;
             int e = w->resize_edge;
+            /* Keep resize cursor visible while dragging */
+            { HCURSOR rc = vkw_resize_cursor(e); if (rc) SetCursor(rc); }
             if (e & 2) { /* right edge */
                 w->w = w->resize_sw + dx;
                 if (w->w < VKW_MIN_W) w->w = VKW_MIN_W;
@@ -2722,6 +2866,14 @@ static VkSurfaceKHR vk_surface = VK_NULL_HANDLE;
 static VkSwapchainKHR vk_swapchain = VK_NULL_HANDLE;
 static VkFormat vk_sc_fmt;
 static VkExtent2D vk_sc_extent;
+
+/* HDR support */
+static int hdr_available = 0;       /* 1 = HDR formats detected */
+static int hdr_enabled = 0;         /* 1 = user wants HDR */
+static int hdr_ext_available = 0;   /* 1 = VK_EXT_swapchain_colorspace supported */
+static char hdr_standard[32] = "";  /* e.g. "HDR10", "scRGB", etc. */
+static int  vk_vsync = 1;          /* 1 = VSync (FIFO), 0 = uncapped (MAILBOX/IMMEDIATE) */
+static int  snd_res_sel = -1;      /* selected resolution index, -1 = auto (native) */
 static uint32_t vk_sc_count = 0;
 static VkImage *vk_sc_images = NULL;
 static VkImageView *vk_sc_views = NULL;
@@ -2852,7 +3004,7 @@ static float pp_hue = 0.0f;          /* -180..180 degrees */
 static float pp_saturation = 1.0f;   /* 0..2 */
 
 /* Color panel state */
-static int   sp_focus = -1;  /* settings panel focus: 0=clr, 1=bgp, 2=smk, 3=shd */
+static int   sp_focus = -1;  /* settings panel focus: 0=clr, 1=bgp, 2=smk, 3=shd, 4=snd */
 static int   clr_visible = 0;
 static float clr_x = 120.0f, clr_y = 80.0f;
 static float clr_w = 280.0f, clr_h = 200.0f;
@@ -2868,7 +3020,7 @@ static void  clr_mouse_up(void);
 /* ---- Vulkan Round Timer Widget ---- */
 #define VRT_DEFAULT_SIZE 160
 #define VRT_MIN_SIZE      80
-#define VRT_MAX_SIZE     400
+#define VRT_MAX_SIZE     500
 #define VRT_ARC_SEGS      64     /* segments for smooth arc */
 #define VRT_PARTICLE_MAX   24
 
@@ -2910,10 +3062,13 @@ static int  vrt_ctx_hover = -1;
 #define VRT_CTX_SMALL     3
 #define VRT_CTX_NORMAL    4
 #define VRT_CTX_LARGE     5
-#define VRT_CTX_SEP2      6
-#define VRT_CTX_RESET     7
-#define VRT_CTX_HIDE      8
-#define VRT_CTX_COUNT     9
+#define VRT_CTX_XLARGE    6
+#define VRT_CTX_SEP2      7
+#define VRT_CTX_ORBITS    8
+#define VRT_CTX_SEP3      9
+#define VRT_CTX_RESET    10
+#define VRT_CTX_HIDE     11
+#define VRT_CTX_COUNT    12
 
 /* Spell input dialog state */
 static int  vrt_spell_input = 0;   /* 1 = showing spell input */
@@ -2921,12 +3076,53 @@ static char vrt_spell_buf[22] = {0};
 static int  vrt_spell_len = 0;
 static int  vrt_spell_cursor = 0;
 
-/* Particles */
+/* Particles (comet trail) */
 static struct {
     float x, y, vx, vy, alpha, r, g, b;
     int alive;
 } vrt_particles[VRT_PARTICLE_MAX];
 static int vrt_particle_idx = 0;
+
+/* Orbital particles — Lissajous orbits around the ring */
+#define VRT_ORBIT_MAX  32
+static struct {
+    float birth_time;    /* fx_time at spawn */
+    float phase;         /* unique phase offset */
+    float freq_a, freq_b; /* Lissajous frequency pair */
+    float orbit_r;       /* orbit radius (fraction of ring R) */
+    float r, g, b;       /* color */
+    int   alive;
+} vrt_orbits[VRT_ORBIT_MAX];
+static int vrt_orbit_idx = 0;
+static int vrt_orbits_visible = 1; /* toggle from context menu */
+static int vrt_last_spawn_round = -1; /* prevent double-spawning same round */
+
+static void vrt_spawn_orbits(float cr, float cg, float cb)
+{
+    /* Spawn a batch of orbital particles with varied Lissajous ratios */
+    int batch = 12;
+    for (int i = 0; i < batch; i++) {
+        int idx = vrt_orbit_idx % VRT_ORBIT_MAX;
+        vrt_orbits[idx].birth_time = fx_time;
+        vrt_orbits[idx].phase = (float)i * 0.52f + fx_time * 3.7f;
+        /* Varied frequency ratios for complex woven patterns */
+        float ratios_a[] = {2,3,3,5,4,5,7,3,2,5,4,7};
+        float ratios_b[] = {3,2,5,3,3,4,4,7,5,2,7,5};
+        vrt_orbits[idx].freq_a = ratios_a[i % 12];
+        vrt_orbits[idx].freq_b = ratios_b[i % 12];
+        vrt_orbits[idx].orbit_r = 0.65f + (float)(i % 5) * 0.04f;
+        /* Color: tinted from current arc color with variation */
+        float hue_var = (float)i * 0.08f;
+        vrt_orbits[idx].r = cr * (0.7f + hue_var) + 0.15f;
+        vrt_orbits[idx].g = cg * (0.9f - hue_var * 0.3f) + 0.1f;
+        vrt_orbits[idx].b = cb * (0.8f + hue_var * 0.5f) + 0.1f;
+        if (vrt_orbits[idx].r > 1) vrt_orbits[idx].r = 1;
+        if (vrt_orbits[idx].g > 1) vrt_orbits[idx].g = 1;
+        if (vrt_orbits[idx].b > 1) vrt_orbits[idx].b = 1;
+        vrt_orbits[idx].alive = 1;
+        vrt_orbit_idx++;
+    }
+}
 
 static VkDescriptorSetLayout vk_desc_layout = VK_NULL_HANDLE;
 static VkDescriptorPool vk_desc_pool = VK_NULL_HANDLE;
@@ -3036,6 +3232,7 @@ static float last_cw_px = 9.0f, last_ch_px = 17.0f;  /* cell dimensions for smok
 
 static void vkt_destroy_swapchain(void);
 static int  vkt_create_swapchain(void);
+static void vkt_recreate_swapchain(void);
 static void vkt_cleanup_vulkan(void);
 void vkt_show(void);
 void vkt_hide(void);
@@ -3581,6 +3778,22 @@ static float vrt_sqrtf(float x) {
 
 /* Push a filled arc (ring wedge) using proper trapezoid quads in NDC.
  * Each segment is 4 vertices: outer0, outer1, inner1, inner0 */
+/* DPI scale factor: sizes authored for 1080p, scale proportionally */
+static float vrt_dpi_scale(int vp_h) {
+    return (float)vp_h / 1080.0f;
+}
+
+/* Adaptive segment count based on pixel radius — smooth at any DPI */
+static int vrt_auto_segs(float pixel_radius, int base_segs) {
+    int s = (int)(pixel_radius * 0.8f);
+    if (s < base_segs) s = base_segs;
+    if (s > 256) s = 256;
+    return s;
+}
+
+/* Feather width in pixels for anti-aliased edges */
+#define VRT_FEATHER 1.5f
+
 static void vrt_push_arc(float cx, float cy, float r_inner, float r_outer,
                          float angle_start, float angle_end,
                          float r1, float g1, float b1,
@@ -3589,6 +3802,9 @@ static void vrt_push_arc(float cx, float cy, float r_inner, float r_outer,
 {
     if (angle_end <= angle_start) return;
     float step = (angle_end - angle_start) / (float)segs;
+    float feather = VRT_FEATHER;
+    float fi = r_inner - feather; if (fi < 0) fi = 0;
+    float fo = r_outer + feather;
     for (int i = 0; i < segs; i++) {
         float t = ((float)i + 0.5f) / (float)segs;
         float a0 = angle_start + step * (float)i;
@@ -3596,38 +3812,88 @@ static void vrt_push_arc(float cx, float cy, float r_inner, float r_outer,
         float cr = r1 + (r2 - r1) * t;
         float cg = g1 + (g2 - g1) * t;
         float cb = b1 + (b2 - b1) * t;
-        /* 4 corners of the wedge quad */
-        float ox0 = cx + r_outer * vrt_cosf(a0);
-        float oy0 = cy - r_outer * vrt_sinf(a0);
-        float ox1 = cx + r_outer * vrt_cosf(a1);
-        float oy1 = cy - r_outer * vrt_sinf(a1);
-        float ix1 = cx + r_inner * vrt_cosf(a1);
-        float iy1 = cy - r_inner * vrt_sinf(a1);
-        float ix0 = cx + r_inner * vrt_cosf(a0);
-        float iy0 = cy - r_inner * vrt_sinf(a0);
-        push_quad_free(VRT_X(ox0), VRT_Y(oy0), VRT_X(ox1), VRT_Y(oy1),
-                       VRT_X(ix1), VRT_Y(iy1), VRT_X(ix0), VRT_Y(iy0),
-                       cr, cg, cb, alpha);
+        float c0 = vrt_cosf(a0), s0 = vrt_sinf(a0);
+        float c1 = vrt_cosf(a1), s1 = vrt_sinf(a1);
+
+        /* Inner feather strip (alpha 0 → alpha) */
+        {
+            float ox0 = cx + r_inner * c0, oy0 = cy - r_inner * s0;
+            float ox1 = cx + r_inner * c1, oy1 = cy - r_inner * s1;
+            float ix0f = cx + fi * c0,     iy0f = cy - fi * s0;
+            float ix1f = cx + fi * c1,     iy1f = cy - fi * s1;
+            push_quad_free(VRT_X(ox0), VRT_Y(oy0), VRT_X(ox1), VRT_Y(oy1),
+                           VRT_X(ix1f), VRT_Y(iy1f), VRT_X(ix0f), VRT_Y(iy0f),
+                           cr, cg, cb, alpha * 0.5f);
+        }
+        /* Main body */
+        {
+            float ox0 = cx + r_outer * c0, oy0 = cy - r_outer * s0;
+            float ox1 = cx + r_outer * c1, oy1 = cy - r_outer * s1;
+            float ix0m = cx + r_inner * c0, iy0m = cy - r_inner * s0;
+            float ix1m = cx + r_inner * c1, iy1m = cy - r_inner * s1;
+            push_quad_free(VRT_X(ox0), VRT_Y(oy0), VRT_X(ox1), VRT_Y(oy1),
+                           VRT_X(ix1m), VRT_Y(iy1m), VRT_X(ix0m), VRT_Y(iy0m),
+                           cr, cg, cb, alpha);
+        }
+        /* Outer feather strip (alpha → 0) */
+        {
+            float ox0f = cx + fo * c0,     oy0f = cy - fo * s0;
+            float ox1f = cx + fo * c1,     oy1f = cy - fo * s1;
+            float ox0 = cx + r_outer * c0, oy0 = cy - r_outer * s0;
+            float ox1 = cx + r_outer * c1, oy1 = cy - r_outer * s1;
+            push_quad_free(VRT_X(ox0f), VRT_Y(oy0f), VRT_X(ox1f), VRT_Y(oy1f),
+                           VRT_X(ox1), VRT_Y(oy1), VRT_X(ox0), VRT_Y(oy0),
+                           cr, cg, cb, alpha * 0.5f);
+        }
     }
 }
 
-/* Push a filled circle as pie-slice quads (center → edge → edge) */
+/* Push a filled circle with soft feathered edge */
 static void vrt_push_circle(float cx, float cy, float radius,
                             float r, float g, float b, float a,
                             int segs, int vp_w, int vp_h)
 {
     float step = 2.0f * (float)M_PI / (float)segs;
+    float feather = VRT_FEATHER;
+    float ri = radius - feather; if (ri < 0) ri = 0;
+    /* Solid inner disc */
     for (int i = 0; i < segs; i++) {
         float a0 = step * (float)i;
         float a1 = step * (float)(i + 1);
-        float x0 = cx + radius * vrt_cosf(a0);
-        float y0 = cy - radius * vrt_sinf(a0);
-        float x1 = cx + radius * vrt_cosf(a1);
-        float y1 = cy - radius * vrt_sinf(a1);
-        /* Pie slice: center, edge0, edge1, center (degenerate quad = triangle) */
+        float x0 = cx + ri * vrt_cosf(a0);
+        float y0 = cy - ri * vrt_sinf(a0);
+        float x1 = cx + ri * vrt_cosf(a1);
+        float y1 = cy - ri * vrt_sinf(a1);
         push_quad_free(VRT_X(cx), VRT_Y(cy), VRT_X(x0), VRT_Y(y0),
                        VRT_X(x1), VRT_Y(y1), VRT_X(cx), VRT_Y(cy),
                        r, g, b, a);
+    }
+    /* Feathered edge ring (alpha → 0) */
+    for (int i = 0; i < segs; i++) {
+        float a0 = step * (float)i;
+        float a1 = step * (float)(i + 1);
+        float c0 = vrt_cosf(a0), s0 = vrt_sinf(a0);
+        float c1 = vrt_cosf(a1), s1 = vrt_sinf(a1);
+        float ix0 = cx + ri * c0,       iy0 = cy - ri * s0;
+        float ix1 = cx + ri * c1,       iy1 = cy - ri * s1;
+        float ox0 = cx + radius * c0,   oy0 = cy - radius * s0;
+        float ox1 = cx + radius * c1,   oy1 = cy - radius * s1;
+        push_quad_free(VRT_X(ox0), VRT_Y(oy0), VRT_X(ox1), VRT_Y(oy1),
+                       VRT_X(ix1), VRT_Y(iy1), VRT_X(ix0), VRT_Y(iy0),
+                       r, g, b, a * 0.4f);
+    }
+}
+
+/* Push a soft glow circle — multiple concentric layers with decreasing alpha */
+static void vrt_push_glow(float cx, float cy, float radius, int layers,
+                          float r, float g, float b, float peak_alpha,
+                          int segs, int vp_w, int vp_h)
+{
+    for (int l = 0; l < layers; l++) {
+        float t = (float)l / (float)layers;
+        float lr = radius * (0.3f + 0.7f * t);
+        float la = peak_alpha * (1.0f - t * t); /* quadratic falloff */
+        vrt_push_circle(cx, cy, lr, r, g, b, la, segs, vp_w, vp_h);
     }
 }
 
@@ -3655,6 +3921,8 @@ static void vrt_draw(int vp_w, int vp_h)
     float cx = vrt_x + sz / 2.0f;
     float cy = vrt_y + sz / 2.0f;
     float R = sz / 2.0f;
+    int hi_segs = vrt_auto_segs(R, 64);  /* adaptive segment count */
+    int lo_segs = hi_segs / 2; if (lo_segs < 24) lo_segs = 24;
     DWORD now = GetTickCount();
     double now_d = (double)GetTickCount64();
 
@@ -3676,7 +3944,7 @@ static void vrt_draw(int vp_w, int vp_h)
     vrt_push_arc(cx, cy, R * 0.90f, R * 0.96f, 0, 2.0f*(float)M_PI,
                  rbg0*1.6f+acr*0.3f+0.10f, rbg1*1.6f+acg*0.3f+0.10f, rbg2*1.6f+acb*0.3f+0.10f,
                  rbg0*0.4f, rbg1*0.4f, rbg2*0.4f,
-                 0.8f, 96, vp_w, vp_h);
+                 0.8f, hi_segs, vp_w, vp_h);
     /* Layer 2: main ring body — accent-tinted like title bars */
     {
         float mr = acr * 0.20f + rbg0 * 0.55f;
@@ -3684,27 +3952,27 @@ static void vrt_draw(int vp_w, int vp_h)
         float mb = acb * 0.20f + rbg2 * 0.55f;
         vrt_push_arc(cx, cy, R * 0.60f, R * 0.91f, 0, 2.0f*(float)M_PI,
                      mr, mg, mb, mr, mg, mb,
-                     0.94f, 96, vp_w, vp_h);
+                     0.94f, hi_segs, vp_w, vp_h);
     }
     /* Layer 3: gloss highlight — top half of ring gets a white sheen */
     vrt_push_arc(cx, cy, R * 0.60f, R * 0.91f,
                  (float)M_PI * 0.15f, (float)M_PI * 0.85f,
                  1.0f, 1.0f, 1.0f,
                  1.0f, 1.0f, 1.0f,
-                 0.07f, 48, vp_w, vp_h);
+                 0.07f, lo_segs, vp_w, vp_h);
     /* Layer 4: inner ring shadow (inset depth) */
     vrt_push_arc(cx, cy, R * 0.56f, R * 0.63f, 0, 2.0f*(float)M_PI,
                  rbg0*0.25f, rbg1*0.25f, rbg2*0.25f,
                  rbg0*1.0f+acr*0.15f+0.04f, rbg1*1.0f+acg*0.15f+0.04f, rbg2*1.0f+acb*0.15f+0.04f,
-                 0.6f, 96, vp_w, vp_h);
+                 0.6f, hi_segs, vp_w, vp_h);
     /* Layer 5: accent edge line on outer rim */
     vrt_push_arc(cx, cy, R * 0.89f, R * 0.91f, 0, 2.0f*(float)M_PI,
                  acr, acg, acb, acr*0.5f, acg*0.5f, acb*0.5f,
-                 0.45f, 96, vp_w, vp_h);
+                 0.45f, hi_segs, vp_w, vp_h);
     /* Center fill — dark glass */
     vrt_push_circle(cx, cy, R * 0.58f,
                     rbg0*0.30f, rbg1*0.30f, rbg2*0.30f,
-                    0.94f, 64, vp_w, vp_h);
+                    0.94f, lo_segs, vp_w, vp_h);
 
     /* ---- Tick marks (thin lines) ---- */
     {
@@ -3713,13 +3981,12 @@ static void vrt_draw(int vp_w, int vp_h)
         if (num_ticks > 12) num_ticks = 12;
         for (int i = 0; i < num_ticks; i++) {
             float theta = (float)M_PI / 2.0f - 2.0f * (float)M_PI * (float)i / (float)num_ticks;
-            /* Thin tick as a very narrow arc wedge */
-            float tick_w = 0.015f; /* angular half-width */
+            float tick_w = 0.015f;
             vrt_push_arc(cx, cy, R * 0.72f, R * 0.85f,
                          theta - tick_w, theta + tick_w,
                          t->dim[0]*0.6f, t->dim[1]*0.6f, t->dim[2]*0.6f,
                          t->dim[0]*0.6f, t->dim[1]*0.6f, t->dim[2]*0.6f,
-                         0.4f, 1, vp_w, vp_h);
+                         0.4f, 2, vp_w, vp_h);
         }
     }
 
@@ -3749,20 +4016,19 @@ static void vrt_draw(int vp_w, int vp_h)
         float arc_start = (float)M_PI / 2.0f;
         float sweep = progress > 1.0f ? 1.0f : progress;
         float arc_end = arc_start - 2.0f * (float)M_PI * sweep;
-        int segs = (int)(sweep * 96.0f);
-        if (segs < 6) segs = 6;
+        int arc_segs = vrt_auto_segs(R * sweep, 12);
 
         /* Layer 1: Wide soft glow (bloom) */
-        vrt_push_arc(cx, cy, R * 0.64f, R * 0.86f,
+        vrt_push_arc(cx, cy, R * 0.62f, R * 0.88f,
                      arc_end, arc_start,
-                     er*0.5f, eg*0.5f, eb*0.5f, sr*0.5f, sg*0.5f, sb*0.5f,
-                     0.06f, segs, vp_w, vp_h);
-        /* Layer 2: Main tube body — darker base color */
+                     er*0.4f, eg*0.4f, eb*0.4f, sr*0.4f, sg*0.4f, sb*0.4f,
+                     0.05f, arc_segs, vp_w, vp_h);
+        /* Layer 2: Main tube body */
         vrt_push_arc(cx, cy, R * 0.71f, R * 0.80f,
                      arc_end, arc_start,
                      er*0.7f, eg*0.7f, eb*0.7f, sr*0.7f, sg*0.7f, sb*0.7f,
-                     0.9f, segs, vp_w, vp_h);
-        /* Layer 3: Hot center specular — bright white-ish core (neon tube highlight) */
+                     0.9f, arc_segs, vp_w, vp_h);
+        /* Layer 3: Hot center specular — bright white-ish core */
         {
             float wr = er*0.3f+0.7f, wg = eg*0.3f+0.7f, wb = eb*0.3f+0.7f;
             float ws = sr*0.3f+0.7f, wsg = sg*0.3f+0.7f, wsb = sb*0.3f+0.7f;
@@ -3771,22 +4037,47 @@ static void vrt_draw(int vp_w, int vp_h)
             vrt_push_arc(cx, cy, R * 0.735f, R * 0.775f,
                          arc_end, arc_start,
                          wr, wg, wb, ws, wsg, wsb,
-                         0.55f, segs, vp_w, vp_h);
+                         0.55f, arc_segs, vp_w, vp_h);
         }
-        /* Layer 4: Top-edge specular glint (glass reflection) */
+        /* Layer 4: Top-edge specular glint */
         vrt_push_arc(cx, cy, R * 0.785f, R * 0.80f,
                      arc_end, arc_start,
                      1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f,
-                     0.15f, segs, vp_w, vp_h);
+                     0.15f, arc_segs, vp_w, vp_h);
 
-        /* Leading edge dot — bright with glow */
+        /* ---- Leading edge comet — multi-layer soft glow ---- */
         float mid_r = R * 0.755f;
         float edge_x = cx + mid_r * vrt_cosf(arc_end);
         float edge_y = cy - mid_r * vrt_sinf(arc_end);
-        vrt_push_circle(edge_x, edge_y, R * 0.04f,
-                        1.0f, 1.0f, 1.0f, 0.8f, 12, vp_w, vp_h);
-        vrt_push_circle(edge_x, edge_y, R * 0.07f,
-                        er, eg, eb, 0.3f, 12, vp_w, vp_h);
+        int glow_segs = vrt_auto_segs(R * 0.12f, 16);
+        /* Outer bloom */
+        vrt_push_glow(edge_x, edge_y, R * 0.12f, 4,
+                      er, eg, eb, 0.15f, glow_segs, vp_w, vp_h);
+        /* Mid glow */
+        vrt_push_glow(edge_x, edge_y, R * 0.06f, 3,
+                      er*0.4f+0.6f, eg*0.4f+0.6f, eb*0.4f+0.6f, 0.4f,
+                      glow_segs, vp_w, vp_h);
+        /* Hot center */
+        vrt_push_circle(edge_x, edge_y, R * 0.025f,
+                        1.0f, 1.0f, 1.0f, 0.9f, glow_segs, vp_w, vp_h);
+
+        /* Trailing comet tail — fading dots behind leading edge */
+        {
+            int trail_count = 8;
+            float trail_arc = 0.08f; /* radians of trail behind edge */
+            for (int ti = 1; ti <= trail_count; ti++) {
+                float tt = (float)ti / (float)trail_count;
+                float ta = arc_end + trail_arc * tt;
+                if (ta > arc_start) break;
+                float tx = cx + mid_r * vrt_cosf(ta);
+                float ty = cy - mid_r * vrt_sinf(ta);
+                float talpha = 0.3f * (1.0f - tt * tt);
+                float trad = R * (0.03f - 0.02f * tt);
+                if (trad < 1.0f) trad = 1.0f;
+                vrt_push_circle(tx, ty, trad,
+                                er, eg, eb, talpha, glow_segs / 2, vp_w, vp_h);
+            }
+        }
 
         /* Spawn particle at edge occasionally */
         if (((int)(fx_time * 60) % 4) == 0)
@@ -3798,14 +4089,14 @@ static void vrt_draw(int vp_w, int vp_h)
         float pulse = 0.15f + 0.1f * vrt_sinf((float)now / 150.0f);
         vrt_push_arc(cx, cy, R * 0.68f, R * 0.82f, 0, 2.0f*(float)M_PI,
                      1.0f, 0.2f, 0.1f, 1.0f, 0.2f, 0.1f,
-                     pulse, 64, vp_w, vp_h);
+                     pulse, hi_segs, vp_w, vp_h);
     }
 
     /* ---- Flash on round tick ---- */
     if (vrt_flash_tick > 0) {
         float a = (float)vrt_flash_tick / 15.0f;
         vrt_push_circle(cx, cy, R * (0.80f + a * 0.1f),
-                        1.0f, 1.0f, 0.85f, a * 0.25f, 48, vp_w, vp_h);
+                        1.0f, 1.0f, 0.85f, a * 0.25f, lo_segs, vp_w, vp_h);
         vrt_flash_tick--;
     }
 
@@ -3819,14 +4110,78 @@ static void vrt_draw(int vp_w, int vp_h)
         float ps = R * 0.025f;
         vrt_push_circle(vrt_particles[i].x, vrt_particles[i].y, ps,
                         vrt_particles[i].r, vrt_particles[i].g, vrt_particles[i].b,
-                        vrt_particles[i].alpha, 6, vp_w, vp_h);
+                        vrt_particles[i].alpha, 8, vp_w, vp_h);
+    }
+
+    /* ---- Lissajous orbital particles ---- */
+    if (vrt_orbits_visible) {
+        float orbit_life = 5.0f; /* total lifetime in seconds */
+        int orb_segs = vrt_auto_segs(R * 0.02f, 8);
+        for (int i = 0; i < VRT_ORBIT_MAX; i++) {
+            if (!vrt_orbits[i].alive) continue;
+            float age = fx_time - vrt_orbits[i].birth_time;
+            if (age > orbit_life) { vrt_orbits[i].alive = 0; continue; }
+
+            /* Alpha: full for first 3s, then fade. Almost gone by 4.6s */
+            float alpha;
+            if (age < 0.3f) {
+                /* Burst phase: fly outward from center */
+                alpha = age / 0.3f * 0.7f;
+            } else if (age < 3.0f) {
+                alpha = 0.7f;
+            } else {
+                float fade_t = (age - 3.0f) / 2.0f; /* 0..1 over 2s */
+                alpha = 0.7f * (1.0f - fade_t * fade_t);
+                if (alpha < 0.01f) { vrt_orbits[i].alive = 0; continue; }
+            }
+
+            /* Position: Lissajous figure on the ring torus */
+            float t_orbit = age * 1.8f + vrt_orbits[i].phase;
+            float fa = vrt_orbits[i].freq_a;
+            float fb = vrt_orbits[i].freq_b;
+            float or_frac = vrt_orbits[i].orbit_r;
+
+            /* Base angle orbits around the ring */
+            float base_angle = t_orbit * 1.2f;
+            /* Lissajous modulates the radial position */
+            float radial_mod = vrt_sinf(fa * t_orbit) * 0.08f;
+            /* And the angular position gets a secondary wobble */
+            float angular_mod = vrt_sinf(fb * t_orbit + 1.5f) * 0.15f;
+
+            float orb_r = R * (or_frac + radial_mod);
+            float orb_angle = base_angle + angular_mod;
+
+            /* During burst phase (first 0.3s), interpolate from center */
+            float ox, oy;
+            if (age < 0.3f) {
+                float burst_t = age / 0.3f;
+                float final_x = cx + orb_r * vrt_cosf(orb_angle);
+                float final_y = cy - orb_r * vrt_sinf(orb_angle);
+                ox = cx + (final_x - cx) * burst_t * burst_t;
+                oy = cy + (final_y - cy) * burst_t * burst_t;
+            } else {
+                ox = cx + orb_r * vrt_cosf(orb_angle);
+                oy = cy - orb_r * vrt_sinf(orb_angle);
+            }
+
+            /* Draw with glow */
+            float ps = R * 0.018f;
+            vrt_push_circle(ox, oy, ps * 2.5f,
+                            vrt_orbits[i].r, vrt_orbits[i].g, vrt_orbits[i].b,
+                            alpha * 0.15f, orb_segs, vp_w, vp_h);
+            vrt_push_circle(ox, oy, ps,
+                            vrt_orbits[i].r * 0.5f + 0.5f,
+                            vrt_orbits[i].g * 0.5f + 0.5f,
+                            vrt_orbits[i].b * 0.5f + 0.5f,
+                            alpha, orb_segs, vp_w, vp_h);
+        }
     }
 
     /* ---- Glossy specular highlight (upper crescent) ---- */
     vrt_push_arc(cx, cy - R * 0.05f, R * 0.70f, R * 0.88f,
                  (float)M_PI * 0.15f, (float)M_PI * 0.85f,
                  1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f,
-                 0.04f, 24, vp_w, vp_h);
+                 0.04f, lo_segs, vp_w, vp_h);
 
     /* ---- Center text: matches msimg32 real round timer exactly ---- */
     {
@@ -3915,7 +4270,7 @@ static void vrt_draw(int vp_w, int vp_h)
         int mw = VRT_CTX_W;
         int mh = VRT_CTX_PAD * 2;
         for (int i = 0; i < VRT_CTX_COUNT; i++)
-            mh += (i == VRT_CTX_SEP1 || i == VRT_CTX_SEP2) ? 8 : VRT_CTX_ITEM_H;
+            mh += (i == VRT_CTX_SEP1 || i == VRT_CTX_SEP2 || i == VRT_CTX_SEP3) ? 8 : VRT_CTX_ITEM_H;
 
         /* Panel bg */
         push_solid(mx, my, mx + mw, my + mh,
@@ -3931,9 +4286,12 @@ static void vrt_draw(int vp_w, int vp_h)
             "Set Timing Spell...",
             vrt_ms_state == 1 ? "Stop Timing" : "Cast to Time",
             "", /* sep */
-            "Small (80)",
-            "Normal (160)",
-            "Large (280)",
+            "Small",
+            "Normal",
+            "Large",
+            "X-Large",
+            "", /* sep */
+            vrt_orbits_visible ? "Hide Orbits" : "Show Orbits",
             "", /* sep */
             "Reset Timer",
             "Hide Round Timer"
@@ -3942,7 +4300,7 @@ static void vrt_draw(int vp_w, int vp_h)
         int iy = my + VRT_CTX_PAD;
         int item_cw = 7, item_ch = 14;
         for (int i = 0; i < VRT_CTX_COUNT; i++) {
-            if (i == VRT_CTX_SEP1 || i == VRT_CTX_SEP2) {
+            if (i == VRT_CTX_SEP1 || i == VRT_CTX_SEP2 || i == VRT_CTX_SEP3) {
                 push_solid(mx + 4, iy + 3, mx + mw - 4, iy + 4,
                            t->dim[0] * 0.3f, t->dim[1] * 0.3f, t->dim[2] * 0.3f,
                            0.4f, vp_w, vp_h);
@@ -3959,7 +4317,9 @@ static void vrt_draw(int vp_w, int vp_h)
             int checked = 0;
             if (i == VRT_CTX_SMALL  && vrt_size <= 100) checked = 1;
             if (i == VRT_CTX_NORMAL && vrt_size > 100 && vrt_size <= 200) checked = 1;
-            if (i == VRT_CTX_LARGE  && vrt_size > 200) checked = 1;
+            if (i == VRT_CTX_LARGE  && vrt_size > 200 && vrt_size <= 350) checked = 1;
+            if (i == VRT_CTX_XLARGE && vrt_size > 350) checked = 1;
+            if (i == VRT_CTX_ORBITS && vrt_orbits_visible) checked = 1;
 
             if (checked) {
                 push_text(mx + 4, iy + (VRT_CTX_ITEM_H - item_ch) / 2,
@@ -4034,6 +4394,17 @@ static void vrt_on_round(int round_num)
     double prev = vrt_last_tick_ts;
     vrt_round_num = round_num;
     vrt_flash_tick = 15;
+
+    /* Spawn orbital particles on round tick */
+    if (vrt_orbits_visible && round_num != vrt_last_spawn_round) {
+        /* Get current arc colors for orbit tinting */
+        const ui_theme_t *ot = &ui_themes[current_theme];
+        float ocr = ot->accent[0]*0.2f + 0.4f;
+        float ocg = ot->accent[1]*0.2f + 0.5f;
+        float ocb = ot->accent[2]*0.2f + 0.3f;
+        vrt_spawn_orbits(ocr, ocg, ocb);
+        vrt_last_spawn_round = round_num;
+    }
 
     /* Delta calculation */
     if (prev > 0.0 && vrt_synced && vrt_round_period > 0.0) {
@@ -4167,14 +4538,19 @@ static void vrt_perform_manual_sync(void)
 }
 
 /* ---- Round timer hit testing ---- */
+static float vrt_scaled_size(void) {
+    return vrt_size;
+}
+
 static int vrt_hit_circle(int mx, int my)
 {
     if (!vrt_visible) return 0;
-    float cx = vrt_x + vrt_size / 2.0f;
-    float cy = vrt_y + vrt_size / 2.0f;
+    float ssz = vrt_scaled_size();
+    float cx = vrt_x + ssz / 2.0f;
+    float cy = vrt_y + ssz / 2.0f;
     float dx = (float)mx - cx;
     float dy = (float)my - cy;
-    float r = vrt_size / 2.0f;
+    float r = ssz / 2.0f;
     return (dx * dx + dy * dy) <= (r * r);
 }
 
@@ -4185,9 +4561,9 @@ static int vrt_ctx_hit(int mx, int my)
     if (mx < vrt_ctx_x || mx > vrt_ctx_x + VRT_CTX_W) return -1;
     int iy = vrt_ctx_y + VRT_CTX_PAD;
     for (int i = 0; i < VRT_CTX_COUNT; i++) {
-        int ih = (i == VRT_CTX_SEP1 || i == VRT_CTX_SEP2) ? 8 : VRT_CTX_ITEM_H;
+        int ih = (i == VRT_CTX_SEP1 || i == VRT_CTX_SEP2 || i == VRT_CTX_SEP3) ? 8 : VRT_CTX_ITEM_H;
         if (my >= iy && my < iy + ih) {
-            if (i == VRT_CTX_SEP1 || i == VRT_CTX_SEP2) return -1;
+            if (i == VRT_CTX_SEP1 || i == VRT_CTX_SEP2 || i == VRT_CTX_SEP3) return -1;
             return i;
         }
         iy += ih;
@@ -4817,8 +5193,8 @@ static void vkm_draw(int vp_w, int vp_h)
                 else if (i == VKM_FX_WOBBLE && vk_experimental) { label = "Wobbly Widgets \x1b[33m[EXP]"; is_active = fx_wobble_mode; }
             } else if (vkm_sub == VKM_SUB_EXTRAS) {
                 if (i == VKM_EXT_SOUND) {
-                    label = "Sound";
-                    is_active = (snd_wnd_idx >= 0 && vkw_windows[snd_wnd_idx].active);
+                    label = "Sound & Video";
+                    is_active = snd_visible;
                 } else if (i == VKM_EXT_COLOR) {
                     label = "Color/Brightness";
                     is_active = clr_visible;
@@ -4830,6 +5206,12 @@ static void vkm_draw(int vp_w, int vp_h)
                 } else if (i == VKM_EXT_RNDRECAP) {
                     label = pst_round_recap ? "\x04 Round Totals" : "  Round Totals";
                     is_active = pst_round_recap;
+                } else if (i == VKM_EXT_HDR) {
+                    if (hdr_available)
+                        label = hdr_enabled ? "\x04 HDR" : "  HDR";
+                    else
+                        label = "  HDR (N/A)";
+                    is_active = hdr_enabled;
                 } else if (i == VKM_EXT_SAVE) {
                     label = "Save Settings";
                 } else if (i == VKM_EXT_RESET) {
@@ -5845,7 +6227,8 @@ static void vkt_build_vertices(void)
 
     /* Draw round timer widget (with wobble) */
     if (fx_wobble_mode && vrt_visible) {
-        wob_move_rest(&wob_grid_rt, vrt_x, vrt_y, vrt_size, vrt_size);
+        { float ssz = vrt_scaled_size();
+        wob_move_rest(&wob_grid_rt, vrt_x, vrt_y, ssz, ssz); }
         if (vrt_dragging) {
             wob_pin_top(&wob_grid_rt);
             wob_grid_rt.active = 1;
@@ -5856,13 +6239,113 @@ static void vkt_build_vertices(void)
         if (wob_grid_rt.active) {
             wob_warp_active = 1;
             wob_warp_grid = &wob_grid_rt;
+            { float wssz = vrt_scaled_size();
             wob_warp_x = vrt_x;
             wob_warp_y = vrt_y;
-            wob_warp_w = vrt_size;
-            wob_warp_h = vrt_size;
+            wob_warp_w = wssz;
+            wob_warp_h = wssz; }
         }
     }
     vrt_draw(vp_w, vp_h);
+
+    /* ---- PTT Voice Overlay (mini oscilloscope) ---- */
+    {
+        vox_resolve();
+        int ptt_on = (vox_resolved == 1 && vox_active_ptr && *vox_active_ptr);
+        if (ptt_on) vox_fade = 1.0f;
+        else if (vox_fade > 0.0f) vox_fade -= 0.012f; /* ~1.3s fade-out */
+
+        if (vox_fade > 0.01f) {
+            const ui_theme_t *vt = &ui_themes[current_theme];
+            float alpha = vox_fade;
+            /* Position: upper-right corner */
+            float bw = 200, bh = 60;
+            float bx = (float)vp_w - bw - 20;
+            float by = 20;
+
+            /* Background */
+            push_solid((int)bx, (int)by, (int)(bx + bw), (int)(by + bh),
+                       vt->bg[0] * 0.5f, vt->bg[1] * 0.5f, vt->bg[2] * 0.5f,
+                       0.8f * alpha, vp_w, vp_h);
+            /* Border */
+            float bc = ptt_on ? 0.3f : 0.15f;
+            push_solid((int)bx, (int)by, (int)(bx + bw), (int)(by + 1),
+                       0.2f, 0.8f, 0.3f, bc * alpha, vp_w, vp_h);
+            push_solid((int)bx, (int)(by + bh - 1), (int)(bx + bw), (int)(by + bh),
+                       0.2f, 0.8f, 0.3f, bc * alpha, vp_w, vp_h);
+            push_solid((int)bx, (int)by, (int)(bx + 1), (int)(by + bh),
+                       0.2f, 0.8f, 0.3f, bc * alpha, vp_w, vp_h);
+            push_solid((int)(bx + bw - 1), (int)by, (int)(bx + bw), (int)(by + bh),
+                       0.2f, 0.8f, 0.3f, bc * alpha, vp_w, vp_h);
+
+            /* Label */
+            if (ptt_on) {
+                push_text((int)(bx + 4), (int)(by + 2), "PTT",
+                          0.3f, 1.0f, 0.4f, vp_w, vp_h, 7, 14);
+            } else {
+                push_text((int)(bx + 4), (int)(by + 2), "PTT",
+                          0.5f, 0.5f, 0.5f, vp_w, vp_h, 7, 14);
+            }
+
+            /* Audio level bar */
+            float level = (vox_level_ptr && ptt_on) ? *vox_level_ptr : 0.0f;
+            if (level > 1.0f) level = 1.0f;
+            int bar_x = (int)(bx + 30);
+            int bar_w = (int)(bw - 36);
+            int bar_y = (int)(by + 4);
+            int bar_h = 10;
+            /* BG */
+            push_solid(bar_x, bar_y, bar_x + bar_w, bar_y + bar_h,
+                       0.1f, 0.1f, 0.1f, 0.6f * alpha, vp_w, vp_h);
+            /* Level fill — green to yellow to red */
+            int fill_w = (int)(level * bar_w);
+            if (fill_w > 0) {
+                float lr = level > 0.7f ? 1.0f : level * 1.4f;
+                float lg = level < 0.5f ? 0.9f : 0.9f * (1.0f - (level - 0.5f) * 2.0f);
+                push_solid(bar_x, bar_y, bar_x + fill_w, bar_y + bar_h,
+                           lr, lg, 0.1f, 0.8f * alpha, vp_w, vp_h);
+            }
+
+            /* Waveform oscilloscope */
+            if (vox_wave_ptr) {
+                float wave_y = by + 18;
+                float wave_h = bh - 22;
+                float wave_mid = wave_y + wave_h / 2.0f;
+                int wsamples = 128;
+                float step = bw / (float)wsamples;
+                for (int i = 0; i < wsamples - 1; i++) {
+                    int wi = (vox_wave_pos_ptr ? (*vox_wave_pos_ptr - wsamples + i) : i);
+                    if (wi < 0) wi += 128;
+                    wi = wi % 128;
+                    int wi2 = (wi + 1) % 128;
+                    float v1 = vox_wave_ptr[wi];
+                    float v2 = vox_wave_ptr[wi2];
+                    float y1 = wave_mid - v1 * wave_h * 0.45f;
+                    float y2 = wave_mid - v2 * wave_h * 0.45f;
+                    float x1 = bx + 2 + step * i;
+                    float x2 = bx + 2 + step * (i + 1);
+                    /* Draw as thin solid line (1px height quad) */
+                    push_solid((int)x1, (int)y1, (int)x2 + 1, (int)y1 + 1,
+                               0.2f, 0.9f, 0.3f, 0.7f * alpha, vp_w, vp_h);
+                }
+                /* Center line */
+                push_solid((int)(bx + 2), (int)wave_mid, (int)(bx + bw - 2), (int)wave_mid + 1,
+                           0.3f, 0.3f, 0.3f, 0.3f * alpha, vp_w, vp_h);
+            }
+
+            /* Show last recognized text (fades after 3s) */
+            if (vox_text_ptr && vox_text_tick_ptr && !ptt_on) {
+                DWORD age = GetTickCount() - *vox_text_tick_ptr;
+                if (age < 4000 && vox_text_ptr[0]) {
+                    float ta = alpha * (age < 3000 ? 1.0f : 1.0f - (float)(age - 3000) / 1000.0f);
+                    char tbuf[48];
+                    _snprintf(tbuf, sizeof(tbuf), "%.40s", vox_text_ptr);
+                    push_text((int)(bx + 4), (int)(by + bh + 2), tbuf,
+                              0.8f, 1.0f, 0.8f, vp_w, vp_h, 7, 14);
+                }
+            }
+        }
+    }
     wob_warp_active = 0;
     wob_warp_grid = NULL;
 
@@ -5876,8 +6359,8 @@ static void vkt_build_vertices(void)
     mr_draw(vp_w, vp_h);
     /* Settings panels — draw focused one last (on top) */
     {
-        void (*sp_draws[])(int,int) = { clr_draw, bgp_draw, smk_draw, shd_draw };
-        int sp_count = 4;
+        void (*sp_draws[])(int,int) = { clr_draw, bgp_draw, smk_draw, shd_draw, snd_draw };
+        int sp_count = 5;
         for (int i = 0; i < sp_count; i++)
             if (i != sp_focus) sp_draws[i](vp_w, vp_h);
         if (sp_focus >= 0 && sp_focus < sp_count)
@@ -6210,15 +6693,46 @@ static int vkt_init_vulkan(void)
 {
     VkResult res;
 
-    /* Instance */
-    const char *inst_exts[] = { VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_WIN32_SURFACE_EXTENSION_NAME };
+    /* Instance — probe for VK_EXT_swapchain_colorspace for HDR support */
+    {
+        typedef VkResult (VKAPI_CALL *PFN_vkEnumInstExtProps)(const char*, uint32_t*, VkExtensionProperties*);
+        HMODULE vkmod = GetModuleHandleA("vulkan-1.dll");
+        if (!vkmod) vkmod = LoadLibraryA("vulkan-1.dll");
+        PFN_vkEnumInstExtProps pfnEnum = vkmod ?
+            (PFN_vkEnumInstExtProps)GetProcAddress(vkmod, "vkEnumerateInstanceExtensionProperties") : NULL;
+        if (pfnEnum) {
+            uint32_t ext_count = 0;
+            pfnEnum(NULL, &ext_count, NULL);
+            if (ext_count > 0) {
+                VkExtensionProperties *exts = (VkExtensionProperties *)malloc(ext_count * sizeof(VkExtensionProperties));
+                pfnEnum(NULL, &ext_count, exts);
+                for (uint32_t i = 0; i < ext_count; i++) {
+                    if (strcmp(exts[i].extensionName, VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME) == 0) {
+                        hdr_ext_available = 1;
+                        break;
+                    }
+                }
+                free(exts);
+            }
+        }
+    }
+    const char *inst_exts_hdr[] = { VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_WIN32_SURFACE_EXTENSION_NAME,
+                                     VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME };
+    const char *inst_exts_std[] = { VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_WIN32_SURFACE_EXTENSION_NAME };
     VkInstanceCreateInfo ici = { VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO };
     VkApplicationInfo app = { VK_STRUCTURE_TYPE_APPLICATION_INFO };
     app.pApplicationName = "VkTerminal";
     app.apiVersion = VK_API_VERSION_1_0;
     ici.pApplicationInfo = &app;
-    ici.enabledExtensionCount = 2;
-    ici.ppEnabledExtensionNames = inst_exts;
+    if (hdr_ext_available) {
+        ici.enabledExtensionCount = 3;
+        ici.ppEnabledExtensionNames = inst_exts_hdr;
+        api->log("[vk_terminal] VK_EXT_swapchain_colorspace available — enabling\n");
+    } else {
+        ici.enabledExtensionCount = 2;
+        ici.ppEnabledExtensionNames = inst_exts_std;
+        api->log("[vk_terminal] VK_EXT_swapchain_colorspace not available\n");
+    }
     res = vkCreateInstance(&ici, NULL, &vk_inst);
     if (res != VK_SUCCESS) {
         api->log("[vk_terminal] vkCreateInstance failed: %d\n", res);
@@ -6343,12 +6857,12 @@ static uint8_t *vkt_build_font_pixels(int font_idx, uint32_t *out_w, uint32_t *o
         }
 
         /* Compute cell size based on screen resolution.
-         * Target: fill 60 rows in the terminal height with 1:2 aspect ratio cells.
-         * At 4K (2160p): cell_h ~= 2160/62 ~= 35px, cell_w ~= 17px
-         * At 1080p: cell_h ~= 17px, cell_w ~= 9px */
-        int cell_h = fs_height / (TERM_ROWS + 2) + term_font_adj;
+         * At 4K: cell_h ~= 80px, at 1080p: cell_h ~= 40px.
+         * Uses Vulkan surface extent for physical pixels. */
+        int ref_h = (vk_sc_extent.width > 0) ? (int)vk_sc_extent.height : fs_height;
+        int cell_h = ref_h / (TERM_ROWS + 2) + term_font_adj;
         if (cell_h < 12) cell_h = 12;
-        if (cell_h > 64) cell_h = 64;
+        if (cell_h > 128) cell_h = 128;  /* support up to 4K+ */
         int cell_w = (cell_h + 1) / 2; /* 1:2 aspect, round up */
 
         /* Atlas: 16x16 grid of cells */
@@ -7003,22 +7517,72 @@ static int vkt_create_swapchain(void)
     vkGetPhysicalDeviceSurfaceFormatsKHR(vk_pdev, vk_surface, &fmtc, fmts);
     vk_sc_fmt = fmts[0].format;
     VkColorSpaceKHR cs = fmts[0].colorSpace;
+
+    /* Probe for HDR formats */
+    hdr_available = 0;
+    hdr_standard[0] = 0;
+    int hdr10_idx = -1, scrgb_idx = -1, p3_idx = -1;
     for (uint32_t i = 0; i < fmtc; i++) {
-        if (fmts[i].format == VK_FORMAT_B8G8R8A8_UNORM) {
-            vk_sc_fmt = fmts[i].format;
-            cs = fmts[i].colorSpace;
-            break;
+        if (fmts[i].colorSpace == VK_COLOR_SPACE_HDR10_ST2084_EXT) {
+            hdr10_idx = (int)i;
+            if (!hdr_available) { hdr_available = 1; strncpy(hdr_standard, "HDR10 (ST2084)", sizeof(hdr_standard)); }
+        }
+        if (fmts[i].colorSpace == VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT) {
+            scrgb_idx = (int)i;
+            if (!hdr_available) { hdr_available = 1; strncpy(hdr_standard, "scRGB Linear", sizeof(hdr_standard)); }
+        }
+        if (fmts[i].colorSpace == VK_COLOR_SPACE_DISPLAY_P3_NONLINEAR_EXT) {
+            p3_idx = (int)i;
+            if (!hdr_available && hdr10_idx < 0 && scrgb_idx < 0) { hdr_available = 1; strncpy(hdr_standard, "Display P3", sizeof(hdr_standard)); }
+        }
+    }
+    api->log("[vk_terminal] HDR probe: hdr10=%d scrgb=%d p3=%d available=%d\n",
+             hdr10_idx, scrgb_idx, p3_idx, hdr_available);
+
+    if (hdr_enabled && hdr_available) {
+        /* Select best HDR format: prefer HDR10 > scRGB > P3 */
+        int best = (hdr10_idx >= 0) ? hdr10_idx : (scrgb_idx >= 0) ? scrgb_idx : p3_idx;
+        if (best >= 0) {
+            vk_sc_fmt = fmts[best].format;
+            cs = fmts[best].colorSpace;
+            api->log("[vk_terminal] HDR enabled: format=%d colorspace=%d (%s)\n",
+                     vk_sc_fmt, cs, hdr_standard);
+        }
+    } else {
+        /* Standard SDR: prefer B8G8R8A8_UNORM */
+        for (uint32_t i = 0; i < fmtc; i++) {
+            if (fmts[i].format == VK_FORMAT_B8G8R8A8_UNORM &&
+                fmts[i].colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
+                vk_sc_fmt = fmts[i].format;
+                cs = fmts[i].colorSpace;
+                break;
+            }
         }
     }
     free(fmts);
 
     vk_sc_extent = caps.currentExtent;
     if (vk_sc_extent.width == UINT32_MAX) {
+        /* Surface doesn't have a fixed extent — use our target */
         vk_sc_extent.width = (uint32_t)fs_width;
         vk_sc_extent.height = (uint32_t)fs_height;
+        /* Clamp to surface limits */
+        if (vk_sc_extent.width > caps.maxImageExtent.width)
+            vk_sc_extent.width = caps.maxImageExtent.width;
+        if (vk_sc_extent.height > caps.maxImageExtent.height)
+            vk_sc_extent.height = caps.maxImageExtent.height;
+        if (vk_sc_extent.width < caps.minImageExtent.width)
+            vk_sc_extent.width = caps.minImageExtent.width;
+        if (vk_sc_extent.height < caps.minImageExtent.height)
+            vk_sc_extent.height = caps.minImageExtent.height;
     }
-    api->log("[vk_terminal] Surface extent: %dx%d (window: %dx%d)\n",
-             vk_sc_extent.width, vk_sc_extent.height, fs_width, fs_height);
+    /* Update fs_width/fs_height to match actual render resolution */
+    fs_width = (int)vk_sc_extent.width;
+    fs_height = (int)vk_sc_extent.height;
+    api->log("[vk_terminal] Surface extent: %dx%d (max: %dx%d, min: %dx%d)\n",
+             vk_sc_extent.width, vk_sc_extent.height,
+             caps.maxImageExtent.width, caps.maxImageExtent.height,
+             caps.minImageExtent.width, caps.minImageExtent.height);
 
     uint32_t img_count = caps.minImageCount + 1;
     if (caps.maxImageCount > 0 && img_count > caps.maxImageCount)
@@ -7035,7 +7599,7 @@ static int vkt_create_swapchain(void)
     sci.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
     sci.preTransform = caps.currentTransform;
     sci.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
-    sci.presentMode = VK_PRESENT_MODE_FIFO_KHR;
+    sci.presentMode = vk_vsync ? VK_PRESENT_MODE_FIFO_KHR : VK_PRESENT_MODE_IMMEDIATE_KHR;
     sci.clipped = VK_TRUE;
     res = vkCreateSwapchainKHR(vk_dev, &sci, NULL, &vk_swapchain);
     if (res != VK_SUCCESS) { api->log("[vk_terminal] Swapchain failed: %d\n", res); return -1; }
@@ -7302,6 +7866,15 @@ static void vkt_destroy_swapchain(void)
     if (vk_swapchain) { vkDestroySwapchainKHR(vk_dev, vk_swapchain, NULL); vk_swapchain = VK_NULL_HANDLE; }
 }
 
+static void vkt_recreate_swapchain(void) {
+    vkt_destroy_swapchain();
+    vkt_create_swapchain();
+    /* Font atlas must be rebuilt at the new resolution's cell size.
+     * Without this, switching to 4K stretches 1080p-sized glyphs → blurry zoom. */
+    pending_font_idx = current_font;
+    font_change_pending = 1;
+}
+
 /* ---- Render frame ---- */
 
 static void vkt_render_frame(void)
@@ -7542,11 +8115,11 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         if (wParam == VK_F9) {
             typedef int (*voice_wndproc_fn)(HWND, UINT, WPARAM, LPARAM);
             static voice_wndproc_fn vwp = NULL;
-            static int vwp_resolved = 0;
-            if (!vwp_resolved) {
+            if (!vwp) {
                 HMODULE vm = GetModuleHandleA("voice.dll");
+                if (!vm) vm = LoadLibraryA("voice.dll");
                 if (vm) vwp = (voice_wndproc_fn)GetProcAddress(vm, "voice_on_wndproc");
-                vwp_resolved = 1;
+                if (api) api->log("[vk_terminal] F9 PTT: voice.dll=%p wndproc=%p\n", vm, vwp);
             }
             if (vwp) vwp(hwnd, WM_KEYUP, wParam, lParam);
         }
@@ -7560,11 +8133,11 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         if (wParam == VK_F9) {
             typedef int (*voice_wndproc_fn)(HWND, UINT, WPARAM, LPARAM);
             static voice_wndproc_fn vwp = NULL;
-            static int vwp_resolved = 0;
-            if (!vwp_resolved) {
+            if (!vwp) {
                 HMODULE vm = GetModuleHandleA("voice.dll");
+                if (!vm) vm = LoadLibraryA("voice.dll");
                 if (vm) vwp = (voice_wndproc_fn)GetProcAddress(vm, "voice_on_wndproc");
-                vwp_resolved = 1;
+                if (api) api->log("[vk_terminal] F9 PTT: voice.dll=%p wndproc=%p\n", vm, vwp);
             }
             if (vwp) vwp(hwnd, WM_KEYDOWN, wParam, lParam);
             return 0;
@@ -7778,6 +8351,10 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             shd_mouse_move(mx2, my2);
             return 0;
         }
+        if (snd_dragging || snd_active_slider >= 0) {
+            snd_mouse_move(mx2, my2);
+            return 0;
+        }
         /* Player Stats drag */
         if (pst_dragging) {
             pst_x = (float)mx2 - pst_drag_ox;
@@ -7817,6 +8394,10 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         }
         /* Window drag/resize takes priority */
         if (vkw_mouse_move(mx2, my2)) return 0;
+        /* Update cursor for VKW window edge hover */
+        if (!vkw_update_cursor(mx2, my2)) {
+            SetCursor(LoadCursor(NULL, IDC_ARROW));
+        }
         if (vkm_open) {
             int rh = vkm_hit_root(mx2, my2);
             int sh = vkm_hit_sub(mx2, my2);
@@ -7949,14 +8530,17 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             else if (ci == VRT_CTX_SMALL) { vrt_size = 80; }
             else if (ci == VRT_CTX_NORMAL) { vrt_size = 160; }
             else if (ci == VRT_CTX_LARGE) { vrt_size = 280; }
+            else if (ci == VRT_CTX_XLARGE) { vrt_size = 420; }
+            else if (ci == VRT_CTX_ORBITS) { vrt_orbits_visible = !vrt_orbits_visible; }
             else if (ci == VRT_CTX_RESET) { vrt_synced = 0; vrt_last_tick_ts = 0; vrt_round_num = 0; vrt_delta_text[0] = '\0'; }
             else if (ci == VRT_CTX_HIDE) { vrt_visible = 0; }
             return 0;
         }
         /* Spell input dialog clicks */
         if (vrt_spell_input) {
-            float scx = vrt_x + vrt_size / 2.0f;
-            float scy = vrt_y + vrt_size / 2.0f + vrt_size / 2.0f + 10;
+            float vssz = vrt_scaled_size();
+            float scx = vrt_x + vssz / 2.0f;
+            float scy = vrt_y + vssz / 2.0f + vssz / 2.0f + 10;
             int dx = (int)(scx - 120), dy = (int)scy;
             if (mx >= dx + 8 && mx <= dx + 60 && my >= dy + 50 && my <= dy + 70) {
                 /* OK */
@@ -8040,14 +8624,14 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         /* Settings panels — check focused one first for z-order consistency */
         {
             struct { int (*fn)(int,int); int idx; } sp[] = {
-                { clr_mouse_down, 0 }, { bgp_mouse_down, 1 }, { smk_mouse_down, 2 }, { shd_mouse_down, 3 }
+                { clr_mouse_down, 0 }, { bgp_mouse_down, 1 }, { smk_mouse_down, 2 }, { shd_mouse_down, 3 }, { snd_mouse_down, 4 }
             };
             /* Check focused panel first */
-            if (sp_focus >= 0 && sp_focus < 4 && sp[sp_focus].fn(mx, my)) {
+            if (sp_focus >= 0 && sp_focus < 5 && sp[sp_focus].fn(mx, my)) {
                 return 0;
             }
             /* Then check others */
-            for (int i = 0; i < 4; i++) {
+            for (int i = 0; i < 5; i++) {
                 if (i != sp_focus && sp[i].fn(mx, my)) {
                     sp_focus = i;
                     return 0;
@@ -8128,6 +8712,7 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         if (bgp_dragging || bgp_active_slider >= 0) { bgp_mouse_up(); return 0; }
         if (smk_dragging || smk_active_slider >= 0) { smk_mouse_up(); return 0; }
         if (shd_dragging || shd_active_slider >= 0) { shd_mouse_up(); return 0; }
+        if (snd_dragging || snd_active_slider >= 0) { snd_mouse_up(); return 0; }
         if (pst_dragging) { pst_dragging = 0; return 0; }
         if (bsp_dragging || bsp_resizing || bsp_selecting) { bsp_mouse_up(); return 0; }
         if (vrt_dragging) { vrt_dragging = 0; return 0; }
@@ -8150,7 +8735,7 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             if (si == VKM_WID_RTIMER) {
                 vrt_visible = !vrt_visible;
                 if (vrt_visible && vrt_x < 1 && vrt_y < 1) {
-                    vrt_x = (float)vk_sc_extent.width - vrt_size - 20;
+                    vrt_x = (float)vk_sc_extent.width - vrt_scaled_size() - 20;
                     vrt_y = 60;
                 }
             } else if (si == VKM_WID_CONVO) {
@@ -8264,6 +8849,14 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 pst_round_recap = !pst_round_recap;
                 if (api) api->log("[vk_terminal] Round Totals: %s\n",
                                   pst_round_recap ? "ON" : "OFF");
+            } else if (si == VKM_EXT_HDR) {
+                if (hdr_available) {
+                    hdr_enabled = !hdr_enabled;
+                    /* Swapchain needs recreation for format change — trigger resize */
+                    vkt_recreate_swapchain();
+                    if (api) api->log("[vk_terminal] HDR: %s (%s)\n",
+                                      hdr_enabled ? "ON" : "OFF", hdr_standard);
+                }
             } else if (si == VKM_EXT_SAVE) {
                 vkt_save_settings();
             } else if (si == VKM_EXT_RESET) {
@@ -8461,12 +9054,14 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 float newsize = vrt_size + (wd > 0 ? 20.0f : -20.0f);
                 if (newsize < VRT_MIN_SIZE) newsize = VRT_MIN_SIZE;
                 if (newsize > VRT_MAX_SIZE) newsize = VRT_MAX_SIZE;
-                /* Recenter on resize */
-                float old_cx = vrt_x + vrt_size / 2.0f;
-                float old_cy = vrt_y + vrt_size / 2.0f;
+                /* Recenter on resize using scaled size */
+                float old_ssz = vrt_scaled_size();
+                float old_cx = vrt_x + old_ssz / 2.0f;
+                float old_cy = vrt_y + old_ssz / 2.0f;
                 vrt_size = newsize;
-                vrt_x = old_cx - newsize / 2.0f;
-                vrt_y = old_cy - newsize / 2.0f;
+                float new_ssz = vrt_scaled_size();
+                vrt_x = old_cx - new_ssz / 2.0f;
+                vrt_y = old_cy - new_ssz / 2.0f;
                 return 0;
             }
         }
@@ -8488,6 +9083,10 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
     case WM_DESTROY:
         vkt_visible = 0;
         return 0;
+    case WM_SETCURSOR:
+        /* Let our custom cursor logic handle it — don't let Windows reset to IDC_ARROW */
+        if (LOWORD(lParam) == HTCLIENT) return TRUE;
+        break;
     }
     return DefWindowProcA(hwnd, msg, wParam, lParam);
 }
@@ -8497,6 +9096,9 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
 static DWORD WINAPI vkt_thread(LPVOID param)
 {
     HINSTANCE hInst = (HINSTANCE)param;
+
+    /* Wine DPI is set to 192 in DllMain so MegaMUD's Win32 UI scales properly.
+     * With KDE "Apply scaling themselves", XWayland gives us full 4K. */
 
     /* Wait for MMANSI */
     for (int i = 0; i < 100 && !mmansi_hwnd; i++) {
@@ -8566,22 +9168,20 @@ static DWORD WINAPI vkt_thread(LPVOID param)
 
         /* Create fullscreen window if needed */
         if (!vkt_hwnd) {
-            /* Use GetSystemMetrics for logical desktop size.
-             * Under XWayland with KDE 200% scaling, Wine sees 1920x1080 logical
-             * which is the correct coordinate space for window creation. */
-            {
+            /* Use user-selected resolution, or screen size for auto */
+            if (snd_res_sel >= 0 && snd_res_sel < (int)NUM_RES) {
+                fs_width = resolutions[snd_res_sel].w;
+                fs_height = resolutions[snd_res_sel].h;
+            } else {
                 int sm_w = GetSystemMetrics(SM_CXSCREEN);
                 int sm_h = GetSystemMetrics(SM_CYSCREEN);
-                if (sm_w > 0 && sm_h > 0) {
-                    fs_width = sm_w;
-                    fs_height = sm_h;
-                }
-                api->log("[vk_terminal] GetSystemMetrics: %dx%d\n", sm_w, sm_h);
+                if (sm_w > 0) fs_width = sm_w;
+                if (sm_h > 0) fs_height = sm_h;
             }
-            api->log("[vk_terminal] Fullscreen target: %dx%d\n", fs_width, fs_height);
+            api->log("[vk_terminal] Fullscreen: %dx%d\n", fs_width, fs_height);
 
             vkt_hwnd = CreateWindowExA(
-                WS_EX_APPWINDOW,   /* normal alt-tab entry, not always-on-top */
+                WS_EX_APPWINDOW,
                 "SlopVkTerminal", "MajorMUD Terminal",
                 WS_POPUP | WS_VISIBLE,
                 0, 0, fs_width, fs_height,
@@ -10249,51 +10849,415 @@ static void snd_enumerate(void)
 
 static void snd_open_window(void)
 {
-    if (snd_wnd_idx >= 0 && vkw_windows[snd_wnd_idx].active) {
-        /* Already open — just focus it */
-        vkw_focus = snd_wnd_idx;
-        return;
-    }
+    if (snd_visible) { sp_focus = 4; return; }
     snd_enumerate();
-    int vp_w = (int)vk_sc_extent.width, vp_h = (int)vk_sc_extent.height;
-    int ww = 380, wh = 400;
-    snd_wnd_idx = vkw_create("Sound Settings", (vp_w - ww) / 2, (vp_h - wh) / 2, ww, wh, 0);
-    if (snd_wnd_idx < 0) return;
-    vkw_focus = snd_wnd_idx;
+    snd_visible = 1;
+    sp_focus = 4;
+}
 
-    /* Print device info into the window */
-    vkw_print(snd_wnd_idx, "\x1b[1;37m=== Recording Devices ===\x1b[0m");
+static void snd_draw(int vp_w, int vp_h)
+{
+    if (!snd_visible) return;
+    const ui_theme_t *t = &ui_themes[current_theme];
+    int cw = VKM_CHAR_W, ch = VKM_CHAR_H;
+    float x0 = snd_x, y0 = snd_y;
+    float pw = snd_w;
+    int titlebar_h = ch + 8;
+
+    /* Panel background */
+    push_solid((int)x0, (int)y0, (int)(x0 + pw), (int)(y0 + snd_h),
+               t->bg[0], t->bg[1], t->bg[2], 0.92f, vp_w, vp_h);
+    /* Border */
+    push_solid((int)x0, (int)y0, (int)(x0 + pw), (int)(y0 + 1),
+               t->accent[0], t->accent[1], t->accent[2], 0.6f, vp_w, vp_h);
+    push_solid((int)x0, (int)(y0 + snd_h - 1), (int)(x0 + pw), (int)(y0 + snd_h),
+               t->accent[0], t->accent[1], t->accent[2], 0.6f, vp_w, vp_h);
+    push_solid((int)x0, (int)y0, (int)(x0 + 1), (int)(y0 + snd_h),
+               t->accent[0], t->accent[1], t->accent[2], 0.6f, vp_w, vp_h);
+    push_solid((int)(x0 + pw - 1), (int)y0, (int)(x0 + pw), (int)(y0 + snd_h),
+               t->accent[0], t->accent[1], t->accent[2], 0.6f, vp_w, vp_h);
+    /* Titlebar */
+    {
+        float acr = t->accent[0], acg = t->accent[1], acb = t->accent[2];
+        float tbr = acr * 0.25f + t->bg[0] * 0.5f;
+        float tbg = acg * 0.25f + t->bg[1] * 0.5f;
+        float tbb = acb * 0.25f + t->bg[2] * 0.5f;
+        int ty0 = (int)y0 + 2, ty1 = (int)y0 + titlebar_h;
+        push_solid((int)x0 + 2, ty0, (int)(x0 + pw) - 2, ty1,
+                   tbr, tbg, tbb, 0.95f, vp_w, vp_h);
+        push_solid((int)x0 + 2, ty0, (int)(x0 + pw) - 2, ty0 + titlebar_h / 2,
+                   1.0f, 1.0f, 1.0f, 0.06f, vp_w, vp_h);
+        push_solid((int)x0 + 2, ty1 - 1, (int)(x0 + pw) - 2, ty1,
+                   acr, acg, acb, 0.5f, vp_w, vp_h);
+    }
+    push_text((int)(x0 + 6) + 1, (int)(y0 + 4) + 1, "Sound & Video",
+              0.0f, 0.0f, 0.0f, vp_w, vp_h, cw, ch);
+    push_text((int)(x0 + 6), (int)(y0 + 4), "Sound & Video",
+              t->text[0], t->text[1], t->text[2], vp_w, vp_h, cw, ch);
+    push_text((int)(x0 + pw - 16), (int)(y0 + 4), "X",
+              t->text[0] * 0.6f, t->text[1] * 0.6f, t->text[2] * 0.6f, vp_w, vp_h, cw, ch);
+
+    float cy = y0 + titlebar_h + 10;
+    float row_h = ch + 6;
+    /* Max chars that fit in the panel (with margins) */
+    int max_label = (int)((pw - 30) / cw);
+    if (max_label > 54) max_label = 54;
+
+    /* ======== VIDEO SECTION ======== */
+    /* Section divider line */
+    push_solid((int)(x0 + 8), (int)cy + ch/2, (int)(x0 + pw - 8), (int)cy + ch/2 + 1,
+               t->accent[0] * 0.5f, t->accent[1] * 0.5f, t->accent[2] * 0.5f, 0.4f, vp_w, vp_h);
+    push_text((int)(x0 + 12), (int)cy, "VIDEO",
+              t->accent[0], t->accent[1], t->accent[2], vp_w, vp_h, cw, ch);
+    cy += row_h + 2;
+
+    /* Current render resolution (info) */
+    {
+        char res_label[64];
+        _snprintf(res_label, sizeof(res_label), "Render: %dx%d",
+                  (int)vk_sc_extent.width, (int)vk_sc_extent.height);
+        push_text((int)(x0 + 14), (int)cy, res_label,
+                  t->text[0] * 0.9f, t->text[1] * 0.9f, t->text[2] * 0.9f, vp_w, vp_h, cw, ch);
+    }
+    cy += row_h;
+
+    /* Resolution selector */
+    push_text((int)(x0 + 14), (int)cy, "Resolution:",
+              t->dim[0], t->dim[1], t->dim[2], vp_w, vp_h, cw, ch);
+    cy += row_h;
+    /* "Auto (native)" option */
+    {
+        int sel = (snd_res_sel < 0);
+        if (sel) {
+            push_solid((int)(x0 + 10), (int)cy - 1, (int)(x0 + pw - 10), (int)(cy + row_h - 2),
+                       t->accent[0], t->accent[1], t->accent[2], 0.15f, vp_w, vp_h);
+        }
+        push_text((int)(x0 + 18), (int)cy,
+                  sel ? "\x10 Auto (native)" : "  Auto (native)",
+                  sel ? t->accent[0] : t->text[0] * 0.7f,
+                  sel ? t->accent[1] : t->text[1] * 0.7f,
+                  sel ? t->accent[2] : t->text[2] * 0.7f,
+                  vp_w, vp_h, cw, ch);
+        cy += row_h;
+    }
+    for (int i = 0; i < (int)NUM_RES; i++) {
+        int sel = (snd_res_sel == i);
+        if (sel) {
+            push_solid((int)(x0 + 10), (int)cy - 1, (int)(x0 + pw - 10), (int)(cy + row_h - 2),
+                       t->accent[0], t->accent[1], t->accent[2], 0.15f, vp_w, vp_h);
+        }
+        char rl[48];
+        _snprintf(rl, sizeof(rl), "%s %s", sel ? "\x10" : " ", resolutions[i].name);
+        push_text((int)(x0 + 18), (int)cy, rl,
+                  sel ? t->accent[0] : t->text[0] * 0.7f,
+                  sel ? t->accent[1] : t->text[1] * 0.7f,
+                  sel ? t->accent[2] : t->text[2] * 0.7f,
+                  vp_w, vp_h, cw, ch);
+        cy += row_h;
+    }
+
+    cy += 4;
+
+    /* VSync toggle */
+    push_text((int)(x0 + 14), (int)cy,
+              vk_vsync ? "\x04 VSync (60 FPS)" : "  VSync (uncapped)",
+              vk_vsync ? 0.3f : t->text[0] * 0.7f,
+              vk_vsync ? 0.9f : t->text[1] * 0.7f,
+              vk_vsync ? 0.3f : t->text[2] * 0.7f,
+              vp_w, vp_h, cw, ch);
+    cy += row_h;
+
+    /* HDR toggle */
+    if (hdr_available) {
+        char hdr_label[64];
+        _snprintf(hdr_label, sizeof(hdr_label), "%s HDR (%s)",
+                  hdr_enabled ? "\x04" : " ", hdr_standard);
+        push_text((int)(x0 + 14), (int)cy, hdr_label,
+                  hdr_enabled ? 0.3f : t->text[0] * 0.7f,
+                  hdr_enabled ? 0.9f : t->text[1] * 0.7f,
+                  hdr_enabled ? 0.3f : t->text[2] * 0.7f,
+                  vp_w, vp_h, cw, ch);
+    } else {
+        push_text((int)(x0 + 14), (int)cy, "  HDR: Not Detected",
+                  0.9f, 0.3f, 0.3f, vp_w, vp_h, cw, ch);
+    }
+    cy += row_h;
+
+    cy += 6;
+
+    /* ======== SOUND SECTION ======== */
+    push_solid((int)(x0 + 8), (int)cy + ch/2, (int)(x0 + pw - 8), (int)cy + ch/2 + 1,
+               t->accent[0] * 0.5f, t->accent[1] * 0.5f, t->accent[2] * 0.5f, 0.4f, vp_w, vp_h);
+    push_text((int)(x0 + 12), (int)cy, "SOUND",
+              t->accent[0], t->accent[1], t->accent[2], vp_w, vp_h, cw, ch);
+    cy += row_h + 2;
+
+    /* ---- Volume Slider ---- */
+    {
+        char vbuf[16];
+        _snprintf(vbuf, sizeof(vbuf), "%d%%", snd_master_vol);
+        float vol_f = (float)snd_master_vol;
+        clr_draw_slider(x0 + 8, cy, pw - 16, ch + 14, vol_f, 0.0f, 100.0f,
+                        "Volume", vbuf, vp_w, vp_h, t);
+        cy += ch + 14;
+    }
+
+    cy += 6;
+
+    /* ---- Recording Devices ---- */
+    push_text((int)(x0 + 14), (int)cy, "Recording Device",
+              t->dim[0], t->dim[1], t->dim[2], vp_w, vp_h, cw, ch);
+    cy += row_h;
+
     if (snd_in_count == 0) {
-        vkw_print(snd_wnd_idx, "  \x1b[1;31m(none found)\x1b[0m");
+        push_text((int)(x0 + 18), (int)cy, "(none found)",
+                  t->text[0] * 0.4f, t->text[1] * 0.4f, t->text[2] * 0.4f, vp_w, vp_h, cw, ch);
+        cy += row_h;
     } else {
         for (int i = 0; i < snd_in_count; i++) {
-            char line[80];
-            sprintf(line, "  %s%d: %s\x1b[0m",
-                    i == snd_in_sel ? "\x1b[1;32m> " : "\x1b[0;37m  ", i, snd_in_names[i]);
-            vkw_print(snd_wnd_idx, line);
+            int selected = (i == snd_in_sel);
+            if (selected) {
+                push_solid((int)(x0 + 10), (int)cy - 1, (int)(x0 + pw - 10), (int)(cy + row_h - 2),
+                           t->accent[0], t->accent[1], t->accent[2], 0.15f, vp_w, vp_h);
+            }
+            char label[64];
+            _snprintf(label, sizeof(label), "%s %.*s", selected ? "\x10" : " ", max_label, snd_in_names[i]);
+            push_text((int)(x0 + 18), (int)cy, label,
+                      selected ? t->accent[0] : t->text[0] * 0.7f,
+                      selected ? t->accent[1] : t->text[1] * 0.7f,
+                      selected ? t->accent[2] : t->text[2] * 0.7f,
+                      vp_w, vp_h, cw, ch);
+            cy += row_h;
         }
     }
-    vkw_print(snd_wnd_idx, "");
-    vkw_print(snd_wnd_idx, "\x1b[1;37m=== Playback Devices ===\x1b[0m");
+
+    cy += 4;
+
+    /* ---- Playback Devices ---- */
+    push_text((int)(x0 + 14), (int)cy, "Playback Device",
+              t->dim[0], t->dim[1], t->dim[2], vp_w, vp_h, cw, ch);
+    cy += row_h;
+
     if (snd_out_count == 0) {
-        vkw_print(snd_wnd_idx, "  \x1b[1;31m(none found)\x1b[0m");
+        push_text((int)(x0 + 18), (int)cy, "(none found)",
+                  t->text[0] * 0.4f, t->text[1] * 0.4f, t->text[2] * 0.4f, vp_w, vp_h, cw, ch);
+        cy += row_h;
     } else {
         for (int i = 0; i < snd_out_count; i++) {
-            char line[80];
-            sprintf(line, "  %s%d: %s\x1b[0m",
-                    i == snd_out_sel ? "\x1b[1;32m> " : "\x1b[0;37m  ", i, snd_out_names[i]);
-            vkw_print(snd_wnd_idx, line);
+            int selected = (i == snd_out_sel);
+            if (selected) {
+                push_solid((int)(x0 + 10), (int)cy - 1, (int)(x0 + pw - 10), (int)(cy + row_h - 2),
+                           t->accent[0], t->accent[1], t->accent[2], 0.15f, vp_w, vp_h);
+            }
+            char label[64];
+            _snprintf(label, sizeof(label), "%s %.*s", selected ? "\x10" : " ", max_label, snd_out_names[i]);
+            push_text((int)(x0 + 18), (int)cy, label,
+                      selected ? t->accent[0] : t->text[0] * 0.7f,
+                      selected ? t->accent[1] : t->text[1] * 0.7f,
+                      selected ? t->accent[2] : t->text[2] * 0.7f,
+                      vp_w, vp_h, cw, ch);
+            cy += row_h;
         }
     }
-    vkw_print(snd_wnd_idx, "");
+
+    cy += 6;
+
+    /* ---- Voice Info ---- */
     {
-        char vol_line[80];
-        sprintf(vol_line, "\x1b[1;37mMaster Volume:\x1b[0m %d%%", snd_master_vol);
-        vkw_print(snd_wnd_idx, vol_line);
+        HMODULE vm = GetModuleHandleA("voice.dll");
+        push_text((int)(x0 + 14), (int)cy, "F9 Push-to-Talk",
+                  t->dim[0], t->dim[1], t->dim[2], vp_w, vp_h, cw, ch);
+        cy += row_h;
+        if (vm) {
+            push_text((int)(x0 + 18), (int)cy, "voice.dll: loaded",
+                      0.3f, 0.9f, 0.3f, vp_w, vp_h, cw, ch);
+        } else {
+            push_text((int)(x0 + 18), (int)cy, "voice.dll: NOT loaded",
+                      0.9f, 0.3f, 0.3f, vp_w, vp_h, cw, ch);
+        }
+        cy += row_h;
     }
-    vkw_print(snd_wnd_idx, "");
-    vkw_print(snd_wnd_idx, "\x1b[0;36mPTT Key: F9 (hold to record)\x1b[0m");
-    vkw_print(snd_wnd_idx, "\x1b[0;36mTTS: SAM + eSpeak loaded\x1b[0m");
+
+    snd_h = cy - y0 + 10;
+}
+
+/* Hit test: Returns:
+ * -1=none, 0..N=input dev, 100..100+N=output dev, 200=volume slider,
+ * 300=auto res, 301..307=resolution, 400=vsync, 401=HDR */
+static int snd_hit_item(int mx, int my) {
+    int ch = VKM_CHAR_H;
+    int titlebar_h = ch + 8;
+    float row_h = ch + 6;
+    int hit_x = (mx >= (int)(snd_x + 10) && mx < (int)(snd_x + snd_w - 10));
+
+    /* Match layout of snd_draw exactly */
+    float cy = snd_y + titlebar_h + 10;
+
+    /* VIDEO section header */
+    cy += row_h + 2;
+    /* Render info line */
+    cy += row_h;
+    /* "Resolution:" label */
+    cy += row_h;
+    /* Auto (native) */
+    if (my >= (int)cy && my < (int)(cy + row_h) && hit_x) return 300;
+    cy += row_h;
+    /* Resolution entries */
+    for (int i = 0; i < (int)NUM_RES; i++) {
+        if (my >= (int)cy && my < (int)(cy + row_h) && hit_x) return 301 + i;
+        cy += row_h;
+    }
+    cy += 4;
+    /* VSync */
+    if (my >= (int)cy && my < (int)(cy + row_h) && hit_x) return 400;
+    cy += row_h;
+    /* HDR */
+    if (my >= (int)cy && my < (int)(cy + row_h) && hit_x) return 401;
+    cy += row_h;
+
+    cy += 6;
+
+    /* SOUND section header */
+    cy += row_h + 2;
+
+    /* Volume slider */
+    {
+        float sx0 = snd_x + 8 + 110;
+        float sx1 = snd_x + snd_w - 16 - 50 + 8;
+        float vol_row_h = ch + 14;
+        if (my >= (int)cy && my < (int)(cy + vol_row_h) &&
+            mx >= (int)(sx0 - 4) && mx <= (int)(sx1 + 4))
+            return 200;
+        cy += vol_row_h;
+    }
+
+    cy += 6;
+
+    /* Recording Device header */
+    cy += row_h;
+    /* Input devices */
+    for (int i = 0; i < snd_in_count; i++) {
+        if (my >= (int)cy && my < (int)(cy + row_h) && hit_x) return i;
+        cy += row_h;
+    }
+    if (snd_in_count == 0) cy += row_h;
+
+    cy += 4 + row_h; /* gap + Playback Device header */
+
+    /* Output devices */
+    for (int i = 0; i < snd_out_count; i++) {
+        if (my >= (int)cy && my < (int)(cy + row_h) && hit_x) return 100 + i;
+        cy += row_h;
+    }
+
+    return -1;
+}
+
+static int snd_mouse_down(int mx, int my) {
+    if (!snd_visible) return 0;
+    if (mx < (int)snd_x || mx >= (int)(snd_x + snd_w) ||
+        my < (int)snd_y || my >= (int)(snd_y + snd_h)) return 0;
+    int ch = VKM_CHAR_H;
+    int titlebar_h = ch + 8;
+    int ly = my - (int)snd_y;
+    /* Close button */
+    if (ly < titlebar_h && mx >= (int)(snd_x + snd_w - 20)) {
+        snd_visible = 0;
+        return 1;
+    }
+    /* Titlebar drag */
+    if (ly < titlebar_h) {
+        snd_dragging = 1;
+        snd_drag_ox = (float)mx - snd_x;
+        snd_drag_oy = (float)my - snd_y;
+        return 1;
+    }
+    int hit = snd_hit_item(mx, my);
+    /* Audio device selection */
+    if (hit >= 0 && hit < 100) {
+        snd_in_sel = hit;
+        if (api) api->log("[sound] Selected input device %d: %s\n", hit, snd_in_names[hit]);
+        return 1;
+    }
+    if (hit >= 100 && hit < 200) {
+        snd_out_sel = hit - 100;
+        if (api) api->log("[sound] Selected output device %d: %s\n", snd_out_sel, snd_out_names[snd_out_sel]);
+        return 1;
+    }
+    /* Volume slider */
+    if (hit == 200) {
+        float sx0 = snd_x + 8 + 110;
+        float sx1 = snd_x + snd_w - 16 - 50 + 8;
+        float pct = ((float)mx - sx0) / (sx1 - sx0);
+        if (pct < 0) pct = 0; if (pct > 1) pct = 1;
+        snd_master_vol = (int)(pct * 100.0f);
+        snd_active_slider = 0;
+        return 1;
+    }
+    /* Resolution: auto */
+    if (hit == 300) {
+        snd_res_sel = -1;
+        int sm_w = GetSystemMetrics(SM_CXSCREEN);
+        int sm_h = GetSystemMetrics(SM_CYSCREEN);
+        if (sm_w > 0) fs_width = sm_w;
+        if (sm_h > 0) fs_height = sm_h;
+        if (api) api->log("[video] Auto-native: %dx%d\n", fs_width, fs_height);
+        if (vkt_hwnd) {
+            SetWindowPos(vkt_hwnd, HWND_TOP, 0, 0, fs_width, fs_height,
+                         SWP_FRAMECHANGED);
+        }
+        vkt_recreate_swapchain();
+        return 1;
+    }
+    /* Resolution: specific */
+    if (hit >= 301 && hit < 301 + (int)NUM_RES) {
+        int idx = hit - 301;
+        snd_res_sel = idx;
+        fs_width = resolutions[idx].w;
+        fs_height = resolutions[idx].h;
+        if (api) api->log("[video] Resolution: %s (%dx%d)\n", resolutions[idx].name, fs_width, fs_height);
+        if (vkt_hwnd) {
+            SetWindowPos(vkt_hwnd, HWND_TOP, 0, 0, fs_width, fs_height,
+                         SWP_FRAMECHANGED);
+        }
+        vkt_recreate_swapchain();
+        return 1;
+    }
+    /* VSync toggle */
+    if (hit == 400) {
+        vk_vsync = !vk_vsync;
+        if (api) api->log("[video] VSync: %s\n", vk_vsync ? "ON" : "OFF");
+        vkt_recreate_swapchain();
+        return 1;
+    }
+    /* HDR toggle */
+    if (hit == 401 && hdr_available) {
+        hdr_enabled = !hdr_enabled;
+        if (api) api->log("[video] HDR: %s\n", hdr_enabled ? "ON" : "OFF");
+        vkt_recreate_swapchain();
+        return 1;
+    }
+    return 1; /* consume click inside panel */
+}
+
+static void snd_mouse_move(int mx, int my) {
+    if (snd_dragging) {
+        snd_x = (float)mx - snd_drag_ox;
+        snd_y = (float)my - snd_drag_oy;
+        return;
+    }
+    if (snd_active_slider == 0) {
+        float sx0 = snd_x + 8 + 110;
+        float sx1 = snd_x + snd_w - 16 - 50 + 8;
+        float pct = ((float)mx - sx0) / (sx1 - sx0);
+        if (pct < 0) pct = 0; if (pct > 1) pct = 1;
+        snd_master_vol = (int)(pct * 100.0f);
+    }
+}
+
+static void snd_mouse_up(void) {
+    snd_dragging = 0;
+    snd_active_slider = -1;
 }
 
 /* ---- Color/Brightness Settings Panel ---- */
@@ -11508,6 +12472,7 @@ static void vkt_save_settings(void)
     SAVE_INT("fx_shadow", fx_shadow_mode);
     SAVE_INT("fx_wobble", fx_wobble_mode);
     SAVE_INT("round_timer", vrt_visible);
+    SAVE_INT("vrt_orbits", vrt_orbits_visible);
     SAVE_INT("status_bar", vsb_visible);
     SAVE_INT("exp_bar", vxb_visible);
     SAVE_INT("player_stats", pst_visible);
@@ -11537,6 +12502,14 @@ static void vkt_save_settings(void)
     SAVE_INT("bg_beat_mid", bg_plasma_beat_mid);
     SAVE_INT("bg_beat_treble", bg_plasma_beat_treble);
     SAVE_INT("bg_beat_rms", bg_plasma_beat_rms);
+    /* Display / HDR */
+    SAVE_INT("hdr_enabled", hdr_enabled);
+    SAVE_INT("vk_vsync", vk_vsync);
+    SAVE_INT("snd_res_sel", snd_res_sel);
+    /* Sound settings */
+    SAVE_INT("snd_in_sel", snd_in_sel);
+    SAVE_INT("snd_out_sel", snd_out_sel);
+    SAVE_INT("snd_master_vol", snd_master_vol);
     /* Drop shadow settings */
     SAVE_FLOAT("shadow_opacity", shadow_opacity);
     SAVE_FLOAT("shadow_angle", shadow_angle);
@@ -11585,6 +12558,7 @@ static void vkt_load_settings(void)
     LOAD_INT("fx_smoky", fx_smoky_mode, 0);
     LOAD_INT("fx_wobble", fx_wobble_mode, 0);
     LOAD_INT("round_timer", vrt_visible, 0);
+    LOAD_INT("vrt_orbits", vrt_orbits_visible, 1);
     LOAD_INT("status_bar", vsb_visible, 0);
     LOAD_INT("exp_bar", vxb_visible, 0);
     LOAD_INT("player_stats", pst_visible, 0);
@@ -11614,6 +12588,19 @@ static void vkt_load_settings(void)
     LOAD_INT("bg_beat_mid", bg_plasma_beat_mid, 0);
     LOAD_INT("bg_beat_treble", bg_plasma_beat_treble, 0);
     LOAD_INT("bg_beat_rms", bg_plasma_beat_rms, 0);
+    /* Display / HDR */
+    LOAD_INT("hdr_enabled", hdr_enabled, 0);
+    LOAD_INT("vk_vsync", vk_vsync, 1);
+    LOAD_INT("snd_res_sel", snd_res_sel, -1);
+    /* Apply saved resolution */
+    if (snd_res_sel >= 0 && snd_res_sel < (int)NUM_RES) {
+        fs_width = resolutions[snd_res_sel].w;
+        fs_height = resolutions[snd_res_sel].h;
+    }
+    /* Sound settings */
+    LOAD_INT("snd_in_sel", snd_in_sel, 0);
+    LOAD_INT("snd_out_sel", snd_out_sel, 0);
+    LOAD_INT("snd_master_vol", snd_master_vol, 80);
     /* Drop shadow settings */
     LOAD_INT("fx_shadow", fx_shadow_mode, 0);
     LOAD_FLOAT("shadow_opacity", shadow_opacity, 0.6);
@@ -11754,6 +12741,6 @@ SLOP_EXPORT slop_plugin_t *slop_get_plugin(void) { return &vkt_plugin; }
 
 BOOL WINAPI DllMain(HINSTANCE h, DWORD r, LPVOID p)
 {
-    (void)h; (void)r; (void)p;
+    (void)h; (void)p; (void)r;
     return TRUE;
 }
