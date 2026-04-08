@@ -628,7 +628,24 @@ typedef struct {
 } ttf_font_entry_t;
 
 static const ttf_font_entry_t ttf_fonts[] = {
-    /* Modern monospace */
+    /* ---- Category: Bitmapped Terminal Fonts ---- */
+    { "--= Bitmapped Terminal Fonts =--", NULL },
+    { "IBM VGA 8x16",           "Px437_IBM_VGA_8x16.ttf" },
+    { "IBM VGA 9x16",           "Px437_IBM_VGA_9x16.ttf" },
+    { "IBM EGA 8x14",           "Px437_IBM_EGA_8x14.ttf" },
+    { "IBM MDA",                "Px437_IBM_MDA.ttf" },
+    { "IBM CGA",                "Px437_IBM_CGA.ttf" },
+    { "Phoenix VGA",            "Px437_PhoenixVGA_8x16.ttf" },
+    { "Compaq Portable",        "Px437_Compaq_Port3.ttf" },
+    { "AT&T PC6300",            "Px437_ATT_PC6300.ttf" },
+    { "Amstrad PC",             "Px437_Amstrad_PC.ttf" },
+    { "Unscii 16",              "unscii-16.ttf" },
+    { "Unscii Fantasy",         "unscii-8-fantasy.ttf" },
+    { "Unscii MCR",             "unscii-8-mcr.ttf" },
+    { "Unscii Tall",            "unscii-8-tall.ttf" },
+    { "Unscii Thin",            "unscii-8-thin.ttf" },
+    /* ---- Category: TTF Terminal Fonts ---- */
+    { "-= TTF Terminal Fonts =-", NULL },
     { "JetBrains Mono",         "JetBrainsMono-Regular.ttf" },
     { "JetBrains Mono Bold",    "JetBrainsMono-Bold.ttf" },
     { "Fira Code",              "FiraCode-Regular.ttf" },
@@ -640,24 +657,33 @@ static const ttf_font_entry_t ttf_fonts[] = {
     { "Source Code Pro Semi",    "SourceCodePro-Semibold.ttf" },
     { "Source Code Pro Black",   "SourceCodePro-Black.ttf" },
     { "Terminus",               "TerminusTTF-Regular.ttf" },
-    /* Retro IBM/PC */
-    { "IBM VGA 8x16",           "Px437_IBM_VGA_8x16.ttf" },
-    { "IBM VGA 9x16",           "Px437_IBM_VGA_9x16.ttf" },
-    { "IBM EGA 8x14",           "Px437_IBM_EGA_8x14.ttf" },
-    { "IBM MDA",                "Px437_IBM_MDA.ttf" },
-    { "IBM CGA",                "Px437_IBM_CGA.ttf" },
-    { "Phoenix VGA",            "Px437_PhoenixVGA_8x16.ttf" },
-    { "Compaq Portable",        "Px437_Compaq_Port3.ttf" },
-    { "AT&T PC6300",            "Px437_ATT_PC6300.ttf" },
-    { "Amstrad PC",             "Px437_Amstrad_PC.ttf" },
-    /* Unscii (fantasy/retro) */
-    { "Unscii 16",              "unscii-16.ttf" },
-    { "Unscii Fantasy",         "unscii-8-fantasy.ttf" },
-    { "Unscii MCR",             "unscii-8-mcr.ttf" },
-    { "Unscii Tall",            "unscii-8-tall.ttf" },
-    { "Unscii Thin",            "unscii-8-thin.ttf" },
+    /* ---- Category: Fixed Width Fonts ---- */
+    { "-= Fixed Width Fonts =-", NULL },
+    { "Space Mono",             "SpaceMono-Regular.ttf" },
+    { "Space Mono Bold",        "SpaceMono-Bold.ttf" },
+    { "B612 Mono",              "B612Mono-Regular.ttf" },
+    { "Share Tech Mono",        "ShareTechMono-Regular.ttf" },
+    { "Overpass Mono",          "OverpassMono-Regular.ttf" },
+    { "Xanh Mono",              "XanhMono-Regular.ttf" },
+    { "Victor Mono",            "VictorMono-Regular.ttf" },
+    { "Fantasque Sans Mono",    "FantasqueSansMono-Regular.ttf" },
+    { "Fantasque Sans Bold",    "FantasqueSansMono-Bold.ttf" },
+    { "Comic Mono",             "ComicMono.ttf" },
+    { "Comic Mono Bold",        "ComicMono-Bold.ttf" },
 };
 #define NUM_TTF_FONTS (int)(sizeof(ttf_fonts) / sizeof(ttf_fonts[0]))
+
+/* Returns 1 if font_idx is a pixel/bitmap-style font (needs NEAREST filter, no UV inset) */
+static int is_pixel_font(int font_idx)
+{
+    if (font_idx < 0) return 1; /* CP437 bitmap */
+    if (font_idx >= NUM_TTF_FONTS) return 0;
+    const char *fn = ttf_fonts[font_idx].filename;
+    if (!fn) return 0;
+    if (fn[0] == 'P' && fn[1] == 'x' && fn[2] == '4') return 1; /* Px437_* */
+    if (fn[0] == 'u' && fn[1] == 'n' && fn[2] == 's') return 1; /* unscii* */
+    return 0;
+}
 
 /* Cached TTF font data (loaded from disk once) */
 static unsigned char *ttf_file_data[MAX_TTF_FONTS] = {0};
@@ -743,7 +769,7 @@ static int ttf_loaded[MAX_TTF_FONTS] = {0};
 #define VKM_VIZ_BLADES   0
 #define VKM_VIZ_CBALLS   1
 #define VKM_VIZ_MATRIX   2
-#define VKM_VIZ_ASTEROIDS 3
+#define VKM_VIZ_VECTROIDS 3
 #define VKM_VIZ_COUNT    4
 
 /* Backgrounds 3rd-level submenu */
@@ -2208,6 +2234,15 @@ static void convo_parse_line(const char *line)
     /* Skip leading whitespace */
     while (*s == ' ') s++;
 
+    /* Strip MegaMUD status prompt prefix: [HP=xxx/MA=xxx]: or [HP=xxx]: etc */
+    if (s[0] == '[' && (s[1] == 'H' || s[1] == 'M')) {
+        const char *rb = strchr(s, ']');
+        if (rb && rb[1] == ':') {
+            s = rb + 2;
+            while (*s == ' ') s++;
+        }
+    }
+
     /* Match channels — just identify, don't reformat */
     if (str_starts(s, "You gossip:") || strstr(s, " gossips:"))
         chan = CHAT_GOSSIP;
@@ -3064,7 +3099,7 @@ static void  clr_draw(int vp_w, int vp_h);
 /* ---- Fonts & Text Panel ---- */
 static int   fnt_visible = 0;
 static float fnt_x = 200.0f, fnt_y = 100.0f;
-static float fnt_w = 300.0f, fnt_h = 500.0f;
+static float fnt_w = 380.0f, fnt_h = 600.0f;
 static int   fnt_dragging = 0;
 static float fnt_drag_ox, fnt_drag_oy;
 static int   fnt_scroll = 0;
@@ -3609,7 +3644,7 @@ static void push_solid(float x0, float y0, float x1, float y1,
     #undef S2Y
 }
 
-/* Terminal visualizations (boulders, matrix rain, asteroids) */
+/* Terminal visualizations (boulders, matrix rain, vectroids) */
 #include "viz_fx.c"
 
 /* Push a text string at pixel position */
@@ -5366,9 +5401,9 @@ static void vkm_draw(int vp_w, int vp_h)
                 } else if (i == VKM_VIZ_MATRIX) {
                     label = "Matrix Rain";
                     is_active = (viz_mode == VIZ_MATRIX);
-                } else if (i == VKM_VIZ_ASTEROIDS) {
-                    label = "Asteroids";
-                    is_active = (viz_mode == VIZ_ASTEROIDS);
+                } else if (i == VKM_VIZ_VECTROIDS) {
+                    label = "Vectroids";
+                    is_active = (viz_mode == VIZ_VECTROIDS);
                 }
             }
 
@@ -6101,12 +6136,14 @@ static void vkt_build_vertices(void)
     float x_offset = (float)margin_px;
     last_cw_px = cw; last_ch_px = ch;  /* store for smoke shader push constants */
 
-    /* UV constants for font atlas (16x16 grid) with half-texel inset
-     * to prevent bilinear filtering from sampling neighboring glyph cells */
+    /* UV constants for font atlas (16x16 grid).
+     * Half-texel inset for LINEAR-filtered TTF fonts prevents bilinear bleed.
+     * Pixel fonts use NEAREST filtering so inset would cut into glyphs. */
     float tex_cw = 1.0f / 16.0f;
     float tex_ch = 1.0f / 16.0f;
-    float hp_u = 0.5f / (float)cur_atlas_w;
-    float hp_v = 0.5f / (float)cur_atlas_h;
+    int pixel_fnt = is_pixel_font(current_font);
+    float hp_u = pixel_fnt ? 0.0f : (0.5f / (float)cur_atlas_w);
+    float hp_v = pixel_fnt ? 0.0f : (0.5f / (float)cur_atlas_h);
 
     /* Helper: pixel to NDC */
     #define PX2NDC_X(px) (((float)(px) / (float)vp_w) * 2.0f - 1.0f)
@@ -6194,8 +6231,17 @@ static void vkt_build_vertices(void)
                 if (byte == 0 || byte == 32) continue;
                 /* Skip box-drawing chars (they use programmatic rendering) */
                 if (byte >= 0xB0 && byte <= 0xDF) continue;
-                float px0 = x_offset + c * cw + sdx, py0 = top_pad + r * ch + sdy;
-                float px1 = px0 + cw, py1 = py0 + ch;
+                float px0, py0, px1, py1;
+                if (pixel_fnt) {
+                    px0 = floorf(x_offset + c * cw) + sdx;
+                    py0 = floorf(top_pad + r * ch) + sdy;
+                    px1 = floorf(x_offset + (c + 1) * cw) + sdx;
+                    py1 = floorf(top_pad + (r + 1) * ch) + sdy;
+                } else {
+                    px0 = x_offset + c * cw + sdx;
+                    py0 = top_pad + r * ch + sdy;
+                    px1 = px0 + cw; py1 = py0 + ch;
+                }
                 /* Apply viz displacement if active */
                 if (viz_mode != VIZ_NONE && r < VIZ_ROWS && c < VIZ_COLS) {
                     if (viz_cells[r][c].shattered) continue;
@@ -6286,8 +6332,17 @@ static void vkt_build_vertices(void)
             /* Sample the theme gradient ramp */
             rgb_t col = sample_ramp(&theme_ramps[fg], grad_t);
 
-            float px0 = x_offset + c * cw, py0 = top_pad + r * ch;
-            float px1 = px0 + cw, py1 = py0 + ch;
+            float px0, py0, px1, py1;
+            if (pixel_fnt) {
+                px0 = floorf(x_offset + c * cw);
+                py0 = floorf(top_pad + r * ch);
+                px1 = floorf(x_offset + (c + 1) * cw);
+                py1 = floorf(top_pad + (r + 1) * ch);
+            } else {
+                px0 = x_offset + c * cw;
+                py0 = top_pad + r * ch;
+                px1 = px0 + cw; py1 = py0 + ch;
+            }
 
             /* Apply viz displacement */
             if (viz_mode != VIZ_NONE && r < VIZ_ROWS && c < VIZ_COLS) {
@@ -6963,6 +7018,7 @@ static int vkt_init_vulkan(void)
 static unsigned char *vkt_load_ttf_file(int font_idx, int *out_size)
 {
     if (font_idx < 0 || font_idx >= NUM_TTF_FONTS) return NULL;
+    if (!ttf_fonts[font_idx].filename) return NULL; /* category separator */
     if (ttf_loaded[font_idx]) {
         *out_size = 0; /* size not tracked, stb doesn't need it */
         return ttf_file_data[font_idx];
@@ -7299,8 +7355,8 @@ static int vkt_upload_font_texture(uint8_t *pixels, uint32_t atlas_w, uint32_t a
 
     /* Sampler — NEAREST for bitmap, LINEAR for TTF antialiased */
     VkSamplerCreateInfo saci = { VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
-    /* NEAREST for crisp bitmap pixels, LINEAR for smooth TTF antialiasing */
-    VkFilter filt = (current_font < 0) ? VK_FILTER_NEAREST : VK_FILTER_LINEAR;
+    /* NEAREST for crisp pixel fonts (CP437, Px437, Unscii), LINEAR for TTF */
+    VkFilter filt = is_pixel_font(current_font) ? VK_FILTER_NEAREST : VK_FILTER_LINEAR;
     saci.magFilter = filt;
     saci.minFilter = filt;
     saci.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
@@ -9099,9 +9155,9 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             } else if (si == VKM_VIZ_MATRIX) {
                 viz_mode = (viz_mode == VIZ_MATRIX) ? VIZ_NONE : VIZ_MATRIX;
                 if (viz_mode == VIZ_MATRIX) viz_init();
-            } else if (si == VKM_VIZ_ASTEROIDS) {
-                viz_mode = (viz_mode == VIZ_ASTEROIDS) ? VIZ_NONE : VIZ_ASTEROIDS;
-                if (viz_mode == VIZ_ASTEROIDS) viz_init();
+            } else if (si == VKM_VIZ_VECTROIDS) {
+                viz_mode = (viz_mode == VIZ_VECTROIDS) ? VIZ_NONE : VIZ_VECTROIDS;
+                if (viz_mode == VIZ_VECTROIDS) viz_init();
             }
             vkm_open = 0;
             vkm_sub = VKM_SUB_NONE;
@@ -9336,23 +9392,24 @@ static DWORD WINAPI vkt_thread(LPVOID param)
         if (!vkt_visible) {
             /* Tear down presentation if window exists */
             if (vkt_hwnd) {
+                /* Restore MegaMUD BEFORE destroying Vulkan window so
+                 * the OS gives focus to MegaMUD instead of desktop */
+                if (mmmain_hwnd) {
+                    if (megamud_hidden) {
+                        ShowWindow(mmmain_hwnd, SW_SHOW);
+                        megamud_hidden = 0;
+                        RedrawWindow(mmmain_hwnd, NULL, NULL,
+                                     RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW | RDW_ERASE | RDW_FRAME);
+                    }
+                    SetForegroundWindow(mmmain_hwnd);
+                    BringWindowToTop(mmmain_hwnd);
+                    if (mmansi_hwnd) SetFocus(mmansi_hwnd);
+                }
                 if (vk_dev) vkDeviceWaitIdle(vk_dev);
                 vkt_destroy_swapchain();
                 if (vk_surface) { vkDestroySurfaceKHR(vk_inst, vk_surface, NULL); vk_surface = VK_NULL_HANDLE; }
                 DestroyWindow(vkt_hwnd);
                 vkt_hwnd = NULL;
-                /* Restore and focus MegaMUD */
-                if (mmmain_hwnd) {
-                    if (megamud_hidden) {
-                        ShowWindow(mmmain_hwnd, SW_SHOW);
-                        megamud_hidden = 0;
-                        /* Force full redraw of MegaMUD and all children (toolbar, icons) */
-                        RedrawWindow(mmmain_hwnd, NULL, NULL,
-                                     RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW | RDW_ERASE | RDW_FRAME);
-                    }
-                    SetForegroundWindow(mmmain_hwnd);
-                    if (mmansi_hwnd) SetFocus(mmansi_hwnd);
-                }
                 api->log("[vk_terminal] Closed fullscreen\n");
             }
             Sleep(50);
@@ -11718,7 +11775,7 @@ static void clr_mouse_up(void) {
 static void fnt_toggle(void) {
     fnt_visible = !fnt_visible;
     if (fnt_visible) {
-        fnt_w = 320 * ui_scale; fnt_h = 500 * ui_scale;
+        fnt_w = 380 * ui_scale; fnt_h = 600 * ui_scale;
         int vp_w = (int)vk_sc_extent.width, vp_h = (int)vk_sc_extent.height;
         fnt_x = (float)(vp_w - (int)fnt_w) / 2.0f;
         fnt_y = (float)(vp_h - (int)fnt_h) / 2.0f;
@@ -11793,15 +11850,31 @@ static void fnt_draw(int vp_w, int vp_h) {
         int fi = i + fnt_scroll;
         const char *label;
         int is_active;
+        int is_separator = 0;
         if (fi == 0) {
             label = "CP437 Bitmap (VGA)";
             is_active = (current_font < 0);
         } else {
-            label = ttf_fonts[fi - 1].name;
-            is_active = (current_font == fi - 1);
+            int ti = fi - 1;
+            label = ttf_fonts[ti].name;
+            is_separator = (ttf_fonts[ti].filename == NULL);
+            is_active = !is_separator && (current_font == ti);
         }
 
         float iy = cy + i * item_h;
+
+        if (is_separator) {
+            /* Category header: centered, accent color, subtle underline */
+            push_solid((int)(x0 + 8), (int)(iy + item_h - 2), (int)(x0 + pw - 8), (int)(iy + item_h - 1),
+                       t->accent[0], t->accent[1], t->accent[2], 0.35f, vp_w, vp_h);
+            /* Center the label */
+            int label_w = (int)strlen(label) * cw;
+            int cx = (int)(x0 + (pw - label_w) / 2);
+            push_text(cx, (int)(iy + 2), label,
+                      t->accent[0] * 0.8f, t->accent[1] * 0.8f, t->accent[2] * 0.8f,
+                      vp_w, vp_h, cw, ch);
+            continue;
+        }
 
         /* Highlight active font */
         if (is_active) {
@@ -11855,8 +11928,6 @@ static void fnt_draw(int vp_w, int vp_h) {
                     "Left Margin", vbuf, vp_w, vp_h, t);
     slider_y += row_h;
 
-    /* Update panel height to fit content */
-    fnt_h = slider_y - y0 + 8;
 }
 
 static int fnt_mouse_down(int mx, int my) {
@@ -11894,6 +11965,8 @@ static int fnt_mouse_down(int mx, int my) {
         int clicked_row = (int)((float)(my - (int)list_y0) / (float)item_h);
         int fi = clicked_row + fnt_scroll;
         if (fi >= 0 && fi < total_fonts) {
+            /* Skip category separator clicks */
+            if (fi > 0 && ttf_fonts[fi - 1].filename == NULL) return 1;
             pending_font_idx = (fi == 0) ? -1 : fi - 1;
             font_change_pending = 1;
             return 1;
@@ -11969,10 +12042,19 @@ static int fnt_scroll_wheel(int mx, int my, int delta) {
     if (mx < (int)fnt_x || mx >= (int)(fnt_x + fnt_w) ||
         my < (int)fnt_y || my >= (int)(fnt_y + fnt_h)) return 0;
     fnt_scroll -= delta;
+    int cw = (int)(VKM_CHAR_W * ui_scale), ch = (int)(VKM_CHAR_H * ui_scale);
+    int titlebar_h = ch + 8;
+    int item_h = ch + 6;
     int total_fonts = NUM_TTF_FONTS + 1;
+    float slider_area_h = (ch + 14) * 2 + 24;
+    float list_y0 = fnt_y + titlebar_h + 4 + ch + 4 + 4;
+    float list_area_h = fnt_h - (list_y0 - fnt_y) - slider_area_h - 8;
+    int visible_items = (int)(list_area_h / (float)item_h);
+    if (visible_items < 3) visible_items = 3;
+    int max_scroll = total_fonts - visible_items;
+    if (max_scroll < 0) max_scroll = 0;
     if (fnt_scroll < 0) fnt_scroll = 0;
-    if (fnt_scroll > total_fonts - 5) fnt_scroll = total_fonts - 5;
-    if (fnt_scroll < 0) fnt_scroll = 0;
+    if (fnt_scroll > max_scroll) fnt_scroll = max_scroll;
     return 1;
 }
 
