@@ -243,7 +243,10 @@ void main() {
             else if (shi == 4) smoke_color = vec3(st2, sp2, sv);
             else               smoke_color = vec3(sv, sp2, sq2);
 
-            outColor.rgb = mix(smoke_color * smoke_alpha, outColor.rgb, outColor.a);
+            /* Composite smoke behind existing content.
+             * Use straight (non-premultiplied) smoke_color so hardware
+             * alpha blending (SRC_ALPHA, 1-SRC_ALPHA) doesn't square it. */
+            outColor.rgb = mix(smoke_color, outColor.rgb, outColor.a);
             outColor.a = max(outColor.a, smoke_alpha);
         }
     }
@@ -304,7 +307,16 @@ void main() {
      * Recap bg text gets sharpening only — no lighting to avoid gradient banding. */
     if (pc.fx_sobel > 0.5 && outColor.a > 0.01) {
         vec2 texSize = vec2(textureSize(fontTex, 0));
-        vec2 tx = 1.0 / texSize;
+        /* Adaptive sampling: scale to ~1 screen pixel instead of 1 texel.
+         * At high DPI (4K), atlas texels map to multiple screen pixels,
+         * so 1-texel sampling creates blocky/pixelated lighting. Use
+         * fractional texel offsets for smooth gradients at any resolution.
+         * glyph_texels = atlas_size/16, screen_px = char_w/h_px.
+         * ratio = texels_per_glyph / screen_px_per_glyph, clamped >= 0.5 */
+        vec2 glyph_tex = texSize / 16.0;
+        vec2 screen_px = max(vec2(pc.char_w_px, pc.char_h_px), vec2(4.0));
+        vec2 scale = clamp(glyph_tex / screen_px, vec2(0.4), vec2(1.5));
+        vec2 tx = scale / texSize;
 
         /* 3x3 Sobel kernel on font texture alpha */
         float tl = texture(fontTex, fragUV + vec2(-tx.x, -tx.y)).a;
@@ -337,8 +349,10 @@ void main() {
             /* Sharpen color intensity at edges */
             outColor.rgb *= 1.0 + edgeMag * 0.8;
 
-            /* Surface normal from Sobel gradient */
-            vec3 normal = normalize(vec3(-sx * 6.0, -sy * 6.0, 1.0));
+            /* Surface normal from Sobel gradient — scale with sampling distance
+             * so lighting is resolution-independent */
+            float nscale = 4.0 / max(scale.x, 0.4);
+            vec3 normal = normalize(vec3(-sx * nscale, -sy * nscale, 1.0));
 
             /* Directional plastic lighting */
             vec3 lightDir = normalize(vec3(-0.5, -0.6, 0.8));

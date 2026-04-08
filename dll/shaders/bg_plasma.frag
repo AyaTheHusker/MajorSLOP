@@ -27,7 +27,8 @@ layout(push_constant) uniform PushConstants {
     float beat_zoom;      /* beat-reactive zoom pulse */
     float material_type;  /* 0=glossy,1=wet,2=metallic,3=matte */
     float material_str;   /* 0..2 material strength */
-    float _pad0;
+    float tonemap_mode;   /* 0=none, 1=ACES, 2=Reinhard, 3=Hable, 4=AgX */
+    float tonemap_exposure; /* 0.2..4.0, default 1.0 */
 } pc;
 
 /* --- Gradient noise (no grid artifacts) --- */
@@ -240,6 +241,50 @@ void main() {
     /* Subtle vignette */
     float vign = 1.0 - length(uv - 0.5) * 0.5;
     color *= vign;
+
+    /* ---- Tonemapping ---- */
+    if (pc.tonemap_mode > 0.5) {
+        color *= pc.tonemap_exposure;
+
+        int tm = int(pc.tonemap_mode + 0.5);
+        if (tm == 1) {
+            /* ACES Filmic — warm cinematic look */
+            mat3 aces_in = mat3(
+                0.59719, 0.07600, 0.02840,
+                0.35458, 0.90834, 0.13383,
+                0.04823, 0.01566, 0.83777
+            );
+            mat3 aces_out = mat3(
+                 1.60475, -0.10208, -0.00327,
+                -0.53108,  1.10813, -0.07276,
+                -0.07367, -0.00605,  1.07602
+            );
+            vec3 v = aces_in * color;
+            vec3 a = v * (v + 0.0245786) - 0.000090537;
+            vec3 b = v * (0.983729 * v + 0.4329510) + 0.238081;
+            color = aces_out * (a / b);
+        } else if (tm == 2) {
+            /* Reinhard — simple, natural */
+            color = color / (color + 1.0);
+        } else if (tm == 3) {
+            /* Hable/Uncharted 2 — punchy, game-y */
+            float A = 0.15, B = 0.50, C = 0.10, D = 0.20, E = 0.02, F = 0.30;
+            vec3 x = color;
+            color = ((x*(A*x+C*B)+D*E)/(x*(A*x+B)+D*F))-E/F;
+            float W = 11.2;
+            float wn = ((W*(A*W+C*B)+D*E)/(W*(A*W+B)+D*F))-E/F;
+            color /= wn;
+        } else if (tm == 4) {
+            /* AgX — modern neutral, Blender-style */
+            /* Simplified AgX: log encoding + sigmoid */
+            color = max(color, vec3(1e-6));
+            color = log2(color) * 0.18 + 0.5; /* log2 encoding */
+            /* Sigmoid contrast curve */
+            color = clamp(color, 0.0, 1.0);
+            color = color * color * (3.0 - 2.0 * color); /* smoothstep */
+        }
+        color = clamp(color, 0.0, 1.0);
+    }
 
     outColor = vec4(color, pc.alpha);
 }

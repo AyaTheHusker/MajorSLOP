@@ -12,18 +12,21 @@
 
 static void mr_toggle(void) {
     mr_visible = !mr_visible;
-    if (mr_visible && mr_x < 1.0f && mr_y < 1.0f) {
-        int vp_w = (int)vk_sc_extent.width, vp_h = (int)vk_sc_extent.height;
-        mr_x = (float)(vp_w - (int)mr_w) / 2.0f;
-        mr_y = (float)(vp_h - (int)mr_h) / 2.0f;
+    if (mr_visible) {
+        mr_w = 380 * ui_scale; mr_h = 500 * ui_scale;
+        if (mr_x < 1.0f && mr_y < 1.0f) {
+            int vp_w = (int)vk_sc_extent.width, vp_h = (int)vk_sc_extent.height;
+            mr_x = (float)(vp_w - (int)mr_w) / 2.0f;
+            mr_y = (float)(vp_h - (int)mr_h) / 2.0f;
+        }
     }
 }
 
 /* ---- Transport layout: all buttons same width ---- */
 
-#define MR_BTN_W  38
-#define MR_BTN_H  26
-#define MR_BTN_GAP 4
+#define MR_BTN_W_BASE  38
+#define MR_BTN_H_BASE  26
+#define MR_BTN_GAP_BASE 4
 #define MR_NUM_BTNS 5  /* prev, play/pause, stop, next, shuffle */
 
 /* ---- Panel Draw ---- */
@@ -37,7 +40,10 @@ static void mr_draw(int vp_w, int vp_h)
         ui_font_ready ? push_solid_ui : push_solid;
     void (*ptext)(int, int, const char *, float, float, float, int, int, int, int) =
         ui_font_ready ? push_text_ui : push_text;
-    int cw = VSB_CHAR_W, ch = VSB_CHAR_H;
+    int cw = (int)(VSB_CHAR_W * ui_scale), ch = (int)(VSB_CHAR_H * ui_scale);
+    int MR_BTN_W = (int)(MR_BTN_W_BASE * ui_scale);
+    int MR_BTN_H = (int)(MR_BTN_H_BASE * ui_scale);
+    int MR_BTN_GAP = (int)(MR_BTN_GAP_BASE * ui_scale);
 
     float x0 = mr_x, y0 = mr_y;
     float pw = mr_w, ph = mr_h;
@@ -48,10 +54,10 @@ static void mr_draw(int vp_w, int vp_h)
     float dmr = t->dim[0], dmg = t->dim[1], dmb = t->dim[2];
     float acr = t->accent[0], acg = t->accent[1], acb = t->accent[2];
 
-    int titlebar_h = ch + 10;
-    int tab_h = ch + 8;
-    int row_h = ch + 4;
-    int pad = 8;
+    int titlebar_h = ch + (int)(10 * ui_scale);
+    int tab_h = ch + (int)(8 * ui_scale);
+    int row_h = ch + (int)(4 * ui_scale);
+    int pad = (int)(8 * ui_scale);
 
     /* ---- Panel background ---- */
     psolid(x0, y0, x1, y1,
@@ -265,7 +271,7 @@ static void mr_draw(int vp_w, int vp_h)
         int vx0 = (int)x0 + pad;
         int vx1 = (int)x1 - pad;
         int vy = cy + 4;
-        int slider_h = 8;
+        int slider_h = (int)(8 * ui_scale);
 
         /* Volume label (left) */
         ptext(vx0, vy - ch - 2, "VOL", dmr, dmg, dmb, vp_w, vp_h, cw, ch);
@@ -345,7 +351,7 @@ static void mr_draw(int vp_w, int vp_h)
 
     /* ---- Visualizer (spectrum bars or oscilloscope waveform) ---- */
     {
-        int viz_h = 48;
+        int viz_h = (int)(48 * ui_scale);
         float viz_y0 = (float)cy, viz_y1 = (float)(cy + viz_h);
 
         /* Background — darker inset */
@@ -635,12 +641,12 @@ static void mr_draw(int vp_w, int vp_h)
 static void mr_get_layout(int *out_transport_y, int *out_vol_y, int *out_search_y,
                           int *out_subtab_y, int *out_list_y)
 {
-    int ch = VSB_CHAR_H;
-    int titlebar_h = ch + 10;
-    int tab_h = ch + 8;
-    int row_h = ch + 4;
-    int slider_h = 8;
-    int viz_h = 48;
+    int ch = (int)(VSB_CHAR_H * ui_scale);
+    int titlebar_h = ch + (int)(10 * ui_scale);
+    int tab_h = ch + (int)(8 * ui_scale);
+    int row_h = ch + (int)(4 * ui_scale);
+    int slider_h = (int)(8 * ui_scale);
+    int viz_h = (int)(48 * ui_scale);
 
     int cy = titlebar_h + 2;       /* after title bar */
     cy += tab_h + 2;               /* after tab bar */
@@ -648,12 +654,12 @@ static void mr_get_layout(int *out_transport_y, int *out_vol_y, int *out_search_
     cy += row_h;                   /* station/track name */
     cy += row_h + 2;              /* artist/BPM row */
     *out_transport_y = cy;
-    cy += MR_BTN_H + 4;           /* after transport */
+    cy += (int)(MR_BTN_H_BASE * ui_scale) + 4;  /* after transport */
     *out_vol_y = cy + 4;
     cy += slider_h + 6;           /* after volume slider */
     /* codec badge (variable height, approximate) */
     if (mr_transport == MR_STATE_PLAYING && mr_codec != MR_CODEC_NONE)
-        cy += VSB_CHAR_H + 6 + 2;
+        cy += ch + 6 + 2;
     cy += viz_h + 4;              /* after spectrum viz */
     cy += 1 + 3;                  /* after divider */
     *out_search_y = cy;
@@ -674,11 +680,14 @@ static int mr_mouse_down(int mx, int my) {
         return 0;
     }
 
-    int cw = VSB_CHAR_W, ch = VSB_CHAR_H;
-    int titlebar_h = ch + 10;
-    int tab_h = ch + 8;
-    int row_h = ch + 4;
-    int pad = 8;
+    int cw = (int)(VSB_CHAR_W * ui_scale), ch = (int)(VSB_CHAR_H * ui_scale);
+    int MR_BTN_W = (int)(MR_BTN_W_BASE * ui_scale);
+    int MR_BTN_H = (int)(MR_BTN_H_BASE * ui_scale);
+    int MR_BTN_GAP = (int)(MR_BTN_GAP_BASE * ui_scale);
+    int titlebar_h = ch + (int)(10 * ui_scale);
+    int tab_h = ch + (int)(8 * ui_scale);
+    int row_h = ch + (int)(4 * ui_scale);
+    int pad = (int)(8 * ui_scale);
     int lx = mx - (int)mr_x;
     int ly = my - (int)mr_y;
 
@@ -742,20 +751,24 @@ static int mr_mouse_down(int mx, int my) {
     }
 
     /* Volume slider */
-    if (ly >= vol_y - 4 && ly < vol_y + 12) {
-        float slider_x0 = (float)pad;
-        float slider_x1 = mr_w - (float)pad;
-        float pct = ((float)lx - slider_x0) / (slider_x1 - slider_x0);
-        if (pct < 0.0f) pct = 0.0f;
-        if (pct > 1.0f) pct = 1.0f;
-        mr_volume = pct;
-        mr_vol_dragging = 1;
-        return 1;
+    {
+        int slider_h = (int)(8 * ui_scale);
+        if (ly >= vol_y - 4 && ly < vol_y + slider_h + 6) {
+            float slider_x0 = (float)pad;
+            float slider_x1 = mr_w - (float)pad;
+            float pct = ((float)lx - slider_x0) / (slider_x1 - slider_x0);
+            if (pct < 0.0f) pct = 0.0f;
+            if (pct > 1.0f) pct = 1.0f;
+            mr_volume = pct;
+            mr_vol_dragging = 1;
+            return 1;
+        }
     }
 
     /* OSC/FFT toggle button — sits at top-right of viz area */
     {
-        int viz_top = vol_y + 12;  /* after volume slider */
+        int slider_h = (int)(8 * ui_scale);
+        int viz_top = vol_y + slider_h + 6;  /* after volume slider */
         if (mr_transport == MR_STATE_PLAYING && mr_codec != MR_CODEC_NONE)
             viz_top += ch + 6 + 2; /* skip codec badge */
         int btn_w = 3 * cw + 6;

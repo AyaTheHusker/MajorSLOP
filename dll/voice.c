@@ -60,7 +60,7 @@ static HWAVEIN hWaveIn = NULL;
 static WAVEHDR waveHdrs[VOICE_NUM_BUFS];
 static char waveBufs[VOICE_NUM_BUFS][VOICE_BUF_SAMPLES * VOICE_BITS / 8];
 
-static volatile int voice_enabled = 0;     /* plugin enabled */
+static volatile int voice_enabled = 1;     /* plugin enabled (on by default) */
 static volatile int ptt_held = 0;          /* push-to-talk key held */
 static volatile int recording = 0;         /* actively recording */
 static int ptt_key = VOICE_PTT_KEY;        /* configurable PTT key */
@@ -69,6 +69,20 @@ static char audio_device_name[64] = "Default";
 
 static char last_result[VOICE_MAX_RESULT] = {0};
 static char model_dir[MAX_PATH] = {0};     /* path to voice-model/ */
+
+/* ---- Exported shared state for VK terminal to read ---- */
+/* Audio level (peak) from most recent buffer, 0.0..1.0 */
+__declspec(dllexport) volatile float voice_audio_level = 0.0f;
+/* 1 while PTT is held and recording */
+__declspec(dllexport) volatile int voice_ptt_active = 0;
+/* Last recognized text (copied after recognition) */
+__declspec(dllexport) char voice_last_text[VOICE_MAX_RESULT] = {0};
+/* Timestamp (GetTickCount) of last recognition result */
+__declspec(dllexport) volatile DWORD voice_last_text_tick = 0;
+/* Waveform ring buffer for oscilloscope display */
+#define VOICE_WAVE_SIZE 128
+__declspec(dllexport) float voice_waveform[VOICE_WAVE_SIZE];
+__declspec(dllexport) volatile int voice_wave_pos = 0;
 
 /* ---- Forward declarations ---- */
 static void voice_start_recording(void);
@@ -320,12 +334,30 @@ static void CALLBACK wave_in_callback(HWAVEIN hwi, UINT msg, DWORD_PTR inst,
 
     if (msg == WIM_DATA && recording && decoder) {
         WAVEHDR *hdr = (WAVEHDR *)param1;
+        int16_t *samples = (int16_t *)hdr->lpData;
+        int nsamples = hdr->dwBytesRecorded / 2;
+
+        /* Calculate peak level and capture waveform for VK terminal */
+        {
+            int peak = 0;
+            int step = nsamples / VOICE_WAVE_SIZE;
+            if (step < 1) step = 1;
+            int wp = voice_wave_pos;
+            for (int i = 0; i < nsamples; i++) {
+                int v = samples[i] < 0 ? -samples[i] : samples[i];
+                if (v > peak) peak = v;
+                /* Downsample into waveform ring buffer */
+                if (i % step == 0 && (i / step) < VOICE_WAVE_SIZE) {
+                    voice_waveform[wp % VOICE_WAVE_SIZE] = (float)samples[i] / 32768.0f;
+                    wp++;
+                }
+            }
+            voice_wave_pos = wp;
+            voice_audio_level = (float)peak / 32768.0f;
+        }
 
         /* Feed audio to PocketSphinx */
-        ps_process_raw(decoder,
-                       (const int16 *)hdr->lpData,
-                       hdr->dwBytesRecorded / 2,  /* samples = bytes / 2 for 16-bit */
-                       FALSE, FALSE);
+        ps_process_raw(decoder, samples, nsamples, FALSE, FALSE);
 
         /* Re-queue buffer if still recording */
         if (recording) {
@@ -373,6 +405,8 @@ static void voice_start_recording(void)
     }
 
     recording = 1;
+    voice_ptt_active = 1;
+    voice_audio_level = 0.0f;
     waveInStart(hWaveIn);
     api->log("[voice] Recording started (PTT held)\n");
 }
@@ -471,6 +505,8 @@ static void voice_stop_recording(void)
 {
     if (!recording) return;
     recording = 0;
+    voice_ptt_active = 0;
+    voice_audio_level = 0.0f;
 
     /* Stop capture */
     waveInStop(hWaveIn);
@@ -491,6 +527,9 @@ static void voice_stop_recording(void)
     if (hyp && hyp[0]) {
         strncpy(last_result, hyp, VOICE_MAX_RESULT - 1);
         last_result[VOICE_MAX_RESULT - 1] = '\0';
+        strncpy(voice_last_text, hyp, VOICE_MAX_RESULT - 1);
+        voice_last_text[VOICE_MAX_RESULT - 1] = '\0';
+        voice_last_text_tick = GetTickCount();
         api->log("[voice] Recognized: \"%s\"\n", last_result);
 
         /* Route command through fake_remote or inject_command */
@@ -498,6 +537,8 @@ static void voice_stop_recording(void)
     } else {
         api->log("[voice] No speech recognized\n");
         last_result[0] = '\0';
+        strncpy(voice_last_text, "(no speech detected)", sizeof(voice_last_text) - 1);
+        voice_last_text_tick = GetTickCount();
     }
 }
 

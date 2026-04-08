@@ -35,7 +35,7 @@
 #define TERM_ROWS       25
 #define TERM_COLS       80
 
-#define INPUT_BAR_H     40      /* pixels for input bar */
+#define INPUT_BAR_H_BASE 40     /* pixels for input bar at 1080p */
 #define MAX_HISTORY     64
 #define INPUT_BUF_SZ    256
 
@@ -569,6 +569,8 @@ static void apply_theme_palette(int theme_idx)
 static int fs_res_idx = 0;     /* fullscreen resolution index */
 static int fs_width = 1920;
 static int fs_height = 1080;
+static float ui_scale = 1.0f; /* DPI scale: vp_h/1080, updated each frame */
+static int term_margin = 0;  /* left margin in 1080p pixels, scaled by ui_scale */
 
 
 /* ---- Font system ----
@@ -619,17 +621,41 @@ static const unsigned int cp437_to_unicode[256] = {
 };
 
 /* TTF font table — name + path relative to DLL directory */
-#define MAX_TTF_FONTS 8
+#define MAX_TTF_FONTS 32
 typedef struct {
     const char *name;     /* display name in menu */
     const char *filename; /* .ttf filename in fonts/ subdir */
 } ttf_font_entry_t;
 
 static const ttf_font_entry_t ttf_fonts[] = {
-    { "JetBrains Mono",      "JetBrainsMono-Regular.ttf" },
-    { "Fira Code",           "FiraCode-Regular.ttf" },
-    { "DejaVu Sans Mono",    "DejaVuSansMono-Bold.ttf" },
-    { "Source Code Pro",     "SourceCodePro-Black.ttf" },
+    /* Modern monospace */
+    { "JetBrains Mono",         "JetBrainsMono-Regular.ttf" },
+    { "JetBrains Mono Bold",    "JetBrainsMono-Bold.ttf" },
+    { "Fira Code",              "FiraCode-Regular.ttf" },
+    { "Hack",                   "Hack-Regular.ttf" },
+    { "Hack Bold",              "Hack-Bold.ttf" },
+    { "Iosevka Fixed",          "IosevkaFixed-Regular.ttf" },
+    { "DejaVu Sans Mono Bold",  "DejaVuSansMono-Bold.ttf" },
+    { "Source Code Pro Medium",  "SourceCodePro-Medium.ttf" },
+    { "Source Code Pro Semi",    "SourceCodePro-Semibold.ttf" },
+    { "Source Code Pro Black",   "SourceCodePro-Black.ttf" },
+    { "Terminus",               "TerminusTTF-Regular.ttf" },
+    /* Retro IBM/PC */
+    { "IBM VGA 8x16",           "Px437_IBM_VGA_8x16.ttf" },
+    { "IBM VGA 9x16",           "Px437_IBM_VGA_9x16.ttf" },
+    { "IBM EGA 8x14",           "Px437_IBM_EGA_8x14.ttf" },
+    { "IBM MDA",                "Px437_IBM_MDA.ttf" },
+    { "IBM CGA",                "Px437_IBM_CGA.ttf" },
+    { "Phoenix VGA",            "Px437_PhoenixVGA_8x16.ttf" },
+    { "Compaq Portable",        "Px437_Compaq_Port3.ttf" },
+    { "AT&T PC6300",            "Px437_ATT_PC6300.ttf" },
+    { "Amstrad PC",             "Px437_Amstrad_PC.ttf" },
+    /* Unscii (fantasy/retro) */
+    { "Unscii 16",              "unscii-16.ttf" },
+    { "Unscii Fantasy",         "unscii-8-fantasy.ttf" },
+    { "Unscii MCR",             "unscii-8-mcr.ttf" },
+    { "Unscii Tall",            "unscii-8-tall.ttf" },
+    { "Unscii Thin",            "unscii-8-thin.ttf" },
 };
 #define NUM_TTF_FONTS (int)(sizeof(ttf_fonts) / sizeof(ttf_fonts[0]))
 
@@ -699,9 +725,12 @@ static int ttf_loaded[MAX_TTF_FONTS] = {0};
 #define VKM_EXT_RNDRECAP 4   /* Show Combat Round Totals */
 #define VKM_EXT_HDR      5   /* HDR Toggle */
 #define VKM_EXT_SEP2     6   /* separator */
-#define VKM_EXT_SAVE     7   /* Save Settings */
-#define VKM_EXT_RESET    8   /* Reset to Defaults */
-#define VKM_EXT_COUNT    9
+#define VKM_EXT_CONSOLE  7   /* MMUDPy Console */
+#define VKM_EXT_SCRIPTMGR 8  /* Script Manager */
+#define VKM_EXT_SEP3     9   /* separator */
+#define VKM_EXT_SAVE     10  /* Save Settings */
+#define VKM_EXT_RESET    11  /* Reset to Defaults */
+#define VKM_EXT_COUNT    12
 
 /* Extras submenu items */
 #define VKM_SUB_XTRA2    8
@@ -827,6 +856,7 @@ static void pst_toggle(void);
 static void pst_feed(const char *data, int len);
 static void pst_reset_exp(void);
 static void pst_reset_combat(void);
+static void pst_recap_poll(void);
 static void pst_flush_round(void);
 static void pst_on_round_tick(int round_num);
 
@@ -877,15 +907,25 @@ static void mouse_update_scale(int surface_w, int surface_h) {
 static inline int mouse_tx(int wx) { return (int)(wx * mouse_scale_x); }
 static inline int mouse_ty(int wy) { return (int)(wy * mouse_scale_y); }
 
-/* Menu rendering constants */
-#define VKM_ITEM_H   32
-#define VKM_PAD      10
-#define VKM_ROOT_W   210
-#define VKM_SUB_W    280
-#define VKM_SEP_H    12
+/* Menu rendering constants (base values at 1080p, scaled by ui_scale) */
+#define VKM_ITEM_H_BASE   32
+#define VKM_PAD_BASE      10
+#define VKM_ROOT_W_BASE   210
+#define VKM_SUB_W_BASE    280
+#define VKM_SEP_H_BASE    12
 #define VKM_CHAR_W   10   /* menu text character width */
 #define VKM_CHAR_H   20   /* menu text character height */
-#define VKM_SHADOW   6    /* drop shadow offset */
+#define VKM_SHADOW_BASE   6    /* drop shadow offset */
+/* Scaled menu dimensions — updated when ui_scale changes */
+static int VKM_ITEM_H, VKM_PAD, VKM_ROOT_W, VKM_SUB_W, VKM_SEP_H, VKM_SHADOW;
+static void vkm_update_scale(void) {
+    VKM_ITEM_H = (int)(VKM_ITEM_H_BASE * ui_scale);
+    VKM_PAD    = (int)(VKM_PAD_BASE * ui_scale);
+    VKM_ROOT_W = (int)(VKM_ROOT_W_BASE * ui_scale);
+    VKM_SUB_W  = (int)(VKM_SUB_W_BASE * ui_scale);
+    VKM_SEP_H  = (int)(VKM_SEP_H_BASE * ui_scale);
+    VKM_SHADOW = (int)(VKM_SHADOW_BASE * ui_scale);
+}
 
 /* Forward declarations for rendering helpers (defined after Vulkan init) */
 static void push_solid(float x0, float y0, float x1, float y1,
@@ -1265,7 +1305,7 @@ static int vkw_create(const char *title, int x, int y, int w, int h, int has_inp
     win->x = (float)x; win->y = (float)y;
     win->w = (float)w; win->h = (float)h;
     win->opacity = 0.96f;
-    win->font_scale = 1.0f;
+    win->font_scale = ui_scale;
     win->has_input = has_input;
 
     /* Initialize wobble grid */
@@ -2048,8 +2088,13 @@ static void vkw_toggle_console(int vp_w, int vp_h)
     vkw_console_idx = vkw_create("MMUDPy Console", cx, cy, cw, ch, 1);
     if (vkw_console_idx >= 0) {
         vkw_focus = vkw_console_idx;
-        vkw_print(vkw_console_idx, "MMUDPy Python Console");
-        vkw_print(vkw_console_idx, "Type Python expressions. help() for commands.");
+        vkw_print(vkw_console_idx, "\x1b[1;37mMMUDPy Python Console\x1b[0m");
+        vkw_print(vkw_console_idx, "Type Python expressions. Commands:");
+        vkw_print(vkw_console_idx, "  \x1b[1;36mbg.help()\x1b[0m        - Background plasma commands");
+        vkw_print(vkw_console_idx, "  \x1b[1;36msmoke.help()\x1b[0m     - Smoky letters commands");
+        vkw_print(vkw_console_idx, "  \x1b[1;36mvk_plugins.list()\x1b[0m - List VK plugins");
+        vkw_print(vkw_console_idx, "  \x1b[1;36mmud.help()\x1b[0m       - Script/MUD commands");
+        vkw_print(vkw_console_idx, "  \x1b[1;36mmud.list()\x1b[0m       - List loaded scripts");
         vkw_print(vkw_console_idx, "");
     }
 }
@@ -2937,6 +2982,8 @@ static float bg_plasma_sharpen    = 0.0f;   /* 0..2 sharpen strength */
 static const char *bgp_mat_names[BGP_MAT_COUNT] = { "Glossy", "Wet", "Metallic", "Matte" };
 static int   bg_plasma_material   = 0;
 static float bg_plasma_mat_str    = 1.0f;   /* 0..2 material strength */
+static int   bg_tonemap_mode     = 0;      /* 0=none, 1=ACES, 2=Reinhard, 3=Hable, 4=AgX */
+static float bg_tonemap_exposure = 1.0f;   /* 0.2..4.0 */
 /* Beat response: 0=none,1=hue_shift,2=brightness_burst,3=zoom_pulse */
 #define BGP_BEAT_NONE    0
 #define BGP_BEAT_HUE     1
@@ -2952,7 +2999,7 @@ static int bg_plasma_beat_rms    = 0;
 /* Background settings panel state */
 static int   bgp_visible = 0;
 static float bgp_x = 140.0f, bgp_y = 100.0f;
-static float bgp_w = 320.0f, bgp_h = 500.0f;
+static float bgp_w = 420.0f, bgp_h = 640.0f;
 static int   bgp_dragging = 0;
 static float bgp_drag_ox, bgp_drag_oy;
 static int   bgp_active_slider = -1;
@@ -3013,6 +3060,22 @@ static float clr_drag_ox, clr_drag_oy;
 static int   clr_active_slider = -1;  /* 0=brightness, 1=contrast, 2=hue, 3=saturation */
 static void  clr_open_window(void);
 static void  clr_draw(int vp_w, int vp_h);
+
+/* ---- Fonts & Text Panel ---- */
+static int   fnt_visible = 0;
+static float fnt_x = 200.0f, fnt_y = 100.0f;
+static float fnt_w = 300.0f, fnt_h = 500.0f;
+static int   fnt_dragging = 0;
+static float fnt_drag_ox, fnt_drag_oy;
+static int   fnt_scroll = 0;
+static int   fnt_hover_item = -1;
+static int   fnt_active_slider = -1; /* 0=font_size, 1=margin */
+static void  fnt_toggle(void);
+static void  fnt_draw(int vp_w, int vp_h);
+static int   fnt_mouse_down(int mx, int my);
+static void  fnt_mouse_move(int mx, int my);
+static void  fnt_mouse_up(void);
+static int   fnt_scroll_wheel(int mx, int my, int delta);
 static int   clr_mouse_down(int mx, int my);
 static void  clr_mouse_move(int mx, int my);
 static void  clr_mouse_up(void);
@@ -3020,7 +3083,7 @@ static void  clr_mouse_up(void);
 /* ---- Vulkan Round Timer Widget ---- */
 #define VRT_DEFAULT_SIZE 160
 #define VRT_MIN_SIZE      80
-#define VRT_MAX_SIZE     500
+#define VRT_MAX_SIZE     700
 #define VRT_ARC_SEGS      64     /* segments for smooth arc */
 #define VRT_PARTICLE_MAX   24
 
@@ -3051,9 +3114,15 @@ static volatile int vrt_ms_rounds_detected = 0;
 static int  vrt_ctx_open = 0;
 static int  vrt_ctx_x = 0, vrt_ctx_y = 0;
 static int  vrt_ctx_hover = -1;
-#define VRT_CTX_W       220
-#define VRT_CTX_ITEM_H   28
-#define VRT_CTX_PAD       6
+#define VRT_CTX_W_BASE       220
+#define VRT_CTX_ITEM_H_BASE  28
+#define VRT_CTX_PAD_BASE      6
+static int VRT_CTX_W, VRT_CTX_ITEM_H, VRT_CTX_PAD;
+static void vrt_ctx_update_scale(void) {
+    VRT_CTX_W = (int)(VRT_CTX_W_BASE * ui_scale);
+    VRT_CTX_ITEM_H = (int)(VRT_CTX_ITEM_H_BASE * ui_scale);
+    VRT_CTX_PAD = (int)(VRT_CTX_PAD_BASE * ui_scale);
+}
 
 /* Menu item IDs */
 #define VRT_CTX_SPELL     0
@@ -3063,12 +3132,13 @@ static int  vrt_ctx_hover = -1;
 #define VRT_CTX_NORMAL    4
 #define VRT_CTX_LARGE     5
 #define VRT_CTX_XLARGE    6
-#define VRT_CTX_SEP2      7
-#define VRT_CTX_ORBITS    8
-#define VRT_CTX_SEP3      9
-#define VRT_CTX_RESET    10
-#define VRT_CTX_HIDE     11
-#define VRT_CTX_COUNT    12
+#define VRT_CTX_XXL       7
+#define VRT_CTX_SEP2      8
+#define VRT_CTX_ORBITS    9
+#define VRT_CTX_SEP3     10
+#define VRT_CTX_RESET    11
+#define VRT_CTX_HIDE     12
+#define VRT_CTX_COUNT    13
 
 /* Spell input dialog state */
 static int  vrt_spell_input = 0;   /* 1 = showing spell input */
@@ -3083,13 +3153,14 @@ static struct {
 } vrt_particles[VRT_PARTICLE_MAX];
 static int vrt_particle_idx = 0;
 
-/* Orbital particles — Lissajous orbits around the ring */
+/* Orbital particles — double helix orbiting the center */
 #define VRT_ORBIT_MAX  32
 static struct {
     float birth_time;    /* fx_time at spawn */
-    float phase;         /* unique phase offset */
-    float freq_a, freq_b; /* Lissajous frequency pair */
-    float orbit_r;       /* orbit radius (fraction of ring R) */
+    float phase;         /* position along helix (radians) */
+    float helix_id;      /* which strand: 0 or 1 */
+    float orbit_r;       /* base orbit radius (fraction of ring R) */
+    float speed;         /* orbit speed multiplier */
     float r, g, b;       /* color */
     int   alive;
 } vrt_orbits[VRT_ORBIT_MAX];
@@ -3099,23 +3170,30 @@ static int vrt_last_spawn_round = -1; /* prevent double-spawning same round */
 
 static void vrt_spawn_orbits(float cr, float cg, float cb)
 {
-    /* Spawn a batch of orbital particles with varied Lissajous ratios */
-    int batch = 12;
+    /* Two intertwined helix strands, 6 particles each */
+    int per_strand = 6;
+    int batch = per_strand * 2;
     for (int i = 0; i < batch; i++) {
         int idx = vrt_orbit_idx % VRT_ORBIT_MAX;
+        int strand = i / per_strand;
+        int si = i % per_strand;
         vrt_orbits[idx].birth_time = fx_time;
-        vrt_orbits[idx].phase = (float)i * 0.52f + fx_time * 3.7f;
-        /* Varied frequency ratios for complex woven patterns */
-        float ratios_a[] = {2,3,3,5,4,5,7,3,2,5,4,7};
-        float ratios_b[] = {3,2,5,3,3,4,4,7,5,2,7,5};
-        vrt_orbits[idx].freq_a = ratios_a[i % 12];
-        vrt_orbits[idx].freq_b = ratios_b[i % 12];
-        vrt_orbits[idx].orbit_r = 0.65f + (float)(i % 5) * 0.04f;
-        /* Color: tinted from current arc color with variation */
-        float hue_var = (float)i * 0.08f;
-        vrt_orbits[idx].r = cr * (0.7f + hue_var) + 0.15f;
-        vrt_orbits[idx].g = cg * (0.9f - hue_var * 0.3f) + 0.1f;
-        vrt_orbits[idx].b = cb * (0.8f + hue_var * 0.5f) + 0.1f;
+        /* Evenly spaced along helix, PI offset between strands */
+        vrt_orbits[idx].phase = (float)si * (2.0f * 3.14159f / (float)per_strand);
+        vrt_orbits[idx].helix_id = (float)strand;
+        vrt_orbits[idx].orbit_r = 0.28f + (float)si * 0.015f;
+        vrt_orbits[idx].speed = 1.0f + (float)si * 0.04f;
+        /* Strand 0 = base color, strand 1 = complementary shift */
+        float hue_var = (float)si * 0.06f;
+        if (strand == 0) {
+            vrt_orbits[idx].r = cr * (0.8f + hue_var) + 0.15f;
+            vrt_orbits[idx].g = cg * (0.9f - hue_var * 0.2f) + 0.1f;
+            vrt_orbits[idx].b = cb * (0.85f + hue_var * 0.3f) + 0.1f;
+        } else {
+            vrt_orbits[idx].r = cb * (0.7f + hue_var) + 0.2f;
+            vrt_orbits[idx].g = cr * (0.8f + hue_var * 0.4f) + 0.15f;
+            vrt_orbits[idx].b = cg * (0.9f - hue_var * 0.2f) + 0.1f;
+        }
         if (vrt_orbits[idx].r > 1) vrt_orbits[idx].r = 1;
         if (vrt_orbits[idx].g > 1) vrt_orbits[idx].g = 1;
         if (vrt_orbits[idx].b > 1) vrt_orbits[idx].b = 1;
@@ -3152,11 +3230,14 @@ static int pl_quad_start = 0;  /* index in quad buffer where P&L quads begin */
 static int pl_quad_end = 0;    /* index where P&L quads end (menu quads follow) */
 
 /* ---- Status Bar Widget ---- */
-#define VSB_BAR_H      22     /* bar height in pixels */
+#define VSB_BAR_H_BASE 22     /* bar height in pixels at 1080p */
+static int VSB_BAR_H = 22;
 #define VSB_CHAR_W     10     /* character width for status text */
 #define VSB_CHAR_H     18     /* character height for status text */
-#define VSB_PAD         6     /* horizontal padding inside sections */
-#define VSB_SEP_W       2     /* divider width between sections */
+#define VSB_PAD_BASE    6     /* horizontal padding inside sections */
+#define VSB_SEP_W_BASE  2     /* divider width between sections */
+static int VSB_PAD = 6;
+static int VSB_SEP_W = 2;
 #define VSB_STATUSBAR_ID 107  /* MegaMUD status bar control ID */
 
 /* Memory offsets for reading MegaMUD state */
@@ -3199,10 +3280,13 @@ static DWORD vsb_mana_tick_time = 0;  /* GetTickCount of last mana tick */
 static int  vsb_mana_tick_show = 0;   /* 1 = flash active */
 
 /* ---- Exp Bar Widget ---- */
-#define VXB_BAR_H      20     /* bar height in pixels */
+#define VXB_BAR_H_BASE 20     /* bar height in pixels at 1080p */
 #define VXB_SEG_COUNT  20     /* number of segments */
-#define VXB_SEG_GAP     1     /* gap between segments */
-#define VXB_PAD         2     /* horizontal padding */
+#define VXB_SEG_GAP_BASE 1   /* gap between segments */
+#define VXB_PAD_BASE     2   /* horizontal padding */
+static int VXB_BAR_H = 20;
+static int VXB_SEG_GAP = 1;
+static int VXB_PAD = 2;
 #define VXB_OFF_EXP_LO  0x53B0
 #define VXB_OFF_EXP_HI  0x53B4
 #define VXB_OFF_NEED_LO 0x53B8
@@ -3604,7 +3688,7 @@ static void push_text_ui(int px, int py, const char *str,
 
 /* ---- Vulkan menu rendering ---- */
 
-static int vkm_is_sep(int idx) { return idx == VKM_ITEM_SEP || idx == VKM_ITEM_SEP2; }
+static int vkm_is_sep(int idx) { return idx == VKM_ITEM_SEP || idx == VKM_ITEM_SEP2 || idx == VKM_ITEM_CONSOLE; }
 
 static void vkm_get_root_item_rect(int idx, int *iy, int *ih)
 {
@@ -4113,67 +4197,97 @@ static void vrt_draw(int vp_w, int vp_h)
                         vrt_particles[i].alpha, 8, vp_w, vp_h);
     }
 
-    /* ---- Lissajous orbital particles ---- */
+    /* ---- Double-helix orbital particles ---- */
     if (vrt_orbits_visible) {
-        float orbit_life = 5.0f; /* total lifetime in seconds */
+        float orbit_life = 5.0f;
         int orb_segs = vrt_auto_segs(R * 0.02f, 8);
         for (int i = 0; i < VRT_ORBIT_MAX; i++) {
             if (!vrt_orbits[i].alive) continue;
             float age = fx_time - vrt_orbits[i].birth_time;
             if (age > orbit_life) { vrt_orbits[i].alive = 0; continue; }
 
-            /* Alpha: full for first 3s, then fade. Almost gone by 4.6s */
+            /* Alpha envelope: fade in, hold, fade out */
             float alpha;
             if (age < 0.3f) {
-                /* Burst phase: fly outward from center */
-                alpha = age / 0.3f * 0.7f;
-            } else if (age < 3.0f) {
-                alpha = 0.7f;
+                alpha = age / 0.3f * 0.8f;
+            } else if (age < 3.5f) {
+                alpha = 0.8f;
             } else {
-                float fade_t = (age - 3.0f) / 2.0f; /* 0..1 over 2s */
-                alpha = 0.7f * (1.0f - fade_t * fade_t);
+                float fade_t = (age - 3.5f) / 1.5f;
+                alpha = 0.8f * (1.0f - fade_t * fade_t);
                 if (alpha < 0.01f) { vrt_orbits[i].alive = 0; continue; }
             }
 
-            /* Position: Lissajous figure on the ring torus */
-            float t_orbit = age * 1.8f + vrt_orbits[i].phase;
-            float fa = vrt_orbits[i].freq_a;
-            float fb = vrt_orbits[i].freq_b;
-            float or_frac = vrt_orbits[i].orbit_r;
+            /* Double-helix: particles orbit around the center in a helix.
+             * The "main angle" sweeps around, while a "helix angle" oscillates
+             * radially in and out, offset by PI between the two strands. */
+            float spd = vrt_orbits[i].speed;
+            float t = age * 2.2f * spd + vrt_orbits[i].phase;
+            float strand_offset = vrt_orbits[i].helix_id * 3.14159f;
 
-            /* Base angle orbits around the ring */
-            float base_angle = t_orbit * 1.2f;
-            /* Lissajous modulates the radial position */
-            float radial_mod = vrt_sinf(fa * t_orbit) * 0.08f;
-            /* And the angular position gets a secondary wobble */
-            float angular_mod = vrt_sinf(fb * t_orbit + 1.5f) * 0.15f;
+            /* Main orbit angle — all particles sweep around center */
+            float main_angle = t * 0.9f;
+            /* Helix modulation — radial breathing creates the double-helix weave */
+            float helix_freq = 3.0f; /* how many times the helix wraps per orbit */
+            float helix_amp = 0.12f; /* how far in/out the helix breathes */
+            float helix_phase = helix_freq * main_angle + strand_offset;
+            float or_frac = vrt_orbits[i].orbit_r + vrt_sinf(helix_phase) * helix_amp;
 
-            float orb_r = R * (or_frac + radial_mod);
-            float orb_angle = base_angle + angular_mod;
+            /* Slight vertical wobble for depth illusion (mapped to Y offset) */
+            float z_wobble = vrt_cosf(helix_phase) * R * 0.03f;
 
-            /* During burst phase (first 0.3s), interpolate from center */
+            float orb_r = R * or_frac;
             float ox, oy;
             if (age < 0.3f) {
+                /* Burst from center */
                 float burst_t = age / 0.3f;
-                float final_x = cx + orb_r * vrt_cosf(orb_angle);
-                float final_y = cy - orb_r * vrt_sinf(orb_angle);
-                ox = cx + (final_x - cx) * burst_t * burst_t;
-                oy = cy + (final_y - cy) * burst_t * burst_t;
+                float bt2 = burst_t * burst_t;
+                float fx2 = cx + orb_r * vrt_cosf(main_angle);
+                float fy = cy - orb_r * vrt_sinf(main_angle) + z_wobble;
+                ox = cx + (fx2 - cx) * bt2;
+                oy = cy + (fy - cy) * bt2;
             } else {
-                ox = cx + orb_r * vrt_cosf(orb_angle);
-                oy = cy - orb_r * vrt_sinf(orb_angle);
+                ox = cx + orb_r * vrt_cosf(main_angle);
+                oy = cy - orb_r * vrt_sinf(main_angle) + z_wobble;
             }
 
-            /* Draw with glow */
-            float ps = R * 0.018f;
-            vrt_push_circle(ox, oy, ps * 2.5f,
+            /* Size pulses slightly with helix phase for 3D feel */
+            float ps_base = R * 0.018f;
+            float ps = ps_base * (1.0f + vrt_cosf(helix_phase) * 0.25f);
+
+            /* Fading trail: draw 5 ghost particles at past positions */
+            #define VRT_TRAIL_LEN 5
+            float trail_dt = 0.06f; /* time step between trail dots */
+            for (int tr = VRT_TRAIL_LEN; tr >= 1; tr--) {
+                float t_past = t - (float)tr * trail_dt * spd * 2.2f;
+                float ma_past = t_past * 0.9f;
+                float hp_past = helix_freq * ma_past + strand_offset;
+                float orf_past = vrt_orbits[i].orbit_r + vrt_sinf(hp_past) * helix_amp;
+                float zw_past = vrt_cosf(hp_past) * R * 0.03f;
+                float tr_r = R * orf_past;
+                float tr_x = cx + tr_r * vrt_cosf(ma_past);
+                float tr_y = cy - tr_r * vrt_sinf(ma_past) + zw_past;
+                float tr_frac = 1.0f - (float)tr / (float)(VRT_TRAIL_LEN + 1);
+                float tr_a = alpha * tr_frac * 0.35f;
+                float tr_ps = ps * (0.4f + tr_frac * 0.4f);
+                vrt_push_circle(tr_x, tr_y, tr_ps,
+                                vrt_orbits[i].r, vrt_orbits[i].g, vrt_orbits[i].b,
+                                tr_a, orb_segs, vp_w, vp_h);
+            }
+            #undef VRT_TRAIL_LEN
+
+            /* Outer glow */
+            vrt_push_circle(ox, oy, ps * 3.0f,
                             vrt_orbits[i].r, vrt_orbits[i].g, vrt_orbits[i].b,
-                            alpha * 0.15f, orb_segs, vp_w, vp_h);
+                            alpha * 0.12f, orb_segs, vp_w, vp_h);
+            /* Core — brighter when "in front" (positive helix phase) */
+            float front = (vrt_cosf(helix_phase) * 0.5f + 0.5f);
+            float core_a = alpha * (0.6f + front * 0.4f);
             vrt_push_circle(ox, oy, ps,
-                            vrt_orbits[i].r * 0.5f + 0.5f,
-                            vrt_orbits[i].g * 0.5f + 0.5f,
-                            vrt_orbits[i].b * 0.5f + 0.5f,
-                            alpha, orb_segs, vp_w, vp_h);
+                            vrt_orbits[i].r * 0.4f + 0.6f,
+                            vrt_orbits[i].g * 0.4f + 0.6f,
+                            vrt_orbits[i].b * 0.4f + 0.6f,
+                            core_a, orb_segs, vp_w, vp_h);
         }
     }
 
@@ -4268,9 +4382,10 @@ static void vrt_draw(int vp_w, int vp_h)
     if (vrt_ctx_open) {
         int mx = vrt_ctx_x, my = vrt_ctx_y;
         int mw = VRT_CTX_W;
+        int s_sep = (int)(8 * ui_scale);
         int mh = VRT_CTX_PAD * 2;
         for (int i = 0; i < VRT_CTX_COUNT; i++)
-            mh += (i == VRT_CTX_SEP1 || i == VRT_CTX_SEP2 || i == VRT_CTX_SEP3) ? 8 : VRT_CTX_ITEM_H;
+            mh += (i == VRT_CTX_SEP1 || i == VRT_CTX_SEP2 || i == VRT_CTX_SEP3) ? s_sep : VRT_CTX_ITEM_H;
 
         /* Panel bg */
         push_solid(mx, my, mx + mw, my + mh,
@@ -4290,6 +4405,7 @@ static void vrt_draw(int vp_w, int vp_h)
             "Normal",
             "Large",
             "X-Large",
+            "XX-Large",
             "", /* sep */
             vrt_orbits_visible ? "Hide Orbits" : "Show Orbits",
             "", /* sep */
@@ -4298,13 +4414,14 @@ static void vrt_draw(int vp_w, int vp_h)
         };
 
         int iy = my + VRT_CTX_PAD;
-        int item_cw = 7, item_ch = 14;
+        int item_cw = (int)(7 * ui_scale), item_ch = (int)(14 * ui_scale);
+        int s4 = (int)(4*ui_scale), s14 = (int)(14*ui_scale), s8 = (int)(8*ui_scale);
         for (int i = 0; i < VRT_CTX_COUNT; i++) {
             if (i == VRT_CTX_SEP1 || i == VRT_CTX_SEP2 || i == VRT_CTX_SEP3) {
-                push_solid(mx + 4, iy + 3, mx + mw - 4, iy + 4,
+                push_solid(mx + s4, iy + 3, mx + mw - s4, iy + 4,
                            t->dim[0] * 0.3f, t->dim[1] * 0.3f, t->dim[2] * 0.3f,
                            0.4f, vp_w, vp_h);
-                iy += 8;
+                iy += s8;
                 continue;
             }
             /* Hover */
@@ -4318,11 +4435,12 @@ static void vrt_draw(int vp_w, int vp_h)
             if (i == VRT_CTX_SMALL  && vrt_size <= 100) checked = 1;
             if (i == VRT_CTX_NORMAL && vrt_size > 100 && vrt_size <= 200) checked = 1;
             if (i == VRT_CTX_LARGE  && vrt_size > 200 && vrt_size <= 350) checked = 1;
-            if (i == VRT_CTX_XLARGE && vrt_size > 350) checked = 1;
+            if (i == VRT_CTX_XLARGE && vrt_size > 350 && vrt_size <= 550) checked = 1;
+            if (i == VRT_CTX_XXL    && vrt_size > 550) checked = 1;
             if (i == VRT_CTX_ORBITS && vrt_orbits_visible) checked = 1;
 
             if (checked) {
-                push_text(mx + 4, iy + (VRT_CTX_ITEM_H - item_ch) / 2,
+                push_text(mx + s4, iy + (VRT_CTX_ITEM_H - item_ch) / 2,
                           "\x10", t->accent[0], t->accent[1], t->accent[2],
                           vp_w, vp_h, item_cw, item_ch);
             }
@@ -4331,7 +4449,7 @@ static void vrt_draw(int vp_w, int vp_h)
             if (i == VRT_CTX_CAST && !vrt_sync_spell[0]) {
                 lr = t->dim[0] * 0.5f; lg = t->dim[1] * 0.5f; lb = t->dim[2] * 0.5f;
             }
-            push_text(mx + 14, iy + (VRT_CTX_ITEM_H - item_ch) / 2,
+            push_text(mx + s14, iy + (VRT_CTX_ITEM_H - item_ch) / 2,
                       labels[i], lr, lg, lb,
                       vp_w, vp_h, item_cw, item_ch);
             iy += VRT_CTX_ITEM_H;
@@ -4561,7 +4679,7 @@ static int vrt_ctx_hit(int mx, int my)
     if (mx < vrt_ctx_x || mx > vrt_ctx_x + VRT_CTX_W) return -1;
     int iy = vrt_ctx_y + VRT_CTX_PAD;
     for (int i = 0; i < VRT_CTX_COUNT; i++) {
-        int ih = (i == VRT_CTX_SEP1 || i == VRT_CTX_SEP2 || i == VRT_CTX_SEP3) ? 8 : VRT_CTX_ITEM_H;
+        int ih = (i == VRT_CTX_SEP1 || i == VRT_CTX_SEP2 || i == VRT_CTX_SEP3) ? (int)(8*ui_scale) : VRT_CTX_ITEM_H;
         if (my >= iy && my < iy + ih) {
             if (i == VRT_CTX_SEP1 || i == VRT_CTX_SEP2 || i == VRT_CTX_SEP3) return -1;
             return i;
@@ -4572,20 +4690,26 @@ static int vrt_ctx_hit(int mx, int my)
 }
 
 /* ---- Paths & Loops window drawing ---- */
-#define PL_TITLEBAR  24
-#define PL_TAB_H     28
-#define PL_TOOLBAR_H 34
-#define PL_ITEM_H    20
-#define PL_PAD        6
-#define PL_CW         8
-#define PL_CH        15
-#define PL_GO_H      28  /* GO button height at bottom */
+#define PL_TITLEBAR_BASE  24
+#define PL_TAB_H_BASE     28
+#define PL_TOOLBAR_H_BASE 34
+#define PL_ITEM_H_BASE    20
+#define PL_PAD_BASE        6
+#define PL_CW_BASE         8
+#define PL_CH_BASE        15
+#define PL_GO_H_BASE      28  /* GO button height at bottom */
+static int PL_TITLEBAR, PL_TAB_H, PL_TOOLBAR_H, PL_ITEM_H, PL_PAD, PL_GO_H;
 
+static int pl_scaled = 0;
 static void pl_draw(int vp_w, int vp_h)
 {
     if (!pl_wnd_open) return;
+    if (!pl_scaled) { pl_w = 520*ui_scale; pl_h = 480*ui_scale; pl_x = 100*ui_scale; pl_y = 50*ui_scale; pl_scaled = 1; }
+    PL_TITLEBAR = (int)(PL_TITLEBAR_BASE*ui_scale); PL_TAB_H = (int)(PL_TAB_H_BASE*ui_scale);
+    PL_TOOLBAR_H = (int)(PL_TOOLBAR_H_BASE*ui_scale); PL_ITEM_H = (int)(PL_ITEM_H_BASE*ui_scale);
+    PL_PAD = (int)(PL_PAD_BASE*ui_scale); PL_GO_H = (int)(PL_GO_H_BASE*ui_scale);
     const ui_theme_t *t = &ui_themes[current_theme];
-    int cw = PL_CW, ch = PL_CH;
+    int cw = (int)(PL_CW_BASE*ui_scale), ch = (int)(PL_CH_BASE*ui_scale);
     int x = (int)pl_x, y = (int)pl_y, w = (int)pl_w, h = (int)pl_h;
 
     /* Select UI font draw functions when available, else fallback to terminal font */
@@ -5069,7 +5193,7 @@ static void vkm_draw(int vp_w, int vp_h)
     if (!vkm_open) return;
 
     const ui_theme_t *t = &ui_themes[current_theme];
-    int cw = VKM_CHAR_W, ch = VKM_CHAR_H;
+    int cw = (int)(VKM_CHAR_W * ui_scale), ch = (int)(VKM_CHAR_H * ui_scale);
 
     /* Light scrim behind menu area only — don't dim the whole terminal */
 
@@ -5080,7 +5204,7 @@ static void vkm_draw(int vp_w, int vp_h)
     /* Root menu items */
     const char *root_labels[VKM_ROOT_COUNT] = {
         "Visual  \x10", "Widgets  \x10", "",
-        "Console", "Paths & Loops", "Recent  \x10",
+        "", "Paths & Loops", "Recent  \x10",
         "Settings  \x10", "Extras  \x10",
         "", "Close  (F11)"
     };
@@ -5139,7 +5263,7 @@ static void vkm_draw(int vp_w, int vp_h)
 
             if (vkm_sub == VKM_SUB_VISUAL) {
                 if (i == VKM_VIS_THEME) { label = "Theme  \x10"; has_arrow = 1; }
-                else if (i == VKM_VIS_FONT) { label = "Font  \x10"; has_arrow = 1; }
+                else if (i == VKM_VIS_FONT) { label = "Fonts & Text"; }
                 else if (i == VKM_VIS_FX) { label = "FX  \x10"; has_arrow = 1; }
             } else if (vkm_sub == VKM_SUB_WIDGETS) {
                 if (i == VKM_WID_RTIMER) {
@@ -5198,8 +5322,12 @@ static void vkm_draw(int vp_w, int vp_h)
                 } else if (i == VKM_EXT_COLOR) {
                     label = "Color/Brightness";
                     is_active = clr_visible;
-                } else if (i == VKM_EXT_SEP1 || i == VKM_EXT_SEP2) {
+                } else if (i == VKM_EXT_SEP1 || i == VKM_EXT_SEP2 || i == VKM_EXT_SEP3) {
                     label = "";
+                } else if (i == VKM_EXT_CONSOLE) {
+                    label = "MMUDPy Console";
+                } else if (i == VKM_EXT_SCRIPTMGR) {
+                    label = "Script Manager";
                 } else if (i == VKM_EXT_HIDEMM) {
                     label = megamud_hidden ? "Show MegaMUD" : "Hide MegaMUD";
                     is_active = megamud_hidden;
@@ -5207,7 +5335,7 @@ static void vkm_draw(int vp_w, int vp_h)
                     label = pst_round_recap ? "\x04 Round Totals" : "  Round Totals";
                     is_active = pst_round_recap;
                 } else if (i == VKM_EXT_HDR) {
-                    if (hdr_available)
+                    if (hdr_available || hdr_ext_available)
                         label = hdr_enabled ? "\x04 HDR" : "  HDR";
                     else
                         label = "  HDR (N/A)";
@@ -5643,7 +5771,7 @@ static void vsb_draw(int vp_w, int vp_h)
         ui_font_ready ? push_solid_ui : push_solid;
     void (*ptext)(int, int, const char *, float, float, float, int, int, int, int) =
         ui_font_ready ? push_text_ui : push_text;
-    int cw = VSB_CHAR_W, ch = VSB_CHAR_H;
+    int cw = (int)(VSB_CHAR_W * ui_scale), ch = (int)(VSB_CHAR_H * ui_scale);
 
     /* Bar background — slightly lighter than theme bg, full width */
     psolid(0, 0, (float)vp_w, (float)VSB_BAR_H,
@@ -5667,7 +5795,7 @@ static void vsb_draw(int vp_w, int vp_h)
             ptext(tx, ty, value_str, val_r, val_g, val_b, vp_w, vp_h, cw, ch); \
             tx += (int)strlen(value_str) * cw + VSB_PAD; \
             /* divider */ \
-            psolid((float)tx, 3.0f, (float)(tx + VSB_SEP_W), (float)(VSB_BAR_H - 3), \
+            psolid((float)tx, 3.0f*ui_scale, (float)(tx + VSB_SEP_W), (float)(VSB_BAR_H) - 3.0f*ui_scale, \
                    t->text[0], t->text[1], t->text[2], 0.2f, vp_w, vp_h); \
             tx += VSB_SEP_W + VSB_PAD; \
         } while(0)
@@ -5725,7 +5853,7 @@ static void vsb_draw(int vp_w, int vp_h)
             ptext(tx, ty, "Tick", 0.3f, 0.9f * alpha, 1.0f * alpha,
                   vp_w, vp_h, cw, ch);
             tx += 4 * cw + VSB_PAD;
-            psolid((float)tx, 3.0f, (float)(tx + VSB_SEP_W), (float)(VSB_BAR_H - 3),
+            psolid((float)tx, 3.0f*ui_scale, (float)(tx + VSB_SEP_W), (float)(VSB_BAR_H) - 3.0f*ui_scale,
                    t->text[0], t->text[1], t->text[2], 0.2f, vp_w, vp_h);
             tx += VSB_SEP_W + VSB_PAD;
         }
@@ -5798,11 +5926,12 @@ static void vxb_draw(int vp_w, int vp_h)
         ui_font_ready ? push_solid_ui : push_solid;
     void (*ptext)(int, int, const char *, float, float, float, int, int, int, int) =
         ui_font_ready ? push_text_ui : push_text;
-    int cw = VSB_CHAR_W, ch = VSB_CHAR_H;
+    int cw = (int)(VSB_CHAR_W * ui_scale), ch = (int)(VSB_CHAR_H * ui_scale);
 
     /* Bar sits just above the input bar */
-    float bar_top = (float)(vp_h - INPUT_BAR_H - VXB_BAR_H);
-    float bar_bot = (float)(vp_h - INPUT_BAR_H);
+    int ibh = (int)(INPUT_BAR_H_BASE * ui_scale);
+    float bar_top = (float)(vp_h - ibh - VXB_BAR_H);
+    float bar_bot = (float)(vp_h - ibh);
 
     /* Background — darker than theme bg */
     psolid(0, bar_top, (float)vp_w, bar_bot,
@@ -5822,8 +5951,9 @@ static void vxb_draw(int vp_w, int vp_h)
     if (filled > VXB_SEG_COUNT) filled = VXB_SEG_COUNT;
     int overflow = (vxb_percent >= 100.0f);
 
-    float seg_top = bar_top + 3.0f;
-    float seg_bot = bar_bot - 3.0f;
+    float seg_pad = 3.0f * ui_scale;
+    float seg_top = bar_top + seg_pad;
+    float seg_bot = bar_bot - seg_pad;
 
     for (int i = 0; i < VXB_SEG_COUNT; i++) {
         float sx0 = VXB_PAD + i * (seg_w + VXB_SEG_GAP);
@@ -5869,7 +5999,7 @@ static void vxb_draw(int vp_w, int vp_h)
                    vp_w, vp_h);
 
             /* Subtle highlight on top edge of filled segment */
-            psolid(sx0, seg_top, fx1, seg_top + 1.0f,
+            psolid(sx0, seg_top, fx1, seg_top + ui_scale,
                    fr + 0.15f, fg + 0.15f, fb + 0.15f, 0.6f,
                    vp_w, vp_h);
         }
@@ -5901,8 +6031,8 @@ static void vxb_draw(int vp_w, int vp_h)
     }
     info[sizeof(info) - 1] = '\0';
 
-    /* Use larger font for exp bar text — bigger than status bar */
-    int ecw = VKM_CHAR_W, ech = VKM_CHAR_H;
+    /* Use larger font for exp bar text — slightly bigger than normal UI text */
+    int ecw = (int)(VKM_CHAR_W * ui_scale * 1.2f), ech = (int)(VKM_CHAR_H * ui_scale * 1.2f);
     int text_w = (int)strlen(info) * ecw;
     int text_x = (vp_w - text_w) / 2;
     int text_y = (int)bar_top + (VXB_BAR_H - ech) / 2;
@@ -5923,6 +6053,8 @@ static void vxb_draw(int vp_w, int vp_h)
     ptext(text_x + 1, text_y, info, tr, tg, tb, vp_w, vp_h, ecw, ech);
 }
 
+#include "script_manager_ui.c"
+
 static void vkt_build_vertices(void)
 {
     quad_count = 0;
@@ -5930,13 +6062,29 @@ static void vkt_build_vertices(void)
 
     int vp_w = (int)vk_sc_extent.width;
     int vp_h = (int)vk_sc_extent.height;
+    ui_scale = (float)vp_h / 1080.0f;
+    if (ui_scale < 1.0f) ui_scale = 1.0f;
+    vkm_update_scale();
+
+    /* Check deferred round recap grace period */
+    pst_recap_poll();
+    vrt_ctx_update_scale();
+    VSB_BAR_H = (int)(VSB_BAR_H_BASE * ui_scale);
+    VSB_PAD = (int)(VSB_PAD_BASE * ui_scale);
+    VSB_SEP_W = (int)(VSB_SEP_W_BASE * ui_scale); if (VSB_SEP_W < 1) VSB_SEP_W = 1;
+    VXB_BAR_H = (int)(VXB_BAR_H_BASE * ui_scale);
+    VXB_SEG_GAP = (int)(VXB_SEG_GAP_BASE * ui_scale); if (VXB_SEG_GAP < 1) VXB_SEG_GAP = 1;
+    VXB_PAD = (int)(VXB_PAD_BASE * ui_scale);
+    int input_bar_h = (int)(INPUT_BAR_H_BASE * ui_scale);
     int top_pad = vsb_visible ? VSB_BAR_H : 4;
     int bot_pad = vxb_visible ? VXB_BAR_H + 4 : 4;
-    int term_h = vp_h - INPUT_BAR_H - top_pad - bot_pad;
+    int term_h = vp_h - input_bar_h - top_pad - bot_pad;
 
     /* Maintain 1:2 (w:h) CP437 aspect ratio per character.
      * Scale uniformly to fit, center horizontally with black bars. */
-    float cw_fill = (float)vp_w / (float)TERM_COLS;
+    int margin_px = (int)(term_margin * ui_scale);
+    int usable_w = vp_w - margin_px;
+    float cw_fill = (float)usable_w / (float)TERM_COLS;
     float ch_fill = (float)term_h / (float)TERM_ROWS;
     float cw, ch;
     /* Pick scale that maintains 1:2 aspect and fits */
@@ -5950,7 +6098,7 @@ static void vkt_build_vertices(void)
         cw = ch / 2.0f;
     }
     float grid_w = cw * TERM_COLS;
-    float x_offset = 0.0f; /* left-justified */
+    float x_offset = (float)margin_px;
     last_cw_px = cw; last_ch_px = ch;  /* store for smoke shader push constants */
 
     /* UV constants for font atlas (16x16 grid) with half-texel inset
@@ -6180,11 +6328,14 @@ static void vkt_build_vertices(void)
                   t->bg[0] + 0.04f, t->bg[1] + 0.04f, t->bg[2] + 0.04f, 1.0f);
     }
 
-    /* Pass 4: input bar text */
+    /* Pass 4: input bar text — proper 1:2 aspect ratio, centered in bar */
     {
-        float ibar_cw = cw;  /* same char width as terminal */
-        float ibar_ch = (float)INPUT_BAR_H;
+        float ibar_ch = (float)input_bar_h;
+        /* Use 1:2 aspect ratio chars that fit the bar height with padding */
+        float ich = ibar_ch - 4.0f;
+        float icw = ich / 2.0f;
         float bar_y0 = (float)(top_pad + term_h + bot_pad);
+        float text_y = bar_y0 + (ibar_ch - ich) / 2.0f;
         for (int i = 0; i < input_len && i < TERM_COLS; i++) {
             unsigned char ch = (unsigned char)input_buf[i];
             if (ch <= 32) continue;
@@ -6192,18 +6343,17 @@ static void vkt_build_vertices(void)
             float v0 = (ch / 16) * tex_ch + hp_v;
             float u1 = u0 + tex_cw - 2*hp_u;
             float v1 = v0 + tex_ch - 2*hp_v;
-            float px0 = x_offset + i * ibar_cw, py0 = bar_y0 + 2;
-            float px1 = px0 + ibar_cw, py1 = bar_y0 + ibar_ch - 2;
-            push_quad(PX2NDC_X(px0), PX2NDC_Y(py0), PX2NDC_X(px1), PX2NDC_Y(py1),
+            float px0 = x_offset + i * icw;
+            push_quad(PX2NDC_X(px0), PX2NDC_Y(text_y), PX2NDC_X(px0 + icw), PX2NDC_Y(text_y + ich),
                       u0, v0, u1, v1,
                       1.0f, 1.0f, 1.0f, 1.0f);
         }
 
         /* Blinking cursor */
         if ((frame_count / 30) % 2 == 0) {
-            float cx0 = x_offset + input_cursor * ibar_cw;
-            float cy0 = bar_y0 + ibar_ch - 4;
-            float cx1 = cx0 + ibar_cw;
+            float cx0 = x_offset + input_cursor * icw;
+            float cy0 = bar_y0 + ibar_ch - 4.0f * ui_scale;
+            float cx1 = cx0 + icw;
             float cy1 = bar_y0 + ibar_ch - 1;
             push_quad(PX2NDC_X(cx0), PX2NDC_Y(cy0), PX2NDC_X(cx1), PX2NDC_Y(cy1),
                       bg_u0, bg_v0, bg_u1, bg_v1,
@@ -6357,10 +6507,11 @@ static void vkt_build_vertices(void)
     pst_draw(vp_w, vp_h);
     bsp_draw(vp_w, vp_h);
     mr_draw(vp_w, vp_h);
+    scm_draw(vp_w, vp_h);
     /* Settings panels — draw focused one last (on top) */
     {
-        void (*sp_draws[])(int,int) = { clr_draw, bgp_draw, smk_draw, shd_draw, snd_draw };
-        int sp_count = 5;
+        void (*sp_draws[])(int,int) = { clr_draw, bgp_draw, smk_draw, shd_draw, snd_draw, fnt_draw };
+        int sp_count = 6;
         for (int i = 0; i < sp_count; i++)
             if (i != sp_focus) sp_draws[i](vp_w, vp_h);
         if (sp_focus >= 0 && sp_focus < sp_count)
@@ -7518,6 +7669,12 @@ static int vkt_create_swapchain(void)
     vk_sc_fmt = fmts[0].format;
     VkColorSpaceKHR cs = fmts[0].colorSpace;
 
+    /* Dump all surface formats for HDR debugging */
+    api->log("[vk_terminal] Surface formats (%u total):\n", fmtc);
+    for (uint32_t i = 0; i < fmtc; i++) {
+        api->log("[vk_terminal]   [%u] format=%d colorSpace=%d\n", i, fmts[i].format, fmts[i].colorSpace);
+    }
+
     /* Probe for HDR formats */
     hdr_available = 0;
     hdr_standard[0] = 0;
@@ -7602,6 +7759,18 @@ static int vkt_create_swapchain(void)
     sci.presentMode = vk_vsync ? VK_PRESENT_MODE_FIFO_KHR : VK_PRESENT_MODE_IMMEDIATE_KHR;
     sci.clipped = VK_TRUE;
     res = vkCreateSwapchainKHR(vk_dev, &sci, NULL, &vk_swapchain);
+    if (res != VK_SUCCESS && hdr_enabled && hdr_available) {
+        /* HDR swapchain failed — fall back to SDR */
+        api->log("[vk_terminal] HDR swapchain failed (%d) — falling back to SDR\n", res);
+        vk_sc_fmt = VK_FORMAT_B8G8R8A8_UNORM;
+        cs = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
+        sci.imageFormat = vk_sc_fmt;
+        sci.imageColorSpace = cs;
+        hdr_available = 0;
+        hdr_enabled = 0;
+        strncpy(hdr_standard, "", sizeof(hdr_standard));
+        res = vkCreateSwapchainKHR(vk_dev, &sci, NULL, &vk_swapchain);
+    }
     if (res != VK_SUCCESS) { api->log("[vk_terminal] Swapchain failed: %d\n", res); return -1; }
 
     vkGetSwapchainImagesKHR(vk_dev, vk_swapchain, &vk_sc_count, NULL);
@@ -7798,7 +7967,7 @@ static int vkt_create_swapchain(void)
         VkPushConstantRange pcr = {0};
         pcr.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
         pcr.offset = 0;
-        pcr.size = sizeof(float) * 20; /* BG shader push constants */
+        pcr.size = sizeof(float) * 21; /* BG shader push constants */
 
         VkPipelineLayoutCreateInfo bplci = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
         bplci.setLayoutCount = 1;
@@ -7815,7 +7984,7 @@ static int vkt_create_swapchain(void)
 
         VkShaderModuleCreateInfo bfsci = { VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO };
         bfsci.codeSize = bg_plasma_frag_spv_size;
-        bfsci.pCode = bg_plasma_frag_spv;
+        bfsci.pCode = (const uint32_t *)bg_plasma_frag_spv;
         VkShaderModule bfs;
         vkCreateShaderModule(vk_dev, &bfsci, NULL, &bfs);
 
@@ -7948,7 +8117,7 @@ static void vkt_render_frame(void)
                 if (bands[i].mode == BGP_BEAT_ZOOM)    beat_zoom   += e * 0.3f;
             }
         }
-        float bg_pc[20] = { fx_time, bg_plasma_speed, bg_plasma_turbulence,
+        float bg_pc[21] = { fx_time, bg_plasma_speed, bg_plasma_turbulence,
                             bg_plasma_complexity, bg_plasma_hue, bg_plasma_saturation,
                             bg_plasma_brightness, bg_plasma_alpha,
                             (float)vk_sc_extent.width, (float)vk_sc_extent.height,
@@ -7956,7 +8125,7 @@ static void vkt_render_frame(void)
                             bg_plasma_edge_glow, bg_plasma_sharpen,
                             beat_hue, beat_bright, beat_zoom,
                             (float)bg_plasma_material, bg_plasma_mat_str,
-                            0.0f };
+                            (float)bg_tonemap_mode, bg_tonemap_exposure };
         vkCmdPushConstants(vk_cmd_buf, vk_bg_pipe_layout,
                            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                            0, sizeof(bg_pc), bg_pc);
@@ -8156,6 +8325,7 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
 
         /* Ctrl+V = paste into active input */
         if (ctrl && wParam == 'V') {
+            if (scm_visible && scm_focused) { scm_paste(); return 0; }
             if (vkw_focus >= 0) {
                 vkw_window_t *fw = &vkw_windows[vkw_focus];
                 if (fw->active && fw->has_input) {
@@ -8166,6 +8336,11 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             }
             return 0;
         }
+
+        /* Ctrl+C/X/A — route to Script Manager if focused */
+        if (ctrl && wParam == 'C' && scm_visible && scm_focused) { scm_copy_selection(); return 0; }
+        if (ctrl && wParam == 'X' && scm_visible && scm_focused) { scm_cut_selection(); return 0; }
+        if (ctrl && wParam == 'A' && scm_visible && scm_focused) { scm_select_all(); return 0; }
 
         /* Ctrl+C = copy selected text from focused window, or backscroll */
         if (ctrl && wParam == 'C') {
@@ -8251,6 +8426,8 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             }
             return 0;
         }
+        /* Route to Script Manager editor if focused */
+        if (scm_key_down((unsigned int)wParam)) return 0;
         /* Route to focused window first */
         if (vkw_key_down((unsigned int)wParam)) return 0;
         input_handle_key(wParam, 0);
@@ -8305,6 +8482,8 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             }
             return 0;
         }
+        /* Route to Script Manager editor if focused */
+        if (scm_key_char((unsigned int)wParam)) return 0;
         /* Route to MUDRadio search if focused */
         if (mr_search_focus && mr_key_char((int)wParam)) return 0;
         /* Route to focused window first */
@@ -8327,6 +8506,11 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             pl_hover_item = pl_item_at_y(my2);
         } else {
             pl_hover_item = -1;
+        }
+        /* Script Manager drag/resize */
+        if (scm_dragging || scm_resizing) {
+            scm_mouse_move(mx2, my2);
+            return 0;
         }
         /* MUDRadio drag/resize */
         if (mr_dragging || mr_resizing || mr_vol_dragging) {
@@ -8353,6 +8537,10 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         }
         if (snd_dragging || snd_active_slider >= 0) {
             snd_mouse_move(mx2, my2);
+            return 0;
+        }
+        if (fnt_dragging || fnt_active_slider >= 0) {
+            fnt_mouse_move(mx2, my2);
             return 0;
         }
         /* Player Stats drag */
@@ -8459,7 +8647,7 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 vkm_sub_hover = sh;
                 /* Delayed hover-to-open: track which arrow item is hovered, drill after delay */
                 int is_drill_item = 0;
-                if (vkm_sub == VKM_SUB_VISUAL && (sh == VKM_VIS_THEME || sh == VKM_VIS_FONT || sh == VKM_VIS_FX))
+                if (vkm_sub == VKM_SUB_VISUAL && (sh == VKM_VIS_THEME || sh == VKM_VIS_FX))
                     is_drill_item = 1;
                 if (vkm_sub == VKM_SUB_XTRA2 && sh == VKM_X2_VIZ)
                     is_drill_item = 1;
@@ -8472,7 +8660,6 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                         /* Sustained hover — drill in */
                         if (vkm_sub == VKM_SUB_VISUAL) {
                             if (sh == VKM_VIS_THEME) vkm_sub = VKM_SUB_THEME;
-                            else if (sh == VKM_VIS_FONT) vkm_sub = VKM_SUB_FONT;
                             else if (sh == VKM_VIS_FX) vkm_sub = VKM_SUB_FX;
                         } else if (vkm_sub == VKM_SUB_XTRA2) {
                             if (sh == VKM_X2_VIZ) vkm_sub = VKM_SUB_VIZ;
@@ -8531,6 +8718,7 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             else if (ci == VRT_CTX_NORMAL) { vrt_size = 160; }
             else if (ci == VRT_CTX_LARGE) { vrt_size = 280; }
             else if (ci == VRT_CTX_XLARGE) { vrt_size = 420; }
+            else if (ci == VRT_CTX_XXL) { vrt_size = 640; }
             else if (ci == VRT_CTX_ORBITS) { vrt_orbits_visible = !vrt_orbits_visible; }
             else if (ci == VRT_CTX_RESET) { vrt_synced = 0; vrt_last_tick_ts = 0; vrt_round_num = 0; vrt_delta_text[0] = '\0'; }
             else if (ci == VRT_CTX_HIDE) { vrt_visible = 0; }
@@ -8595,7 +8783,7 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             }
             /* GO button click */
             {
-                int bottom_h = PL_GO_H + PL_CH + 8;
+                int bottom_h = PL_GO_H + (int)(PL_CH_BASE * ui_scale) + (int)(8 * ui_scale);
                 int content_bottom = (int)(pl_y + pl_h) - bottom_h;
                 int go_y = content_bottom + 4;
                 int go_h = PL_GO_H - 8;
@@ -8608,7 +8796,7 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             }
             /* Content area — item click (select, don't execute) */
             {
-                int bottom_h = PL_GO_H + PL_CH + 8;
+                int bottom_h = PL_GO_H + (int)(PL_CH_BASE * ui_scale) + (int)(8 * ui_scale);
                 int content_bottom = (int)(pl_y + pl_h) - bottom_h;
                 if (my < content_bottom) {
                     int item = pl_item_at_y(my);
@@ -8617,6 +8805,8 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             }
             return 0;
         }
+        /* Script Manager click */
+        if (scm_mouse_down(mx, my)) return 0;
         /* Backscroll panel click */
         if (bsp_mouse_down(mx, my)) return 0;
         /* MUDRadio panel click */
@@ -8624,14 +8814,14 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         /* Settings panels — check focused one first for z-order consistency */
         {
             struct { int (*fn)(int,int); int idx; } sp[] = {
-                { clr_mouse_down, 0 }, { bgp_mouse_down, 1 }, { smk_mouse_down, 2 }, { shd_mouse_down, 3 }, { snd_mouse_down, 4 }
+                { clr_mouse_down, 0 }, { bgp_mouse_down, 1 }, { smk_mouse_down, 2 }, { shd_mouse_down, 3 }, { snd_mouse_down, 4 }, { fnt_mouse_down, 5 }
             };
             /* Check focused panel first */
-            if (sp_focus >= 0 && sp_focus < 5 && sp[sp_focus].fn(mx, my)) {
+            if (sp_focus >= 0 && sp_focus < 6 && sp[sp_focus].fn(mx, my)) {
                 return 0;
             }
             /* Then check others */
-            for (int i = 0; i < 5; i++) {
+            for (int i = 0; i < 6; i++) {
                 if (i != sp_focus && sp[i].fn(mx, my)) {
                     sp_focus = i;
                     return 0;
@@ -8641,7 +8831,7 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         /* Player Stats panel click */
         if (pst_visible && mx >= (int)pst_x && mx < (int)(pst_x + pst_w) &&
             my >= (int)pst_y && my < (int)(pst_y + pst_h)) {
-            int cw = VSB_CHAR_W, ch = VSB_CHAR_H;
+            int cw = (int)(VSB_CHAR_W * ui_scale), ch = (int)(VSB_CHAR_H * ui_scale);
             int titlebar_h = ch + 10;
             int ly = my - (int)pst_y;
             /* Close button (top-right corner, 20x titlebar_h area) */
@@ -8690,7 +8880,7 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         if (pl_wnd_open && pl_hit(mx, my)) {
             int lx = mx - (int)pl_x, ly = my - (int)pl_y;
             int toolbar_bottom = PL_TITLEBAR + PL_TAB_H + PL_TOOLBAR_H;
-            int bottom_h = PL_GO_H + PL_CH + 8;
+            int bottom_h = PL_GO_H + (int)(PL_CH_BASE * ui_scale) + (int)(8 * ui_scale);
             int content_bottom = (int)pl_h - bottom_h;
             if (ly >= toolbar_bottom && ly < content_bottom) {
                 int item = pl_item_at_y(my);
@@ -8707,12 +8897,14 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         int mx = mouse_tx((short)LOWORD(lParam));
         int my = mouse_ty((short)HIWORD(lParam));
         if (pl_dragging) { pl_dragging = 0; return 0; }
+        if (scm_dragging || scm_resizing) { scm_mouse_up(); return 0; }
         if (mr_dragging || mr_resizing || mr_vol_dragging) { mr_mouse_up(); return 0; }
         if (clr_dragging || clr_active_slider >= 0) { clr_mouse_up(); return 0; }
         if (bgp_dragging || bgp_active_slider >= 0) { bgp_mouse_up(); return 0; }
         if (smk_dragging || smk_active_slider >= 0) { smk_mouse_up(); return 0; }
         if (shd_dragging || shd_active_slider >= 0) { shd_mouse_up(); return 0; }
         if (snd_dragging || snd_active_slider >= 0) { snd_mouse_up(); return 0; }
+        if (fnt_dragging || fnt_active_slider >= 0) { fnt_mouse_up(); return 0; }
         if (pst_dragging) { pst_dragging = 0; return 0; }
         if (bsp_dragging || bsp_resizing || bsp_selecting) { bsp_mouse_up(); return 0; }
         if (vrt_dragging) { vrt_dragging = 0; return 0; }
@@ -8726,7 +8918,7 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         /* Visual > submenu clicks — open 2nd-level submenus */
         if (si >= 0 && vkm_sub == VKM_SUB_VISUAL) {
             if (si == VKM_VIS_THEME) { vkm_sub = VKM_SUB_THEME; vkm_sub_hover = -1; }
-            else if (si == VKM_VIS_FONT) { vkm_sub = VKM_SUB_FONT; vkm_sub_hover = -1; }
+            else if (si == VKM_VIS_FONT) { fnt_toggle(); vkm_open = 0; vkm_sub = VKM_SUB_NONE; return 0; }
             else if (si == VKM_VIS_FX) { vkm_sub = VKM_SUB_FX; vkm_sub_hover = -1; }
             return 0;
         }
@@ -8850,13 +9042,17 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 if (api) api->log("[vk_terminal] Round Totals: %s\n",
                                   pst_round_recap ? "ON" : "OFF");
             } else if (si == VKM_EXT_HDR) {
-                if (hdr_available) {
+                if (hdr_available || hdr_ext_available) {
                     hdr_enabled = !hdr_enabled;
                     /* Swapchain needs recreation for format change — trigger resize */
                     vkt_recreate_swapchain();
                     if (api) api->log("[vk_terminal] HDR: %s (%s)\n",
                                       hdr_enabled ? "ON" : "OFF", hdr_standard);
                 }
+            } else if (si == VKM_EXT_CONSOLE) {
+                vkw_toggle_console((int)vk_sc_extent.width, (int)vk_sc_extent.height);
+            } else if (si == VKM_EXT_SCRIPTMGR) {
+                scm_toggle();
             } else if (si == VKM_EXT_SAVE) {
                 vkt_save_settings();
             } else if (si == VKM_EXT_RESET) {
@@ -8914,12 +9110,7 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
 
         /* Check root click */
         int ri = vkm_hit_root(mx, my);
-        if (ri == VKM_ITEM_CONSOLE) {
-            vkm_open = 0;
-            vkm_sub = VKM_SUB_NONE;
-            vkw_toggle_console((int)vk_sc_extent.width, (int)vk_sc_extent.height);
-            return 0;
-        }
+        /* VKM_ITEM_CONSOLE is now a separator — console moved to Extras */
         if (ri == VKM_ITEM_PATHS) {
             vkm_open = 0;
             vkm_sub = VKM_SUB_NONE;
@@ -9009,12 +9200,20 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 return 0;
             }
         }
+        /* Scroll Script Manager */
+        if (scm_visible) {
+            int wmx = mouse_tx((short)LOWORD(lParam));
+            int wmy = mouse_ty((short)HIWORD(lParam));
+            int wd = (short)HIWORD(wParam);
+            if (scm_scroll_wheel(wmx, wmy, wd)) return 0;
+        }
         /* Scroll MudAMP station list */
         if (mr_visible) {
             int wmx = mouse_tx((short)LOWORD(lParam));
             int wmy = mouse_ty((short)HIWORD(lParam));
             int wd = (short)HIWORD(wParam);
             if (mr_scroll_wheel(wmx, wmy, wd)) return 0;
+            if (fnt_scroll_wheel(wmx, wmy, wd > 0 ? 1 : -1)) return 0;
         }
         /* Scroll backscroll panel */
         if (bsp_visible) {
@@ -9387,6 +9586,12 @@ static int  pst_esc  = 0;      /* inside ESC sequence */
 static DWORD pst_last_poll = 0;
 #define PST_POLL_MS 1000
 
+/* Deferred round recap: wait for late combat messages before displaying.
+ * BBS lag can cause messages from the same round to arrive after the
+ * round timer fires, splitting one round's output across two recaps.
+ * Grace period lets late messages accumulate before we flush. */
+static DWORD pst_last_recap_tick = 0;  /* GetTickCount of last recap emission */
+
 /* ---- helpers ---- */
 
 static int pst_contains(const char *hay, const char *needle) {
@@ -9422,8 +9627,9 @@ static void pst_flush_round(void) {
     }
 }
 
-/* Called from vrt_on_round — flush stats and print round totals */
-static void pst_on_round_tick(int round_num) {
+/* Actually display the round recap and clear counters.
+ * Called after grace period has elapsed. */
+static void pst_emit_recap(void) {
     pst_flush_round();
 
     /* Only show recap if there was actual combat this round */
@@ -9451,11 +9657,9 @@ static void pst_on_round_tick(int round_num) {
     }
 
     if (pst_round_recap && had_combat) {
-        /* ALL CAPS, dark bg (blue), bright white damage, solid colors */
         char buf[256];
         int pos = 0;
 
-        /* Single solid color: bold white on blue bg, same color for everything */
         pos += _snprintf(buf + pos, sizeof(buf) - pos,
             "\x1b[44;1;37m %d Damage,",
             round_dmg);
@@ -9478,7 +9682,6 @@ static void pst_on_round_tick(int round_num) {
         pos += _snprintf(buf + pos, sizeof(buf) - pos, " \x1b[0m");
         buf[sizeof(buf) - 1] = 0;
 
-        /* Inject into terminal as a flowing line */
         char inject[280];
         _snprintf(inject, sizeof(inject), "\r\n%s\r\n", buf);
         inject[sizeof(inject) - 1] = 0;
@@ -9493,7 +9696,36 @@ static void pst_on_round_tick(int round_num) {
     pst_s.cr_dodge = 0; pst_s.cr_dmg = 0;
 }
 
-/* Check if enough time passed to consider this a new round (>1500ms gap) */
+/* Called from vrt_on_round — emit recap for the round that just ended.
+ * No grace period: the round tick marks the START of a new round, and all
+ * combat events from the previous round have already arrived by now (they
+ * arrive 1-4s after the previous tick, well within the 5s window). */
+static void pst_on_round_tick(int round_num) {
+    pst_flush_round();
+    pst_emit_recap();
+    pst_last_recap_tick = GetTickCount();
+}
+
+/* Called every frame — if combat events have accumulated and no swing has
+ * arrived for >1500ms, the round is over. Emit the recap now, during the
+ * idle gap, before the next round's swings arrive and merge with them. */
+static void pst_recap_poll(void) {
+    if (pst_s.last_swing_tick == 0) return;
+    DWORD elapsed = GetTickCount() - pst_s.last_swing_tick;
+    if (elapsed < 1500) return;
+    int has_data = pst_s.cr_hits || pst_s.cr_crits || pst_s.cr_extra ||
+                   pst_s.cr_spell || pst_s.cr_bs || pst_s.cr_miss ||
+                   pst_s.cr_dodge;
+    if (has_data) {
+        pst_flush_round();
+        pst_emit_recap();
+        pst_last_recap_tick = GetTickCount();
+    }
+}
+
+/* Check if enough time passed to consider this a new round (>1500ms gap).
+ * Only flushes the per-round hit recording — recap emission is handled
+ * exclusively by pst_on_round_tick to avoid mid-round splits. */
 static void pst_check_round_gap(void) {
     DWORD now = GetTickCount();
     if (pst_s.last_swing_tick > 0 && pst_s.cur_round_swings > 0) {
@@ -9730,16 +9962,18 @@ static void pst_toggle(void)
 
 /* ---- Vulkan-rendered Player Stats Panel ---- */
 
+static int pst_scaled = 0;
 static void pst_draw(int vp_w, int vp_h)
 {
     if (!pst_visible) return;
+    if (!pst_scaled) { pst_w = 340*ui_scale; pst_h = 390*ui_scale; pst_x = 100*ui_scale; pst_y = 60*ui_scale; pst_scaled = 1; }
 
     const ui_theme_t *t = &ui_themes[current_theme];
     void (*psolid)(float, float, float, float, float, float, float, float, int, int) =
         ui_font_ready ? push_solid_ui : push_solid;
     void (*ptext)(int, int, const char *, float, float, float, int, int, int, int) =
         ui_font_ready ? push_text_ui : push_text;
-    int cw = VSB_CHAR_W, ch = VSB_CHAR_H;
+    int cw = (int)(VSB_CHAR_W * ui_scale), ch = (int)(VSB_CHAR_H * ui_scale);
 
     float x0 = pst_x, y0 = pst_y;
     float pw = pst_w, ph = pst_h;
@@ -10235,16 +10469,18 @@ static void bsp_save(void)
 
 /* ---- Backscroll Panel: draw ---- */
 
+static int bsp_scaled = 0;
 static void bsp_draw(int vp_w, int vp_h)
 {
     if (!bsp_visible) return;
+    if (!bsp_scaled) { bsp_w = 680*ui_scale; bsp_h = 500*ui_scale; bsp_x = 80*ui_scale; bsp_y = 40*ui_scale; bsp_scaled = 1; }
 
     const ui_theme_t *t = &ui_themes[current_theme];
     void (*psolid)(float, float, float, float, float, float, float, float, int, int) =
         ui_font_ready ? push_solid_ui : push_solid;
     void (*ptext)(int, int, const char *, float, float, float, int, int, int, int) =
         ui_font_ready ? push_text_ui : push_text;
-    int cw = VKM_CHAR_W, ch = VKM_CHAR_H;
+    int cw = (int)(VKM_CHAR_W * ui_scale), ch = (int)(VKM_CHAR_H * ui_scale);
 
     float x0 = bsp_x, y0 = bsp_y;
     float x1 = bsp_x + bsp_w, y1 = bsp_y + bsp_h;
@@ -10659,7 +10895,7 @@ static int bsp_mouse_down(int mx, int my)
 
     vkw_focus = -1; /* steal focus from floating windows */
 
-    int cw = VKM_CHAR_W, ch = VKM_CHAR_H;
+    int cw = (int)(VKM_CHAR_W * ui_scale), ch = (int)(VKM_CHAR_H * ui_scale);
     int titlebar_h = ch + 10;
     int tab_h = ch + 8;
     int save_h = ch + 12;
@@ -10701,7 +10937,7 @@ static int bsp_mouse_down(int mx, int my)
     }
     /* Display area — start text selection */
     if (my >= (int)bsp_disp_y0 && my < (int)bsp_disp_y1) {
-        int cw2 = VKM_CHAR_W, ch2 = VKM_CHAR_H;
+        int cw2 = (int)(VKM_CHAR_W * ui_scale), ch2 = (int)(VKM_CHAR_H * ui_scale);
         int row = (my - (int)bsp_disp_y0) / ch2;
         int col = (mx - bsp_disp_lx) / cw2;
         if (col < 0) col = 0;
@@ -10735,7 +10971,7 @@ static void bsp_mouse_move(int mx, int my)
         return;
     }
     if (bsp_selecting) {
-        int cw2 = VKM_CHAR_W, ch2 = VKM_CHAR_H;
+        int cw2 = (int)(VKM_CHAR_W * ui_scale), ch2 = (int)(VKM_CHAR_H * ui_scale);
         int row = (my - (int)bsp_disp_y0) / ch2;
         int col = (mx - bsp_disp_lx) / cw2;
         if (col < 0) col = 0;
@@ -10851,6 +11087,8 @@ static void snd_open_window(void)
 {
     if (snd_visible) { sp_focus = 4; return; }
     snd_enumerate();
+    snd_w = 440 * ui_scale; snd_h = 520 * ui_scale;
+    snd_x = 80 * ui_scale;  snd_y = 60 * ui_scale;
     snd_visible = 1;
     sp_focus = 4;
 }
@@ -10859,7 +11097,7 @@ static void snd_draw(int vp_w, int vp_h)
 {
     if (!snd_visible) return;
     const ui_theme_t *t = &ui_themes[current_theme];
-    int cw = VKM_CHAR_W, ch = VKM_CHAR_H;
+    int cw = (int)(VKM_CHAR_W * ui_scale), ch = (int)(VKM_CHAR_H * ui_scale);
     float x0 = snd_x, y0 = snd_y;
     float pw = snd_w;
     int titlebar_h = ch + 8;
@@ -11085,7 +11323,7 @@ static void snd_draw(int vp_w, int vp_h)
  * -1=none, 0..N=input dev, 100..100+N=output dev, 200=volume slider,
  * 300=auto res, 301..307=resolution, 400=vsync, 401=HDR */
 static int snd_hit_item(int mx, int my) {
-    int ch = VKM_CHAR_H;
+    int ch = (int)(VKM_CHAR_H * ui_scale);
     int titlebar_h = ch + 8;
     float row_h = ch + 6;
     int hit_x = (mx >= (int)(snd_x + 10) && mx < (int)(snd_x + snd_w - 10));
@@ -11157,7 +11395,7 @@ static int snd_mouse_down(int mx, int my) {
     if (!snd_visible) return 0;
     if (mx < (int)snd_x || mx >= (int)(snd_x + snd_w) ||
         my < (int)snd_y || my >= (int)(snd_y + snd_h)) return 0;
-    int ch = VKM_CHAR_H;
+    int ch = (int)(VKM_CHAR_H * ui_scale);
     int titlebar_h = ch + 8;
     int ly = my - (int)snd_y;
     /* Close button */
@@ -11265,6 +11503,7 @@ static void snd_mouse_up(void) {
 static void clr_open_window(void) {
     clr_visible = !clr_visible;
     if (clr_visible) {
+        clr_w = 280 * ui_scale; clr_h = 200 * ui_scale;
         int vp_w = (int)vk_sc_extent.width, vp_h = (int)vk_sc_extent.height;
         if (clr_x < 1 && clr_y < 1) {
             clr_x = (float)(vp_w - (int)clr_w) / 2.0f;
@@ -11278,13 +11517,13 @@ static void clr_draw_slider(float x0, float y0, float w, float h,
                              const char *label, const char *fmt_val,
                              int vp_w, int vp_h, const ui_theme_t *t)
 {
-    int cw = VKM_CHAR_W, ch = VKM_CHAR_H;
+    int cw = (int)(VKM_CHAR_W * ui_scale), ch = (int)(VKM_CHAR_H * ui_scale);
     /* Label on the left */
     push_text((int)x0, (int)y0, label, t->text[0], t->text[1], t->text[2], vp_w, vp_h, cw, ch);
 
-    /* Slider track */
-    float sx0 = x0 + 110;
-    float sx1 = x0 + w - 50;
+    /* Slider track — label area and value area scale with font */
+    float sx0 = x0 + (float)(12 * cw);
+    float sx1 = x0 + w - (float)(7 * cw);
     float sy = y0 + ch * 0.5f - 3;
     float sh = 6.0f;
 
@@ -11313,7 +11552,7 @@ static void clr_draw_slider(float x0, float y0, float w, float h,
 static void clr_draw(int vp_w, int vp_h) {
     if (!clr_visible) return;
     const ui_theme_t *t = &ui_themes[current_theme];
-    int cw = VKM_CHAR_W, ch = VKM_CHAR_H;
+    int cw = (int)(VKM_CHAR_W * ui_scale), ch = (int)(VKM_CHAR_H * ui_scale);
     float x0 = clr_x, y0 = clr_y;
     float pw = clr_w;
     int titlebar_h = ch + 8;
@@ -11385,7 +11624,7 @@ static void clr_draw(int vp_w, int vp_h) {
 }
 
 static int clr_hit_slider(int mx, int my, float *out_pct) {
-    int cw = VKM_CHAR_W, ch = VKM_CHAR_H;
+    int cw = (int)(VKM_CHAR_W * ui_scale), ch = (int)(VKM_CHAR_H * ui_scale);
     int titlebar_h = ch + 8;
     float row_h = ch + 14;
 
@@ -11419,7 +11658,7 @@ static int clr_mouse_down(int mx, int my) {
     if (mx < (int)clr_x || mx >= (int)(clr_x + clr_w) ||
         my < (int)clr_y || my >= (int)(clr_y + clr_h)) return 0;
 
-    int cw = VKM_CHAR_W, ch = VKM_CHAR_H;
+    int cw = (int)(VKM_CHAR_W * ui_scale), ch = (int)(VKM_CHAR_H * ui_scale);
     int titlebar_h = ch + 8;
     int ly = my - (int)clr_y;
 
@@ -11474,6 +11713,269 @@ static void clr_mouse_up(void) {
     clr_active_slider = -1;
 }
 
+/* ---- Fonts & Text Panel (fnt_) ---- */
+
+static void fnt_toggle(void) {
+    fnt_visible = !fnt_visible;
+    if (fnt_visible) {
+        fnt_w = 320 * ui_scale; fnt_h = 500 * ui_scale;
+        int vp_w = (int)vk_sc_extent.width, vp_h = (int)vk_sc_extent.height;
+        fnt_x = (float)(vp_w - (int)fnt_w) / 2.0f;
+        fnt_y = (float)(vp_h - (int)fnt_h) / 2.0f;
+        fnt_scroll = 0;
+    }
+}
+
+static void fnt_draw(int vp_w, int vp_h) {
+    if (!fnt_visible) return;
+    const ui_theme_t *t = &ui_themes[current_theme];
+    int cw = (int)(VKM_CHAR_W * ui_scale), ch = (int)(VKM_CHAR_H * ui_scale);
+    float x0 = fnt_x, y0 = fnt_y, pw = fnt_w;
+    int titlebar_h = ch + 8;
+    int item_h = ch + 6;
+    int total_fonts = NUM_TTF_FONTS + 1; /* +1 for CP437 bitmap */
+
+    /* Panel background */
+    push_solid((int)x0, (int)y0, (int)(x0 + pw), (int)(y0 + fnt_h),
+               t->bg[0], t->bg[1], t->bg[2], 0.94f, vp_w, vp_h);
+    /* Border */
+    push_solid((int)x0, (int)y0, (int)(x0 + pw), (int)(y0 + 1),
+               t->accent[0], t->accent[1], t->accent[2], 0.6f, vp_w, vp_h);
+    push_solid((int)x0, (int)(y0 + fnt_h - 1), (int)(x0 + pw), (int)(y0 + fnt_h),
+               t->accent[0], t->accent[1], t->accent[2], 0.6f, vp_w, vp_h);
+    push_solid((int)x0, (int)y0, (int)(x0 + 1), (int)(y0 + fnt_h),
+               t->accent[0], t->accent[1], t->accent[2], 0.6f, vp_w, vp_h);
+    push_solid((int)(x0 + pw - 1), (int)y0, (int)(x0 + pw), (int)(y0 + fnt_h),
+               t->accent[0], t->accent[1], t->accent[2], 0.6f, vp_w, vp_h);
+
+    /* Titlebar */
+    {
+        float acr = t->accent[0], acg = t->accent[1], acb = t->accent[2];
+        float tbr = acr * 0.25f + t->bg[0] * 0.5f;
+        float tbg = acg * 0.25f + t->bg[1] * 0.5f;
+        float tbb = acb * 0.25f + t->bg[2] * 0.5f;
+        int ty0 = (int)y0 + 2, ty1 = (int)y0 + titlebar_h;
+        push_solid((int)x0 + 2, ty0, (int)(x0 + pw) - 2, ty1,
+                   tbr, tbg, tbb, 0.95f, vp_w, vp_h);
+        push_solid((int)x0 + 2, ty0, (int)(x0 + pw) - 2, ty0 + titlebar_h / 2,
+                   1.0f, 1.0f, 1.0f, 0.06f, vp_w, vp_h);
+        push_solid((int)x0 + 2, ty1 - 1, (int)(x0 + pw) - 2, ty1,
+                   acr, acg, acb, 0.5f, vp_w, vp_h);
+    }
+    push_text((int)(x0 + 6) + 1, (int)(y0 + 4) + 1, "Fonts & Text",
+              0.0f, 0.0f, 0.0f, vp_w, vp_h, cw, ch);
+    push_text((int)(x0 + 6), (int)(y0 + 4), "Fonts & Text",
+              t->text[0], t->text[1], t->text[2], vp_w, vp_h, cw, ch);
+    push_text((int)(x0 + pw - 16), (int)(y0 + 4), "X",
+              t->text[0] * 0.6f, t->text[1] * 0.6f, t->text[2] * 0.6f, vp_w, vp_h, cw, ch);
+
+    /* --- Font list section --- */
+    float cy = y0 + titlebar_h + 4;
+    push_text((int)(x0 + 8), (int)cy, "FONT",
+              t->accent[0], t->accent[1], t->accent[2], vp_w, vp_h, cw, ch);
+    cy += ch + 4;
+
+    /* Separator line */
+    push_solid((int)(x0 + 4), (int)cy, (int)(x0 + pw - 4), (int)(cy + 1),
+               t->accent[0], t->accent[1], t->accent[2], 0.3f, vp_w, vp_h);
+    cy += 4;
+
+    /* Calculate how many font items fit in the list area */
+    float slider_area_h = (ch + 14) * 2 + 24; /* 2 sliders + padding */
+    float list_area_h = fnt_h - (cy - y0) - slider_area_h - 8;
+    int visible_items = (int)(list_area_h / (float)item_h);
+    if (visible_items < 3) visible_items = 3;
+    if (fnt_scroll > total_fonts - visible_items) fnt_scroll = total_fonts - visible_items;
+    if (fnt_scroll < 0) fnt_scroll = 0;
+
+    fnt_hover_item = -1;
+    for (int i = 0; i < visible_items && (i + fnt_scroll) < total_fonts; i++) {
+        int fi = i + fnt_scroll;
+        const char *label;
+        int is_active;
+        if (fi == 0) {
+            label = "CP437 Bitmap (VGA)";
+            is_active = (current_font < 0);
+        } else {
+            label = ttf_fonts[fi - 1].name;
+            is_active = (current_font == fi - 1);
+        }
+
+        float iy = cy + i * item_h;
+
+        /* Highlight active font */
+        if (is_active) {
+            push_solid((int)(x0 + 2), (int)iy, (int)(x0 + pw - 2), (int)(iy + item_h),
+                       t->accent[0], t->accent[1], t->accent[2], 0.25f, vp_w, vp_h);
+        }
+
+        /* Font name */
+        float tr = is_active ? t->accent[0] : t->text[0] * 0.85f;
+        float tg = is_active ? t->accent[1] : t->text[1] * 0.85f;
+        float tb = is_active ? t->accent[2] : t->text[2] * 0.85f;
+        push_text((int)(x0 + 10), (int)(iy + 2), label, tr, tg, tb, vp_w, vp_h, cw, ch);
+    }
+
+    /* Scrollbar if needed */
+    if (total_fonts > visible_items) {
+        float sb_x = x0 + pw - 8;
+        float sb_y0 = cy;
+        float sb_h = (float)(visible_items * item_h);
+        float thumb_h = sb_h * ((float)visible_items / (float)total_fonts);
+        if (thumb_h < 12) thumb_h = 12;
+        float thumb_y = sb_y0 + ((float)fnt_scroll / (float)(total_fonts - visible_items)) * (sb_h - thumb_h);
+        push_solid((int)sb_x, (int)sb_y0, (int)(sb_x + 4), (int)(sb_y0 + sb_h),
+                   t->text[0] * 0.15f, t->text[1] * 0.15f, t->text[2] * 0.15f, 0.4f, vp_w, vp_h);
+        push_solid((int)sb_x, (int)thumb_y, (int)(sb_x + 4), (int)(thumb_y + thumb_h),
+                   t->accent[0], t->accent[1], t->accent[2], 0.6f, vp_w, vp_h);
+    }
+
+    /* --- Sliders section --- */
+    float slider_y = cy + visible_items * item_h + 8;
+
+    /* Separator */
+    push_solid((int)(x0 + 4), (int)slider_y, (int)(x0 + pw - 4), (int)(slider_y + 1),
+               t->accent[0], t->accent[1], t->accent[2], 0.3f, vp_w, vp_h);
+    slider_y += 8;
+
+    float row_h = ch + 14;
+    char vbuf[32];
+
+    /* Font Size slider (term_font_adj, -5..+5) */
+    _snprintf(vbuf, sizeof(vbuf), "%+d", term_font_adj);
+    clr_draw_slider(x0 + 8, slider_y, pw - 16, row_h,
+                    (float)term_font_adj, -5.0f, 5.0f,
+                    "Font Size", vbuf, vp_w, vp_h, t);
+    slider_y += row_h;
+
+    /* Left Margin slider (term_margin, 0..40) */
+    _snprintf(vbuf, sizeof(vbuf), "%dpx", term_margin);
+    clr_draw_slider(x0 + 8, slider_y, pw - 16, row_h,
+                    (float)term_margin, 0.0f, 40.0f,
+                    "Left Margin", vbuf, vp_w, vp_h, t);
+    slider_y += row_h;
+
+    /* Update panel height to fit content */
+    fnt_h = slider_y - y0 + 8;
+}
+
+static int fnt_mouse_down(int mx, int my) {
+    if (!fnt_visible) return 0;
+    if (mx < (int)fnt_x || mx >= (int)(fnt_x + fnt_w) ||
+        my < (int)fnt_y || my >= (int)(fnt_y + fnt_h)) return 0;
+
+    int cw = (int)(VKM_CHAR_W * ui_scale), ch = (int)(VKM_CHAR_H * ui_scale);
+    int titlebar_h = ch + 8;
+    int item_h = ch + 6;
+    int total_fonts = NUM_TTF_FONTS + 1;
+    int ly = my - (int)fnt_y;
+
+    /* Close button */
+    if (ly < titlebar_h && mx >= (int)(fnt_x + fnt_w - 20)) {
+        fnt_visible = 0;
+        return 1;
+    }
+    /* Titlebar drag */
+    if (ly < titlebar_h) {
+        fnt_dragging = 1;
+        fnt_drag_ox = (float)mx - fnt_x;
+        fnt_drag_oy = (float)my - fnt_y;
+        return 1;
+    }
+
+    /* Font list area */
+    float list_y0 = fnt_y + titlebar_h + 4 + ch + 4 + 4; /* after "FONT" label + separator */
+    float slider_area_h = (ch + 14) * 2 + 24;
+    float list_area_h = fnt_h - (list_y0 - fnt_y) - slider_area_h - 8;
+    int visible_items = (int)(list_area_h / (float)item_h);
+    if (visible_items < 3) visible_items = 3;
+
+    if ((float)my >= list_y0 && (float)my < list_y0 + visible_items * item_h) {
+        int clicked_row = (int)((float)(my - (int)list_y0) / (float)item_h);
+        int fi = clicked_row + fnt_scroll;
+        if (fi >= 0 && fi < total_fonts) {
+            pending_font_idx = (fi == 0) ? -1 : fi - 1;
+            font_change_pending = 1;
+            return 1;
+        }
+    }
+
+    /* Slider area — check both sliders */
+    float slider_y = list_y0 + visible_items * item_h + 8 + 8; /* after separator */
+    float row_h = ch + 14;
+
+    /* Font Size slider */
+    {
+        float sx0 = fnt_x + 8 + 110;
+        float sx1 = fnt_x + fnt_w - 16 - 50 + 8;
+        float sy = slider_y;
+        if (my >= (int)sy && my < (int)(sy + row_h) &&
+            mx >= (int)(sx0 - 4) && mx <= (int)(sx1 + 4)) {
+            fnt_active_slider = 0;
+            float pct = ((float)mx - sx0) / (sx1 - sx0);
+            if (pct < 0) pct = 0; if (pct > 1) pct = 1;
+            term_font_adj = (int)(-5.0f + pct * 10.0f);
+            font_change_pending = 1;
+            pending_font_idx = current_font;
+            return 1;
+        }
+    }
+    /* Left Margin slider */
+    {
+        float sx0 = fnt_x + 8 + 110;
+        float sx1 = fnt_x + fnt_w - 16 - 50 + 8;
+        float sy = slider_y + row_h;
+        if (my >= (int)sy && my < (int)(sy + row_h) &&
+            mx >= (int)(sx0 - 4) && mx <= (int)(sx1 + 4)) {
+            fnt_active_slider = 1;
+            float pct = ((float)mx - sx0) / (sx1 - sx0);
+            if (pct < 0) pct = 0; if (pct > 1) pct = 1;
+            term_margin = (int)(pct * 40.0f);
+            return 1;
+        }
+    }
+
+    return 1; /* consume click inside panel */
+}
+
+static void fnt_mouse_move(int mx, int my) {
+    if (fnt_dragging) {
+        fnt_x = (float)mx - fnt_drag_ox;
+        fnt_y = (float)my - fnt_drag_oy;
+        return;
+    }
+    if (fnt_active_slider >= 0) {
+        float sx0 = fnt_x + 8 + 110;
+        float sx1 = fnt_x + fnt_w - 16 - 50 + 8;
+        float pct = ((float)mx - sx0) / (sx1 - sx0);
+        if (pct < 0) pct = 0; if (pct > 1) pct = 1;
+        if (fnt_active_slider == 0) {
+            term_font_adj = (int)(-5.0f + pct * 10.0f);
+            font_change_pending = 1;
+            pending_font_idx = current_font;
+        } else if (fnt_active_slider == 1) {
+            term_margin = (int)(pct * 40.0f);
+        }
+    }
+}
+
+static void fnt_mouse_up(void) {
+    fnt_dragging = 0;
+    fnt_active_slider = -1;
+}
+
+static int fnt_scroll_wheel(int mx, int my, int delta) {
+    if (!fnt_visible) return 0;
+    if (mx < (int)fnt_x || mx >= (int)(fnt_x + fnt_w) ||
+        my < (int)fnt_y || my >= (int)(fnt_y + fnt_h)) return 0;
+    fnt_scroll -= delta;
+    int total_fonts = NUM_TTF_FONTS + 1;
+    if (fnt_scroll < 0) fnt_scroll = 0;
+    if (fnt_scroll > total_fonts - 5) fnt_scroll = total_fonts - 5;
+    if (fnt_scroll < 0) fnt_scroll = 0;
+    return 1;
+}
+
 /* ---- Background Settings Panel (bgp_) ---- */
 
 #define BGP_SLIDER_COUNT 12
@@ -11494,13 +11996,21 @@ static float bgp_slider_max[BGP_SLIDER_COUNT] = {
 
 static float *bgp_slider_ptr[BGP_SLIDER_COUNT];
 
-/* Total virtual rows = sliders + section labels + dropdown rows */
-#define BGP_TOTAL_ROWS (BGP_SLIDER_COUNT + 8)  /* 12 sliders + 1 material dd + 1 separator + 4 beat dds + 2 section labels */
+/* Tonemap mode names */
+#define BGP_TONEMAP_COUNT 5
+static const char *bgp_tonemap_names[BGP_TONEMAP_COUNT] = {
+    "None", "ACES Filmic", "Reinhard", "Hable", "AgX"
+};
 
+/* Total virtual rows = sliders + section labels + dropdown rows */
+#define BGP_TOTAL_ROWS (BGP_SLIDER_COUNT + 11)  /* 12 sliders + 1 material dd + 1 sep + 4 beat dds + 2 section labels + 1 tonemap dd + 1 exposure slider */
+
+static int bgp_scaled = 0;
 static void bgp_draw(int vp_w, int vp_h) {
     if (!bgp_visible) return;
+    if (!bgp_scaled) { bgp_w = 420*ui_scale; bgp_h = 640*ui_scale; bgp_x = 100*ui_scale; bgp_y = 60*ui_scale; bgp_scaled = 1; }
     const ui_theme_t *t = &ui_themes[current_theme];
-    int cw = VKM_CHAR_W, ch = VKM_CHAR_H;
+    int cw = (int)(VKM_CHAR_W * ui_scale), ch = (int)(VKM_CHAR_H * ui_scale);
     float x0 = bgp_x, y0 = bgp_y;
     float pw = bgp_w;
     int titlebar_h = ch + 8;
@@ -11668,6 +12178,47 @@ static void bgp_draw(int vp_w, int vp_h) {
         }
     }
 
+    /* --- Tonemapping section header --- */
+    if (BGP_ROW_VISIBLE) {
+        push_solid((int)(x0 + 8), (int)(cy + row_h * 0.3f),
+                   (int)(x0 + pw - sb_w - 8), (int)(cy + row_h * 0.35f),
+                   t->accent[0], t->accent[1], t->accent[2], 0.3f, vp_w, vp_h);
+        push_text((int)(x0 + 8), (int)(cy + 2), "Tonemapping",
+                  t->accent[0], t->accent[1], t->accent[2], vp_w, vp_h, cw, ch);
+    }
+    BGP_NEXT_ROW;
+
+    /* Tonemap mode dropdown */
+    if (BGP_ROW_VISIBLE) {
+        push_text((int)(x0 + 10), (int)(cy + 2), "Mode:",
+                  t->text[0], t->text[1], t->text[2], vp_w, vp_h, cw, ch);
+        int dd_x = (int)(x0 + 10 + 11 * cw);
+        int dd_w = (int)(slider_w - 11 * cw - 2);
+        int dd_y = (int)cy;
+        int dd_h = ch + 4;
+        push_solid(dd_x, dd_y, dd_x + dd_w, dd_y + dd_h,
+                   t->bg[0] + 0.05f, t->bg[1] + 0.05f, t->bg[2] + 0.05f, 0.9f, vp_w, vp_h);
+        push_solid(dd_x, dd_y, dd_x + dd_w, dd_y + 1,
+                   1.0f, 1.0f, 1.0f, 0.08f, vp_w, vp_h);
+        push_solid(dd_x, dd_y + dd_h - 1, dd_x + dd_w, dd_y + dd_h,
+                   0.0f, 0.0f, 0.0f, 0.15f, vp_w, vp_h);
+        int tm = bg_tonemap_mode;
+        if (tm < 0 || tm >= BGP_TONEMAP_COUNT) tm = 0;
+        push_text(dd_x + 4, dd_y + 2, bgp_tonemap_names[tm],
+                  t->accent[0], t->accent[1], t->accent[2], vp_w, vp_h, cw, ch);
+        push_text(dd_x + dd_w - cw - 2, dd_y + 2, "\x1F",
+                  t->text[0] * 0.5f, t->text[1] * 0.5f, t->text[2] * 0.5f, vp_w, vp_h, cw, ch);
+    }
+    BGP_NEXT_ROW;
+
+    /* Exposure slider */
+    if (BGP_ROW_VISIBLE) {
+        _snprintf(vbuf, sizeof(vbuf), "%.1f", bg_tonemap_exposure);
+        clr_draw_slider(x0 + 8, cy, slider_w, row_h, bg_tonemap_exposure,
+                        0.2f, 4.0f, "Exposure", vbuf, vp_w, vp_h, t);
+    }
+    BGP_NEXT_ROW;
+
     #undef BGP_ROW_VISIBLE
     #undef BGP_NEXT_ROW
 
@@ -11698,13 +12249,13 @@ static void bgp_draw(int vp_w, int vp_h) {
 }
 
 static int bgp_hit_slider(int mx, int my, float *out_pct) {
-    int cw = VKM_CHAR_W, ch = VKM_CHAR_H;
+    int cw = (int)(VKM_CHAR_W * ui_scale), ch = (int)(VKM_CHAR_H * ui_scale);
     int titlebar_h = ch + 8;
     float row_h = ch + 14;
     float sb_w = 8.0f;
     float slider_w = bgp_w - 16 - sb_w;
-    float sx0 = bgp_x + 8 + 110;
-    float sx1 = bgp_x + 8 + slider_w - 50 + 8;
+    float sx0 = bgp_x + 8 + (float)(12 * cw);
+    float sx1 = bgp_x + 8 + slider_w - (float)(7 * cw) + 8;
     float content_top = bgp_y + titlebar_h + 4;
     for (int i = 0; i < BGP_SLIDER_COUNT; i++) {
         int vrow = i - bgp_scroll;
@@ -11718,10 +12269,29 @@ static int bgp_hit_slider(int mx, int my, float *out_pct) {
             return i;
         }
     }
+    /* Exposure slider at virtual row BGP_SLIDER_COUNT + 8 */
+    {
+        int vrow = BGP_SLIDER_COUNT + 8 - bgp_scroll;
+        if (vrow >= 0) {
+            float sy = content_top + 4 + vrow * row_h;
+            if (my >= (int)sy && my < (int)(sy + row_h) &&
+                mx >= (int)(sx0 - 4) && mx <= (int)(sx1 + 4)) {
+                float pct = ((float)mx - sx0) / (sx1 - sx0);
+                if (pct < 0) pct = 0; if (pct > 1) pct = 1;
+                *out_pct = pct;
+                return BGP_SLIDER_COUNT; /* special index for exposure */
+            }
+        }
+    }
     return -1;
 }
 
 static void bgp_set_from_pct(int slider, float pct) {
+    if (slider == BGP_SLIDER_COUNT) {
+        /* Exposure slider */
+        bg_tonemap_exposure = 0.2f + pct * 3.8f;
+        return;
+    }
     if (slider < 0 || slider >= BGP_SLIDER_COUNT) return;
     float val = bgp_slider_min[slider] + pct * (bgp_slider_max[slider] - bgp_slider_min[slider]);
     *bgp_slider_ptr[slider] = val;
@@ -11729,7 +12299,7 @@ static void bgp_set_from_pct(int slider, float pct) {
 
 /* Returns dropdown index: -1=none, 0=material, 1-4=beat bands */
 static int bgp_hit_dropdown(int mx, int my) {
-    int cw = VKM_CHAR_W, ch = VKM_CHAR_H;
+    int cw = (int)(VKM_CHAR_W * ui_scale), ch = (int)(VKM_CHAR_H * ui_scale);
     int titlebar_h = ch + 8;
     float row_h = ch + 14;
     float sb_w = 8.0f;
@@ -11753,6 +12323,14 @@ static int bgp_hit_dropdown(int mx, int my) {
         float ry = content_top + 4 + vrow * row_h;
         if (my >= (int)ry && my < (int)(ry + row_h)) return b + 1;
     }
+    /* Tonemap dropdown at virtual row BGP_SLIDER_COUNT + 7 */
+    {
+        int vrow = BGP_SLIDER_COUNT + 7 - bgp_scroll;
+        if (vrow >= 0) {
+            float ry = content_top + 4 + vrow * row_h;
+            if (my >= (int)ry && my < (int)(ry + row_h)) return 5;
+        }
+    }
     return -1;
 }
 
@@ -11760,7 +12338,7 @@ static int bgp_mouse_down(int mx, int my) {
     if (!bgp_visible) return 0;
     if (mx < (int)bgp_x || mx >= (int)(bgp_x + bgp_w) ||
         my < (int)bgp_y || my >= (int)(bgp_y + bgp_h)) return 0;
-    int ch = VKM_CHAR_H;
+    int ch = (int)(VKM_CHAR_H * ui_scale);
     int titlebar_h = ch + 8;
     int ly = my - (int)bgp_y;
     if (ly < titlebar_h && mx >= (int)(bgp_x + bgp_w - 20)) {
@@ -11777,6 +12355,7 @@ static int bgp_mouse_down(int mx, int my) {
         bg_plasma_material = 0; bg_plasma_mat_str = 1.0f;
         bg_plasma_beat_bass = 0; bg_plasma_beat_mid = 0;
         bg_plasma_beat_treble = 0; bg_plasma_beat_rms = 0;
+        bg_tonemap_mode = 0; bg_tonemap_exposure = 1.0f;
         return 1;
     }
     if (ly < titlebar_h) {
@@ -11799,6 +12378,9 @@ static int bgp_mouse_down(int mx, int my) {
         if (dd == 0) {
             /* Material dropdown */
             bg_plasma_material = (bg_plasma_material + 1) % BGP_MAT_COUNT;
+        } else if (dd == 5) {
+            /* Tonemap dropdown */
+            bg_tonemap_mode = (bg_tonemap_mode + 1) % BGP_TONEMAP_COUNT;
         } else {
             /* Beat dropdowns (1-4 maps to bass/mid/treble/rms) */
             int *val = NULL;
@@ -11820,10 +12402,11 @@ static void bgp_mouse_move(int mx, int my) {
         return;
     }
     if (bgp_active_slider >= 0) {
+        int cw = (int)(VKM_CHAR_W * ui_scale);
         float sb_w = 8.0f;
         float slider_w = bgp_w - 16 - sb_w;
-        float sx0 = bgp_x + 8 + 110;
-        float sx1 = bgp_x + 8 + slider_w - 50 + 8;
+        float sx0 = bgp_x + 8 + (float)(12 * cw);
+        float sx1 = bgp_x + 8 + slider_w - (float)(7 * cw) + 8;
         float pct = ((float)mx - sx0) / (sx1 - sx0);
         if (pct < 0) pct = 0; if (pct > 1) pct = 1;
         bgp_set_from_pct(bgp_active_slider, pct);
@@ -11838,10 +12421,12 @@ static void bgp_mouse_up(void) {
 
 /* ---- Smoky Letters Settings Panel ---- */
 
+static int smk_scaled = 0;
 static void smk_draw(int vp_w, int vp_h) {
     if (!smk_visible) return;
+    if (!smk_scaled) { smk_w = 280*ui_scale; smk_h = 200*ui_scale; smk_x = 20*ui_scale; smk_y = 100*ui_scale; smk_scaled = 1; }
     const ui_theme_t *t = &ui_themes[current_theme];
-    int cw = VKM_CHAR_W, ch = VKM_CHAR_H;
+    int cw = (int)(VKM_CHAR_W * ui_scale), ch = (int)(VKM_CHAR_H * ui_scale);
     float x0 = smk_x, y0 = smk_y;
     float pw = smk_w;
     int titlebar_h = ch + 8;
@@ -11907,7 +12492,7 @@ static void smk_draw(int vp_w, int vp_h) {
 }
 
 static int smk_hit_slider(int mx, int my, float *out_pct) {
-    int cw = VKM_CHAR_W, ch = VKM_CHAR_H;
+    int cw = (int)(VKM_CHAR_W * ui_scale), ch = (int)(VKM_CHAR_H * ui_scale);
     int titlebar_h = ch + 8;
     float row_h = ch + 14;
     float sx0 = smk_x + 8 + 110;
@@ -11935,7 +12520,7 @@ static int smk_mouse_down(int mx, int my) {
     if (!smk_visible) return 0;
     if (mx < (int)smk_x || mx >= (int)(smk_x + smk_w) ||
         my < (int)smk_y || my >= (int)(smk_y + smk_h)) return 0;
-    int ch = VKM_CHAR_H;
+    int ch = (int)(VKM_CHAR_H * ui_scale);
     int titlebar_h = ch + 8;
     int ly = my - (int)smk_y;
     if (ly < titlebar_h && mx >= (int)(smk_x + smk_w - 20)) {
@@ -11986,10 +12571,12 @@ static void smk_mouse_up(void) {
 
 /* ============ Drop Shadow Settings Panel ============ */
 
+static int shd_scaled = 0;
 static void shd_draw(int vp_w, int vp_h) {
     if (!shd_visible) return;
+    if (!shd_scaled) { shd_w = 280*ui_scale; shd_h = 200*ui_scale; shd_x = 60*ui_scale; shd_y = 120*ui_scale; shd_scaled = 1; }
     const ui_theme_t *t = &ui_themes[current_theme];
-    int cw = VKM_CHAR_W, ch = VKM_CHAR_H;
+    int cw = (int)(VKM_CHAR_W * ui_scale), ch = (int)(VKM_CHAR_H * ui_scale);
     float x0 = shd_x, y0 = shd_y;
     float pw = shd_w;
     int titlebar_h = ch + 8;
@@ -12081,7 +12668,7 @@ static void shd_draw(int vp_w, int vp_h) {
 }
 
 static int shd_hit_slider(int mx, int my, float *out_pct) {
-    int cw = VKM_CHAR_W, ch = VKM_CHAR_H;
+    int cw = (int)(VKM_CHAR_W * ui_scale), ch = (int)(VKM_CHAR_H * ui_scale);
     int titlebar_h = ch + 8;
     float row_h = ch + 14;
     float color_row_h = row_h; /* skip color preview row */
@@ -12115,7 +12702,7 @@ static int shd_mouse_down(int mx, int my) {
     if (!shd_visible) return 0;
     if (mx < (int)shd_x || mx >= (int)(shd_x + shd_w) ||
         my < (int)shd_y || my >= (int)(shd_y + shd_h)) return 0;
-    int ch = VKM_CHAR_H;
+    int ch = (int)(VKM_CHAR_H * ui_scale);
     int titlebar_h = ch + 8;
     int ly = my - (int)shd_y;
     /* Close button */
@@ -12195,6 +12782,38 @@ __declspec(dllexport) float vkt_bg_plasma_get_saturation(void) { return bg_plasm
 __declspec(dllexport) float vkt_bg_plasma_get_brightness(void) { return bg_plasma_brightness; }
 __declspec(dllexport) float vkt_bg_plasma_get_alpha(void) { return bg_plasma_alpha; }
 
+/* Sobel / Emboss / Edge / Sharpen */
+__declspec(dllexport) void  vkt_bg_plasma_set_sobel(float v)       { bg_plasma_sobel = v; }
+__declspec(dllexport) float vkt_bg_plasma_get_sobel(void)          { return bg_plasma_sobel; }
+__declspec(dllexport) void  vkt_bg_plasma_set_sobel_angle(float v) { bg_plasma_sobel_angle = v; }
+__declspec(dllexport) float vkt_bg_plasma_get_sobel_angle(void)    { return bg_plasma_sobel_angle; }
+__declspec(dllexport) void  vkt_bg_plasma_set_edge_glow(float v)   { bg_plasma_edge_glow = v; }
+__declspec(dllexport) float vkt_bg_plasma_get_edge_glow(void)      { return bg_plasma_edge_glow; }
+__declspec(dllexport) void  vkt_bg_plasma_set_sharpen(float v)     { bg_plasma_sharpen = v; }
+__declspec(dllexport) float vkt_bg_plasma_get_sharpen(void)        { return bg_plasma_sharpen; }
+
+/* Material */
+__declspec(dllexport) void  vkt_bg_plasma_set_material(int t)      { bg_plasma_material = t; }
+__declspec(dllexport) int   vkt_bg_plasma_get_material(void)       { return bg_plasma_material; }
+__declspec(dllexport) void  vkt_bg_plasma_set_material_str(float v){ bg_plasma_mat_str = v; }
+__declspec(dllexport) float vkt_bg_plasma_get_material_str(void)   { return bg_plasma_mat_str; }
+
+/* Tonemap */
+__declspec(dllexport) void  vkt_bg_plasma_set_tonemap(int m)       { bg_tonemap_mode = m; }
+__declspec(dllexport) int   vkt_bg_plasma_get_tonemap(void)        { return bg_tonemap_mode; }
+__declspec(dllexport) void  vkt_bg_plasma_set_tonemap_exp(float v) { bg_tonemap_exposure = v; }
+__declspec(dllexport) float vkt_bg_plasma_get_tonemap_exp(void)    { return bg_tonemap_exposure; }
+
+/* Beat response toggles */
+__declspec(dllexport) void vkt_bg_plasma_set_beat_bass(int v)      { bg_plasma_beat_bass = v; }
+__declspec(dllexport) int  vkt_bg_plasma_get_beat_bass(void)       { return bg_plasma_beat_bass; }
+__declspec(dllexport) void vkt_bg_plasma_set_beat_mid(int v)       { bg_plasma_beat_mid = v; }
+__declspec(dllexport) int  vkt_bg_plasma_get_beat_mid(void)        { return bg_plasma_beat_mid; }
+__declspec(dllexport) void vkt_bg_plasma_set_beat_treble(int v)    { bg_plasma_beat_treble = v; }
+__declspec(dllexport) int  vkt_bg_plasma_get_beat_treble(void)     { return bg_plasma_beat_treble; }
+__declspec(dllexport) void vkt_bg_plasma_set_beat_rms(int v)       { bg_plasma_beat_rms = v; }
+__declspec(dllexport) int  vkt_bg_plasma_get_beat_rms(void)        { return bg_plasma_beat_rms; }
+
 __declspec(dllexport) void vkt_bg_plasma_set_all(float speed, float turbulence, float complexity,
                                                   float hue, float saturation, float brightness, float alpha)
 {
@@ -12224,6 +12843,19 @@ __declspec(dllexport) void vkt_bg_help(void)
     vkw_print(vkw_console_idx, "  bg.plasma.brightness(f)");
     vkw_print(vkw_console_idx, "  bg.plasma.alpha(f)   - Opacity (0-1)");
     vkw_print(vkw_console_idx, "  bg.plasma.set_all(speed,turb,cmplx,hue,sat,brt,alpha)");
+    vkw_print(vkw_console_idx, "  bg.plasma.sobel(f)        - Emboss (0-2)");
+    vkw_print(vkw_console_idx, "  bg.plasma.sobel_angle(f)  - Light angle (0-360)");
+    vkw_print(vkw_console_idx, "  bg.plasma.edge_glow(f)    - Edge glow (0-2)");
+    vkw_print(vkw_console_idx, "  bg.plasma.sharpen(f)      - Sharpen (0-2)");
+    vkw_print(vkw_console_idx, "  bg.plasma.material(0-3)   - 0=glossy,1=wet,2=metal,3=matte");
+    vkw_print(vkw_console_idx, "  bg.plasma.material_str(f) - Material strength (0-2)");
+    vkw_print(vkw_console_idx, "  bg.plasma.tonemap(0-4)    - 0=none,1=ACES,2=Reinhard,3=Hable,4=AgX");
+    vkw_print(vkw_console_idx, "  bg.plasma.tonemap_exp(f)  - Exposure (0.2-4.0)");
+    vkw_print(vkw_console_idx, "  bg.plasma.beat_bass(0|1)  - Bass beat response");
+    vkw_print(vkw_console_idx, "  bg.plasma.beat_mid(0|1)   - Mid beat response");
+    vkw_print(vkw_console_idx, "  bg.plasma.beat_treble(0|1)- Treble beat response");
+    vkw_print(vkw_console_idx, "  bg.plasma.beat_rms(0|1)   - RMS beat response");
+    vkw_print(vkw_console_idx, "  All setters have get_ variants (e.g. bg.plasma.get_sobel())");
     vkw_print(vkw_console_idx, "  bg.show_settings()   - Show settings panel");
     vkw_print(vkw_console_idx, "  bg.hide_settings()   - Hide settings panel");
 }
@@ -12354,6 +12986,42 @@ static slop_command_t vkt_commands[] = {
     { "bg.plasma.brightness", "vkt_bg_plasma_set_brightness","f",    "v", "Set plasma brightness (0-2)" },
     { "bg.plasma.alpha",      "vkt_bg_plasma_set_alpha",  "f",       "v", "Set plasma opacity (0-1)" },
     { "bg.plasma.set_all",    "vkt_bg_plasma_set_all",    "fffffff", "v", "Set all plasma params (speed,turb,cmplx,hue,sat,brt,alpha)" },
+    /* Plasma sobel/emboss/edge/sharpen */
+    { "bg.plasma.sobel",          "vkt_bg_plasma_set_sobel",       "f", "v", "Set emboss strength (0-2)" },
+    { "bg.plasma.get_sobel",      "vkt_bg_plasma_get_sobel",       "",  "f", "Get emboss strength" },
+    { "bg.plasma.sobel_angle",    "vkt_bg_plasma_set_sobel_angle", "f", "v", "Set emboss light angle (0-360)" },
+    { "bg.plasma.get_sobel_angle","vkt_bg_plasma_get_sobel_angle", "",  "f", "Get emboss light angle" },
+    { "bg.plasma.edge_glow",      "vkt_bg_plasma_set_edge_glow",  "f", "v", "Set edge glow intensity (0-2)" },
+    { "bg.plasma.get_edge_glow",  "vkt_bg_plasma_get_edge_glow",  "",  "f", "Get edge glow intensity" },
+    { "bg.plasma.sharpen",        "vkt_bg_plasma_set_sharpen",     "f", "v", "Set sharpen strength (0-2)" },
+    { "bg.plasma.get_sharpen",    "vkt_bg_plasma_get_sharpen",     "",  "f", "Get sharpen strength" },
+    /* Plasma material */
+    { "bg.plasma.material",       "vkt_bg_plasma_set_material",    "i", "v", "Set material (0=glossy,1=wet,2=metallic,3=matte)" },
+    { "bg.plasma.get_material",   "vkt_bg_plasma_get_material",    "",  "i", "Get material type" },
+    { "bg.plasma.material_str",   "vkt_bg_plasma_set_material_str","f", "v", "Set material strength (0-2)" },
+    { "bg.plasma.get_material_str","vkt_bg_plasma_get_material_str","", "f", "Get material strength" },
+    /* Plasma tonemap */
+    { "bg.plasma.tonemap",        "vkt_bg_plasma_set_tonemap",     "i", "v", "Set tonemap (0=none,1=ACES,2=Reinhard,3=Hable,4=AgX)" },
+    { "bg.plasma.get_tonemap",    "vkt_bg_plasma_get_tonemap",     "",  "i", "Get tonemap mode" },
+    { "bg.plasma.tonemap_exp",    "vkt_bg_plasma_set_tonemap_exp", "f", "v", "Set tonemap exposure (0.2-4.0)" },
+    { "bg.plasma.get_tonemap_exp","vkt_bg_plasma_get_tonemap_exp", "",  "f", "Get tonemap exposure" },
+    /* Plasma beat response */
+    { "bg.plasma.beat_bass",      "vkt_bg_plasma_set_beat_bass",   "i", "v", "Set bass beat response (0/1)" },
+    { "bg.plasma.get_beat_bass",  "vkt_bg_plasma_get_beat_bass",   "",  "i", "Get bass beat response" },
+    { "bg.plasma.beat_mid",       "vkt_bg_plasma_set_beat_mid",    "i", "v", "Set mid beat response (0/1)" },
+    { "bg.plasma.get_beat_mid",   "vkt_bg_plasma_get_beat_mid",    "",  "i", "Get mid beat response" },
+    { "bg.plasma.beat_treble",    "vkt_bg_plasma_set_beat_treble", "i", "v", "Set treble beat response (0/1)" },
+    { "bg.plasma.get_beat_treble","vkt_bg_plasma_get_beat_treble", "",  "i", "Get treble beat response" },
+    { "bg.plasma.beat_rms",       "vkt_bg_plasma_set_beat_rms",    "i", "v", "Set RMS beat response (0/1)" },
+    { "bg.plasma.get_beat_rms",   "vkt_bg_plasma_get_beat_rms",    "",  "i", "Get RMS beat response" },
+    /* Plasma getters for base params */
+    { "bg.plasma.get_speed",      "vkt_bg_plasma_get_speed",       "",  "f", "Get plasma speed" },
+    { "bg.plasma.get_turbulence", "vkt_bg_plasma_get_turbulence",  "",  "f", "Get plasma turbulence" },
+    { "bg.plasma.get_complexity", "vkt_bg_plasma_get_complexity",  "",  "f", "Get plasma complexity" },
+    { "bg.plasma.get_hue",        "vkt_bg_plasma_get_hue",        "",  "f", "Get plasma hue shift" },
+    { "bg.plasma.get_saturation", "vkt_bg_plasma_get_saturation",  "",  "f", "Get plasma saturation" },
+    { "bg.plasma.get_brightness", "vkt_bg_plasma_get_brightness",  "",  "f", "Get plasma brightness" },
+    { "bg.plasma.get_alpha",      "vkt_bg_plasma_get_alpha",       "",  "f", "Get plasma opacity" },
     { "bg.show_settings",     "vkt_bg_show_settings",     "",        "v", "Show background settings panel" },
     { "bg.hide_settings",     "vkt_bg_hide_settings",     "",        "v", "Hide background settings panel" },
     { "bg.help",              "vkt_bg_help",              "",        "v", "Show background commands help" },
@@ -12479,6 +13147,7 @@ static void vkt_save_settings(void)
     SAVE_INT("round_recap", pst_round_recap);
     SAVE_INT("mudradio", mr_visible);
     SAVE_INT("font_adj", term_font_adj);
+    SAVE_INT("term_margin", term_margin);
     SAVE_FLOAT("brightness", pp_brightness);
     SAVE_FLOAT("contrast", pp_contrast);
     SAVE_FLOAT("hue", pp_hue);
@@ -12498,6 +13167,8 @@ static void vkt_save_settings(void)
     SAVE_FLOAT("bg_plasma_sharpen", bg_plasma_sharpen);
     SAVE_INT("bg_material", bg_plasma_material);
     SAVE_FLOAT("bg_mat_str", bg_plasma_mat_str);
+    SAVE_INT("bg_tonemap", bg_tonemap_mode);
+    SAVE_FLOAT("bg_tonemap_exp", bg_tonemap_exposure);
     SAVE_INT("bg_beat_bass", bg_plasma_beat_bass);
     SAVE_INT("bg_beat_mid", bg_plasma_beat_mid);
     SAVE_INT("bg_beat_treble", bg_plasma_beat_treble);
@@ -12565,6 +13236,7 @@ static void vkt_load_settings(void)
     LOAD_INT("round_recap", pst_round_recap, 1);
     LOAD_INT("mudradio", mr_visible, 0);
     LOAD_INT("font_adj", term_font_adj, 0);
+    LOAD_INT("term_margin", term_margin, 0);
     LOAD_FLOAT("brightness", pp_brightness, 0.0);
     LOAD_FLOAT("contrast", pp_contrast, 1.0);
     LOAD_FLOAT("hue", pp_hue, 0.0);
@@ -12584,6 +13256,8 @@ static void vkt_load_settings(void)
     LOAD_FLOAT("bg_plasma_sharpen", bg_plasma_sharpen, 0.0);
     LOAD_INT("bg_material", bg_plasma_material, 0);
     LOAD_FLOAT("bg_mat_str", bg_plasma_mat_str, 1.0);
+    LOAD_INT("bg_tonemap", bg_tonemap_mode, 0);
+    LOAD_FLOAT("bg_tonemap_exp", bg_tonemap_exposure, 1.0);
     LOAD_INT("bg_beat_bass", bg_plasma_beat_bass, 0);
     LOAD_INT("bg_beat_mid", bg_plasma_beat_mid, 0);
     LOAD_INT("bg_beat_treble", bg_plasma_beat_treble, 0);
