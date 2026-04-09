@@ -28,11 +28,19 @@ layout(push_constant) uniform PushConstants {
     float smoke_val;     /* 0..2 brightness */
     float char_w_px;     /* cell width in pixels */
     float char_h_px;     /* cell height in pixels */
+    float shadow_opacity; /* 0 = no shadow, >0 = shadow alpha */
+    float shadow_blur;    /* 0..4 gaussian blur radius */
+    float is_pixel_font;  /* 1.0 = bitmap font */
+    float fx_rain;        /* 0 = off, 1 = raindrop ripple warp */
+    float rain_size;      /* drop radius in NDC (0.02 - 0.15) */
+    float rain_speed;     /* animation speed multiplier (0.5 - 3.0) */
+    float rain_freq;      /* drop density (1.0 - 8.0) */
+    float rain_warp;      /* displacement strength (0.005 - 0.05) */
 } pc;
 
 /* ---- FBM Noise (hash-based, no texture needed) ---- */
 
-/* Simple 2D hash → pseudo-random float in [0,1] */
+/* Simple 2D hash -> pseudo-random float in [0,1] */
 float hash(vec2 p) {
     vec3 p3 = fract(vec3(p.xyx) * 0.1031);
     p3 += dot(p3, p3.yzx + 33.33);
@@ -73,16 +81,22 @@ float fbm(vec2 p) {
 void main() {
     vec4 pos = vec4(inPos, 0.0, 1.0);
 
-    /* ---- Diagonal Waves ---- */
+    /* ---- Diagonal Waves (with organic variation) ---- */
     if (pc.fx_waves > 0.5) {
         float seed = inPos.x * 7.13 + inPos.y * 3.37;
-        float angle = sin(seed * 4.7 + pc.time * 2.0) * 0.015;
-        pos.x += sin(seed * 5.3 + pc.time * 2.5) * 0.002;
-        pos.y += cos(seed * 3.1 + pc.time * 1.7) * 0.003;
+        /* Add slow-moving noise to break the repetitive pattern */
+        float n1 = noise(inPos * 3.0 + vec2(pc.time * 0.3, pc.time * 0.2));
+        float n2 = noise(inPos * 5.0 + vec2(pc.time * 0.5 + 7.0, pc.time * 0.4 + 13.0));
+        float vary = (n1 - 0.5) * 0.4 + (n2 - 0.5) * 0.2;
+        float angle = sin(seed * 4.7 + pc.time * 2.0 + vary * 3.0) * 0.015;
+        pos.x += sin(seed * 5.3 + pc.time * 2.5 + n1 * 2.0) * 0.002;
+        pos.y += cos(seed * 3.1 + pc.time * 1.7 + n2 * 2.0) * 0.003;
+        /* Noise-modulated amplitude — waves pulse organically */
+        float amp = 1.0 + vary * 0.5;
         float cx = inPos.x;
         float cy = inPos.y;
-        pos.x += (pos.y - cy) * sin(angle);
-        pos.y -= (pos.x - cx) * sin(angle);
+        pos.x += (pos.y - cy) * sin(angle) * amp;
+        pos.y -= (pos.x - cx) * sin(angle) * amp;
     }
 
     /* ---- FBM Noise Warp (fluid currents flowing between letters) ---- */
@@ -127,6 +141,64 @@ void main() {
         float amp = 0.025;
         pos.x += wx * amp;
         pos.y += wy * amp;
+    }
+
+    /* ---- Raindrop Ripple Warp ---- */
+    if (pc.fx_rain > 0.5) {
+        float warp_x = 0.0, warp_y = 0.0;
+        int max_drops = 12;
+        float drop_life = 2.5 / pc.rain_speed;
+        float stagger = drop_life / (pc.rain_freq * 1.5);
+
+        for (int i = 0; i < max_drops; i++) {
+            /* Each drop slot cycles through epochs — staggered birth times */
+            float slot_offset = float(i) * stagger;
+            float epoch = floor((pc.time - slot_offset) / drop_life);
+            float birth = epoch * drop_life + slot_offset;
+            float age = pc.time - birth;
+            if (age < 0.0 || age > drop_life) continue;
+
+            /* Drop position: random within text area NDC [-0.85, 0.85] */
+            vec2 seed = vec2(epoch * 13.37 + float(i) * 7.13,
+                             epoch * 23.71 + float(i) * 31.17);
+            float dx = hash(seed) * 1.7 - 0.85;
+            float dy = hash(seed + vec2(57.29, 83.41)) * 1.7 - 0.85;
+
+            /* Distance from vertex to drop center */
+            float dist = length(inPos - vec2(dx, dy));
+
+            /* Expanding ripple wavefront */
+            float ripple_radius = age * pc.rain_speed * 0.35;
+            float ring_dist = abs(dist - ripple_radius);
+
+            /* Multiple concentric rings (2-3 visible waves) */
+            float wavelength = pc.rain_size * 0.4;
+            float phase = (dist - ripple_radius) / max(wavelength, 0.01);
+            float ripple = cos(phase * 6.2832) * exp(-ring_dist * ring_dist / (wavelength * wavelength * 2.0));
+
+            /* Fade with age — energy dissipates as ripple expands */
+            float fade = exp(-age * pc.rain_speed * 1.0);
+            /* Energy spreads over growing circumference */
+            fade *= 1.0 / (1.0 + ripple_radius * 3.0);
+            /* Only show ripple within a reasonable radius */
+            fade *= smoothstep(ripple_radius + pc.rain_size * 2.0, ripple_radius - pc.rain_size, dist);
+
+            /* Central splash bulge — short-lived impact crater */
+            float splash_r = pc.rain_size * 0.6;
+            float splash = exp(-dist * dist / (splash_r * splash_r))
+                         * exp(-age * pc.rain_speed * 5.0);
+
+            /* Radial displacement direction */
+            vec2 dir = (dist > 0.001) ? normalize(inPos - vec2(dx, dy)) : vec2(0.0);
+
+            /* Accumulate displacement: ripple waves + central splash */
+            float displacement = (ripple * fade + splash * 0.4) * pc.rain_warp;
+            warp_x += dir.x * displacement;
+            warp_y += dir.y * displacement;
+        }
+
+        pos.x += warp_x;
+        pos.y += warp_y;
     }
 
     gl_Position = pos;

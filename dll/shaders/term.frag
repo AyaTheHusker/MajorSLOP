@@ -8,8 +8,12 @@ layout(location = 0) out vec4 outColor;
 layout(binding = 0) uniform sampler2D fontTex;
 
 void main() {
-    // For background quads: fragUV = (0,0), alpha = 1, tex sample = white → color pass-through
-    // For text quads: sample font atlas alpha, tint with color
-    float texAlpha = texture(fontTex, fragUV).a;
-    outColor = vec4(fragColor.rgb, fragColor.a * texAlpha);
+    vec4 tex = texture(fontTex, fragUV);
+    if (fragColor.r < -0.5) {
+        // Color emoji mode: use full texture RGBA, modulate alpha by vertex alpha
+        outColor = vec4(tex.rgb, tex.a * fragColor.a);
+    } else {
+        // Normal mode: font atlas alpha mask tinted by vertex color
+        outColor = vec4(fragColor.rgb, fragColor.a * tex.a);
+    }
 }

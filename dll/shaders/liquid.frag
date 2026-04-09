@@ -30,6 +30,12 @@ layout(push_constant) uniform PushConstants {
     float char_h_px;     /* cell height in pixels */
     float shadow_opacity; /* 0 = no shadow, >0 = shadow alpha */
     float shadow_blur;    /* 0..4 gaussian blur radius */
+    float is_pixel_font;  /* 1.0 = bitmap font, skip text sharpening */
+    float fx_rain;        /* 0 = off, 1 = raindrop warp (vertex only) */
+    float rain_size;      /* vertex only */
+    float rain_speed;     /* vertex only */
+    float rain_freq;      /* vertex only */
+    float rain_warp;      /* vertex only */
 } pc;
 
 /* --- Helpers --- */
@@ -43,9 +49,16 @@ vec3 palette(float t) {
 }
 
 void main() {
+    /* ---- Color emoji passthrough (icon bar) ---- */
+    if (fragColor.r < -0.5) {
+        vec4 tex = texture(fontTex, fragUV);
+        outColor = vec4(tex.rgb, tex.a * fragColor.a);
+        return;
+    }
+
     /* ---- Base text rendering (normal or liquid) ---- */
-    if (pc.fx_mode < 0.5) {
-        /* Normal mode — standard alpha-textured text */
+    if (pc.fx_mode < 0.5 || pc.is_pixel_font > 0.5) {
+        /* Normal mode (or pixel font — skip liquid to avoid neighbor-sampling artifacts) */
         float texAlpha = texture(fontTex, fragUV).a;
         outColor = vec4(fragColor.rgb, fragColor.a * texAlpha);
     } else {
@@ -113,21 +126,28 @@ void main() {
      * for soft shadow edges, then output shadow color at shadow opacity. */
     bool is_shadow = (fragColor.a > 0.59 && fragColor.a < 0.71);
     if (is_shadow) {
-        vec2 texSize = vec2(textureSize(fontTex, 0));
-        vec2 tx = 1.0 / texSize;
-        float blurR = max(pc.shadow_blur, 0.1);
-        /* 5x5 gaussian blur on font alpha for soft edges */
-        float totalW = 0.0;
-        float blurAlpha = 0.0;
-        for (int dy = -2; dy <= 2; dy++) {
-            for (int dx = -2; dx <= 2; dx++) {
-                float w = exp(-float(dx*dx + dy*dy) / (blurR * blurR * 2.0));
-                blurAlpha += texture(fontTex, fragUV + vec2(float(dx), float(dy)) * tx * blurR).a * w;
-                totalW += w;
+        float shadowAlpha;
+        if (pc.is_pixel_font > 0.5) {
+            /* Sharp shadow for bitmap fonts — no neighbor sampling to avoid
+             * artifact lines at atlas cell boundaries */
+            shadowAlpha = texture(fontTex, fragUV).a;
+        } else {
+            vec2 texSize = vec2(textureSize(fontTex, 0));
+            vec2 tx = 1.0 / texSize;
+            float blurR = max(pc.shadow_blur, 0.1);
+            /* 5x5 gaussian blur on font alpha for soft edges */
+            float totalW = 0.0;
+            shadowAlpha = 0.0;
+            for (int dy = -2; dy <= 2; dy++) {
+                for (int dx = -2; dx <= 2; dx++) {
+                    float w = exp(-float(dx*dx + dy*dy) / (blurR * blurR * 2.0));
+                    shadowAlpha += texture(fontTex, fragUV + vec2(float(dx), float(dy)) * tx * blurR).a * w;
+                    totalW += w;
+                }
             }
+            shadowAlpha /= totalW;
         }
-        blurAlpha /= totalW;
-        outColor = vec4(fragColor.rgb, blurAlpha * pc.shadow_opacity);
+        outColor = vec4(fragColor.rgb, shadowAlpha * pc.shadow_opacity);
         /* Shadow quads skip all subsequent passes */
         return;
     }
@@ -255,7 +275,7 @@ void main() {
     /* alpha=0.75 signals text-on-bg: sample neighbors to create dark stroke,
      * making text readable regardless of hue shift or background color.
      * Restore alpha to 1.0 after applying outline so blending works normally. */
-    if (has_bg_text) {
+    if (has_bg_text && pc.is_pixel_font < 0.5) {
         float texAlpha = texture(fontTex, fragUV).a;
         vec2 texSize = vec2(textureSize(fontTex, 0));
         vec2 tx = 1.5 / texSize;  /* 1.5 texel spread for outline */
@@ -280,23 +300,8 @@ void main() {
         if (texAlpha > 0.1) outColor.a = texAlpha;
     }
 
-    /* ---- Subtle text sharpening (always on) ---- */
-    /* Tighten anti-aliased edges so text is crisp without needing sobel.
-     * Uses a gentle unsharp mask on the font alpha only — no lighting. */
-    if (outColor.a > 0.01 && !has_bg_text && pc.fx_mode < 0.5) {
-        vec2 shTexSize = vec2(textureSize(fontTex, 0));
-        vec2 shTx = 1.0 / shTexSize;
-        float shMc = texture(fontTex, fragUV).a;
-        float shBlur = (
-            texture(fontTex, fragUV + vec2(-shTx.x, 0.0)).a +
-            texture(fontTex, fragUV + vec2( shTx.x, 0.0)).a +
-            texture(fontTex, fragUV + vec2(0.0, -shTx.y)).a +
-            texture(fontTex, fragUV + vec2(0.0,  shTx.y)).a
-        ) * 0.25;
-        float shSharp = shMc + (shMc - shBlur) * 1.5;
-        shSharp = clamp(shSharp, 0.0, 1.0);
-        outColor.a = fragColor.a * shSharp;
-    }
+    /* Text anti-aliasing: handled by GPU texture filtering (LINEAR).
+     * No custom sharpening — it caused artifact lines on bitmap fonts. */
 
     /* ---- Sobel/Sharp/Plastic pass ---- */
     /* Applied after recoloring, before scanlines.
@@ -305,7 +310,7 @@ void main() {
      *   2. Directional lighting using Sobel-derived surface normals (skip recap bg)
      *   3. Specular highlights for glossy plastic look (skip recap bg)
      * Recap bg text gets sharpening only — no lighting to avoid gradient banding. */
-    if (pc.fx_sobel > 0.5 && outColor.a > 0.01) {
+    if (pc.fx_sobel > 0.5 && outColor.a > 0.01 && pc.is_pixel_font < 0.5) {
         vec2 texSize = vec2(textureSize(fontTex, 0));
         /* Adaptive sampling: scale to ~1 screen pixel instead of 1 texel.
          * At high DPI (4K), atlas texels map to multiple screen pixels,

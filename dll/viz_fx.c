@@ -1,4 +1,4 @@
-/* viz_fx.c — Terminal Visualizations: Pixel Blades, Cannon Balls, Matrix Rain, Asteroids
+/* viz_fx.c — Terminal Visualizations: Pixel Blades, Cannon Balls, Matrix Rain, Vectroids
  * Physics particles interact with terminal text. Beat-reactive via mr_beat_snap.
  * Included into vk_terminal.c after mudradio includes.
  */
@@ -21,7 +21,7 @@ typedef enum {
     VIZ_BLADES,       /* Pixel saw blades — spinning jagged discs */
     VIZ_CANNONBALLS,  /* Raymarched 3D metallic spiked orbs */
     VIZ_MATRIX,
-    VIZ_ASTEROIDS,
+    VIZ_VECTROIDS,
     VIZ_MODE_COUNT
 } viz_mode_t;
 
@@ -104,7 +104,7 @@ typedef struct {
 
 static viz_rain_t viz_rain[VIZ_MAX_RAIN];
 
-/* Asteroids ship flight styles */
+/* Vectroids ship flight styles */
 #define VIZ_FLY_HUNTER   0   /* cyan: aggressive bee-line to text, fast turns */
 #define VIZ_FLY_ORBIT    1   /* pink: circles around targets, strafing runs */
 #define VIZ_FLY_ZIGZAG   2   /* green: fast zigzag sweeps across the screen */
@@ -126,11 +126,48 @@ typedef struct {
     float orbit_angle;   /* for orbit style: current orbit angle */
     float orbit_radius;  /* for orbit style: orbit distance */
     float zig_dir;       /* for zigzag: current sweep direction */
+    int   alive;         /* 1 = alive, 0 = dead/respawning */
+    float respawn_timer; /* seconds until respawn (10s) */
+    int   hp;            /* hit points (3 hits to die) */
+    int   target_type;   /* 0=text, 1=ship, 2=ufo */
+    int   target_ship;   /* index of targeted ship (when target_type==1) */
+    float fight_timer;   /* seconds remaining in ship-vs-ship/ufo mode */
+    int   present;       /* 1 = this ship slot is active on screen (for idle mode) */
+    float presence_timer;/* seconds until this ship leaves/arrives (idle mode) */
+    int   departing;     /* 1 = flying off screen to leave */
 } viz_ship_t;
 
 #define VIZ_MAX_SHIPS 5
 static viz_ship_t viz_ships[VIZ_MAX_SHIPS];
-static int viz_ship_count = 1; /* starts with 1, grows with energy */
+static int viz_ship_count = 1;
+
+/* UFO */
+typedef struct {
+    float x, y;
+    float vx;
+    float target_vx;       /* velocity we're accelerating toward */
+    int   active;
+    float stay_timer;      /* how long it stays on screen */
+    int   hp;              /* 5 hits to kill */
+    int   firing;          /* 1 = laser beam active */
+    float laser_charge;    /* 0→1 charge up time */
+    float laser_width;     /* current beam width in pixels */
+    float laser_alpha;     /* pulsing alpha */
+    float laser_time;      /* time since beam started */
+    int   direction;       /* 1 = left-to-right, -1 = right-to-left */
+    float explode_timer;   /* >0 = exploding animation */
+    float dash_timer;      /* time until next dash/reposition */
+    int   dashing;         /* 1 = doing a quick lateral dash */
+    float dash_dur;        /* how long current dash lasts */
+    float text_right_edge; /* rightmost text column in pixels */
+} viz_ufo_t;
+
+static viz_ufo_t viz_ufo;
+static float viz_ufo_cooldown = 0;    /* seconds until UFO can appear again */
+static float viz_scale = 1.0f;        /* resolution scale (vp_h / 1080) */
+static float viz_music_energy = 0;    /* smoothed energy for music detection */
+#define VIZ_MUSIC_THRESHOLD 0.12f
+static float viz_idle_fire_timer = 0; /* occasional shooting without music */
 
 /* Lasers */
 typedef struct {
@@ -138,6 +175,7 @@ typedef struct {
     float life;
     int   active;
     float lr, lg, lb;    /* laser color from ship */
+    int   owner;         /* ship index that fired this, -1 = unknown */
 } viz_laser_t;
 
 static viz_laser_t viz_lasers[VIZ_MAX_LASERS];
@@ -170,7 +208,17 @@ static void viz_init(void) {
     memset(viz_lasers, 0, sizeof(viz_lasers));
     memset(viz_cballs, 0, sizeof(viz_cballs));
     memset(viz_ships, 0, sizeof(viz_ships));
+    for (int i = 0; i < VIZ_MAX_SHIPS; i++) {
+        viz_ships[i].alive = 1;
+        viz_ships[i].hp = 3;
+        viz_ships[i].present = (i == 0) ? 1 : 0; /* only first ship starts present */
+        viz_ships[i].presence_timer = viz_randf_range(5.0f, 20.0f);
+    }
     viz_ship_count = 1;
+    memset(&viz_ufo, 0, sizeof(viz_ufo));
+    viz_ufo_cooldown = viz_randf_range(120.0f, 180.0f); /* first UFO after 2-3 min */
+    viz_music_energy = 0;
+    viz_idle_fire_timer = viz_randf_range(3.0f, 8.0f);
     viz_beat_num = 0;
     viz_last_beat = mr_beat_snap.beat_count;
     viz_beat_flash = 0;
@@ -591,7 +639,7 @@ static void viz_update_matrix(float dt, float cw, float ch, float x_off,
     }
 }
 
-/* ==== ASTEROIDS SHIP UPDATE ==== */
+/* ==== VECTROIDS SHIP UPDATE ==== */
 /* Weapon types: 0=normal laser, 1=spread shot (6 orbs), 2=beam (thick line cut),
  * 3=cluster missiles */
 
@@ -807,82 +855,526 @@ static void viz_update_one_ship(viz_ship_t *s, float dt, float cw, float ch,
     s->x += s->vx * dt;
     s->y += s->vy * dt;
 
-    /* Wrap */
-    if (s->x < -30) s->x += vp_w + 60;
-    if (s->x > vp_w + 30) s->x -= vp_w + 60;
-    if (s->y < -30) s->y += vp_h + 60;
-    if (s->y > vp_h + 30) s->y -= vp_h + 60;
+    /* Wrap (but not if departing — let them fly off screen) */
+    if (!s->departing) {
+        if (s->x < -30) s->x += vp_w + 60;
+        if (s->x > vp_w + 30) s->x -= vp_w + 60;
+        if (s->y < -30) s->y += vp_h + 60;
+        if (s->y > vp_h + 30) s->y -= vp_h + 60;
+    }
 }
 
 static void viz_fire_laser(viz_ship_t *s, float angle, float speed) {
     viz_laser_t *l = viz_alloc_laser();
     if (!l) return;
+    float nose_dist = 28.0f * viz_scale;
     l->active = 1;
-    l->x = s->x + cosf(angle) * 20.0f;
-    l->y = s->y + sinf(angle) * 20.0f;
+    l->x = s->x + cosf(angle) * nose_dist;
+    l->y = s->y + sinf(angle) * nose_dist;
     l->vx = cosf(angle) * speed + s->vx * 0.3f;
     l->vy = sinf(angle) * speed + s->vy * 0.3f;
     l->life = 1.8f;
     l->lr = s->cr;
     l->lg = s->cg;
     l->lb = s->cb;
+    l->owner = (int)(s - viz_ships);
 }
 
-static void viz_update_asteroids(float dt, float cw, float ch, float x_off,
+/* Spawn vector explosion at position — line fragments flying outward */
+static void viz_spawn_explosion(float x, float y, float cr, float cg, float cb,
+                                 int count, float force) {
+    for (int i = 0; i < count; i++) {
+        viz_part_t *p = viz_alloc_part();
+        if (!p) break;
+        memset(p, 0, sizeof(*p));
+        p->active = 1;
+        p->type = 2; /* spark */
+        p->radius = viz_randf_range(1.5f, 4.0f) * viz_scale;
+        p->x = x + viz_randf_range(-8, 8) * viz_scale;
+        p->y = y + viz_randf_range(-8, 8) * viz_scale;
+        float a = viz_randf() * 6.28f;
+        float spd = viz_randf_range(force * 0.3f, force);
+        p->vx = cosf(a) * spd;
+        p->vy = sinf(a) * spd;
+        p->life = viz_randf_range(0.5f, 2.0f);
+        p->max_life = p->life;
+        /* Mix in some white flash */
+        float flash = viz_randf_range(0.0f, 0.5f);
+        p->r = cr * (1.0f - flash) + flash;
+        p->g = cg * (1.0f - flash) + flash;
+        p->b = cb * (1.0f - flash) + flash;
+        p->a = 1.0f;
+    }
+}
+
+/* Spawn vector shatter: line fragments along triangle edges that spin & fade */
+static void viz_spawn_ship_shatter(float x, float y, float angle,
+                                    float cr, float cg, float cb) {
+    float sc = viz_scale;
+    float ca = cosf(angle), sa = sinf(angle);
+    float nose_x = x + ca * 28 * sc, nose_y = y + sa * 28 * sc;
+    float lw_x = x + cosf(angle + 2.5f) * 20 * sc;
+    float lw_y = y + sinf(angle + 2.5f) * 20 * sc;
+    float rw_x = x + cosf(angle - 2.5f) * 20 * sc;
+    float rw_y = y + sinf(angle - 2.5f) * 20 * sc;
+    /* 3 edges, break each into 2-3 segments */
+    float edges[][4] = {
+        { nose_x, nose_y, lw_x, lw_y },
+        { nose_x, nose_y, rw_x, rw_y },
+        { lw_x, lw_y, rw_x, rw_y },
+    };
+    for (int e = 0; e < 3; e++) {
+        float ex0 = edges[e][0], ey0 = edges[e][1];
+        float ex1 = edges[e][2], ey1 = edges[e][3];
+        int segs = 2 + (rand() % 2); /* 2-3 segments per edge */
+        for (int s = 0; s < segs; s++) {
+            float t0 = (float)s / segs;
+            float t1 = (float)(s + 1) / segs;
+            float mx = (ex0 + (ex1 - ex0) * (t0 + t1) * 0.5f);
+            float my = (ey0 + (ey1 - ey0) * (t0 + t1) * 0.5f);
+            /* Fragment flies outward from ship center */
+            float dx = mx - x, dy = my - y;
+            float dist = sqrtf(dx*dx + dy*dy);
+            if (dist < 1) dist = 1;
+            viz_part_t *p = viz_alloc_part();
+            if (!p) continue;
+            memset(p, 0, sizeof(*p));
+            p->active = 1;
+            p->type = 2;
+            p->radius = 3.0f * sc; /* visible fragment size */
+            p->x = mx;
+            p->y = my;
+            float spd = viz_randf_range(80, 250);
+            p->vx = (dx / dist) * spd + viz_randf_range(-40, 40);
+            p->vy = (dy / dist) * spd + viz_randf_range(-40, 40);
+            p->life = viz_randf_range(1.5f, 3.0f); /* long fade like classic vector */
+            p->max_life = p->life;
+            p->r = cr; p->g = cg; p->b = cb;
+            p->a = 1.0f;
+        }
+    }
+    /* Bright center flash */
+    viz_spawn_explosion(x, y, 1.0f, 1.0f, 1.0f, 8, 200.0f);
+}
+
+/* Shatter text cells in a radius around a point */
+static void viz_explode_text_radius(float cx, float cy, float radius,
+                                     float cw, float ch, float x_off, float top_pad_px,
+                                     float tex_cw, float tex_ch, float hp_u, float hp_v) {
+    int cr_min = (int)((cy - radius - top_pad_px) / ch);
+    int cr_max = (int)((cy + radius - top_pad_px) / ch);
+    int cc_min = (int)((cx - radius - x_off) / cw);
+    int cc_max = (int)((cx + radius - x_off) / cw);
+    if (cr_min < 0) cr_min = 0;
+    if (cc_min < 0) cc_min = 0;
+    if (cr_max >= TERM_ROWS) cr_max = TERM_ROWS - 1;
+    if (cc_max >= TERM_COLS) cc_max = TERM_COLS - 1;
+    for (int r = cr_min; r <= cr_max; r++) {
+        for (int c = cc_min; c <= cc_max; c++) {
+            if (viz_cells[r][c].shattered) continue;
+            unsigned char byte = ansi_term.grid[r][c].ch;
+            if (byte == 0 || byte == 32) continue;
+            float px = x_off + c * cw + cw * 0.5f;
+            float py = top_pad_px + r * ch + ch * 0.5f;
+            float dx = px - cx, dy = py - cy;
+            if (dx*dx + dy*dy < radius * radius) {
+                viz_shatter_cell(r, c, dx * 3.0f, dy * 3.0f,
+                                cw, ch, x_off, top_pad_px,
+                                tex_cw, tex_ch, hp_u, hp_v);
+            }
+        }
+    }
+}
+
+/* ==== UFO UPDATE ==== */
+static void viz_spawn_ufo(float vp_w, float vp_h, float top_pad_px) {
+    memset(&viz_ufo, 0, sizeof(viz_ufo));
+    viz_ufo.active = 1;
+    viz_ufo.hp = 5;
+    float min_y = top_pad_px + 40 * viz_scale;
+    float max_y = top_pad_px + vp_h * 0.35f;
+    viz_ufo.y = viz_randf_range(min_y, max_y);
+    viz_ufo.direction = 1;
+    viz_ufo.x = -60 * viz_scale;
+    float base_speed = viz_randf_range(40, 80) * viz_scale;
+    viz_ufo.vx = base_speed;
+    viz_ufo.target_vx = base_speed;
+    viz_ufo.stay_timer = viz_randf_range(10.0f, 20.0f);
+    viz_ufo.dash_timer = viz_randf_range(3.0f, 6.0f); /* first dash after a few sec */
+    /* Find rightmost text column */
+    viz_ufo.text_right_edge = vp_w * 0.85f; /* fallback */
+}
+
+static void viz_update_ufo(float dt, float cw, float ch, float x_off,
+                            float top_pad_px, float vp_w, float vp_h,
+                            float tex_cw, float tex_ch, float hp_u, float hp_v,
+                            int has_music) {
+    /* Cooldown management */
+    if (!viz_ufo.active) {
+        if (viz_ufo.explode_timer > 0) {
+            viz_ufo.explode_timer -= dt;
+            return;
+        }
+        viz_ufo_cooldown -= dt;
+        if (has_music) {
+            float energy = viz_kick + viz_mid;
+            if (viz_ufo_cooldown <= 0 && energy > 0.6f) {
+                viz_spawn_ufo(vp_w, vp_h, top_pad_px);
+                viz_ufo.stay_timer = 15.0f;
+            }
+        } else {
+            if (viz_ufo_cooldown <= 0) {
+                viz_spawn_ufo(vp_w, vp_h, top_pad_px);
+            }
+        }
+        return;
+    }
+
+    /* Find the right edge of terminal text (so UFO knows where letters end) */
+    {
+        float right_edge = x_off;
+        for (int c = TERM_COLS - 1; c >= 0; c--) {
+            int found = 0;
+            for (int r = 0; r < TERM_ROWS && r < 10; r++) {
+                if (ansi_term.grid[r][c].ch > 32) { found = 1; break; }
+            }
+            if (found) { right_edge = x_off + (c + 1) * cw; break; }
+        }
+        viz_ufo.text_right_edge = right_edge;
+    }
+
+    /* ---- Acceleration: smooth toward target_vx ---- */
+    float accel = 120.0f * viz_scale; /* px/s^2 */
+    if (viz_ufo.vx < viz_ufo.target_vx)
+        viz_ufo.vx += accel * dt;
+    else if (viz_ufo.vx > viz_ufo.target_vx)
+        viz_ufo.vx -= accel * dt;
+    /* Clamp to not overshoot */
+    if (fabsf(viz_ufo.vx - viz_ufo.target_vx) < accel * dt * 1.5f)
+        viz_ufo.vx = viz_ufo.target_vx;
+
+    /* Move UFO */
+    viz_ufo.x += viz_ufo.vx * dt;
+    viz_ufo.stay_timer -= dt;
+
+    /* ---- Boundary awareness: reverse if past the text right edge ---- */
+    float right_margin = viz_ufo.text_right_edge + 80 * viz_scale;
+    if (viz_ufo.x > right_margin && viz_ufo.vx > 0 && !viz_ufo.dashing) {
+        /* Too far right — reverse direction */
+        viz_ufo.direction = -1;
+        viz_ufo.target_vx = -fabsf(viz_ufo.target_vx);
+    }
+    /* Don't go too far left either */
+    float left_margin = x_off - 40 * viz_scale;
+    if (viz_ufo.x < left_margin && viz_ufo.vx < 0 && !viz_ufo.dashing) {
+        viz_ufo.direction = 1;
+        viz_ufo.target_vx = fabsf(viz_ufo.target_vx);
+    }
+
+    /* ---- Dash / reposition pattern ---- */
+    viz_ufo.dash_timer -= dt;
+    if (viz_ufo.dashing) {
+        viz_ufo.dash_dur -= dt;
+        if (viz_ufo.dash_dur <= 0) {
+            /* Dash finished — slow down, start charging beam again */
+            viz_ufo.dashing = 0;
+            float cruise = viz_randf_range(30, 70) * viz_scale;
+            viz_ufo.target_vx = viz_ufo.direction * cruise;
+            viz_ufo.laser_charge = 0; /* restart charge for beam */
+            viz_ufo.dash_timer = viz_randf_range(3.0f, 7.0f);
+        }
+    } else if (viz_ufo.dash_timer <= 0 && viz_ufo.firing) {
+        /* Initiate dash: turn off laser, speed up to reposition */
+        viz_ufo.firing = 0;
+        viz_ufo.dashing = 1;
+        viz_ufo.dash_dur = viz_randf_range(0.8f, 2.0f);
+        viz_ufo.laser_width = 0;
+        viz_ufo.laser_time = 0;
+        /* Dash in current direction, faster */
+        float dash_speed = viz_randf_range(200, 400) * viz_scale;
+        viz_ufo.target_vx = viz_ufo.direction * dash_speed;
+        /* Sometimes change direction during dash */
+        if (viz_randf() < 0.3f) {
+            viz_ufo.direction = -viz_ufo.direction;
+            viz_ufo.target_vx = -viz_ufo.target_vx;
+        }
+    }
+
+    /* ---- Beam charging & firing ---- */
+    if (!viz_ufo.firing && !viz_ufo.dashing) {
+        viz_ufo.laser_charge += dt;
+        if (viz_ufo.laser_charge > 2.0f) {
+            viz_ufo.firing = 1;
+            viz_ufo.laser_time = 0;
+            /* Slow down while firing */
+            float cruise = viz_randf_range(20, 50) * viz_scale;
+            viz_ufo.target_vx = viz_ufo.direction * cruise;
+        }
+    }
+
+    /* Update beam */
+    if (viz_ufo.firing) {
+        viz_ufo.laser_time += dt;
+        float max_width = 40.0f * viz_scale;
+        viz_ufo.laser_width = max_width * (1.0f - expf(-viz_ufo.laser_time * 2.0f));
+        viz_ufo.laser_alpha = 0.5f + 0.3f * sinf(viz_ufo.laser_time * 8.0f);
+
+        /* Decimate text in vertical column below UFO */
+        float beam_x = viz_ufo.x;
+        float half_w = viz_ufo.laser_width * 0.5f;
+        int cc_min = (int)((beam_x - half_w - x_off) / cw);
+        int cc_max = (int)((beam_x + half_w - x_off) / cw);
+        if (cc_min < 0) cc_min = 0;
+        if (cc_max >= TERM_COLS) cc_max = TERM_COLS - 1;
+        for (int r = 0; r < TERM_ROWS; r++) {
+            for (int c = cc_min; c <= cc_max; c++) {
+                if (viz_cells[r][c].shattered) continue;
+                unsigned char byte = ansi_term.grid[r][c].ch;
+                if (byte == 0 || byte == 32) continue;
+                viz_shatter_cell(r, c, 0, 300.0f,
+                                cw, ch, x_off, top_pad_px,
+                                tex_cw, tex_ch, hp_u, hp_v);
+            }
+        }
+        /* Beam sparks */
+        if (rand() % 3 == 0) {
+            float spark_y = viz_randf_range(viz_ufo.y + 20 * viz_scale, vp_h);
+            viz_spawn_debris(beam_x + viz_randf_range(-half_w, half_w), spark_y,
+                            0, 200, 2);
+        }
+    }
+
+    /* UFO leaves when timer expires or way off screen */
+    if (viz_ufo.stay_timer <= 0 ||
+        viz_ufo.x < -200 * viz_scale || viz_ufo.x > vp_w + 200 * viz_scale) {
+        viz_ufo.active = 0;
+        viz_ufo_cooldown = has_music ? 45.0f : viz_randf_range(120.0f, 180.0f);
+    }
+}
+
+static void viz_kill_ufo(float cw, float ch, float x_off, float top_pad_px,
+                          float tex_cw, float tex_ch, float hp_u, float hp_v) {
+    /* Big vector explosion */
+    viz_spawn_explosion(viz_ufo.x, viz_ufo.y, 0.8f, 0.2f, 1.0f, 40, 500.0f);
+    viz_spawn_explosion(viz_ufo.x, viz_ufo.y, 1.0f, 1.0f, 1.0f, 20, 300.0f);
+    /* Shatter text in blast radius */
+    viz_explode_text_radius(viz_ufo.x, viz_ufo.y, 120.0f * viz_scale,
+                            cw, ch, x_off, top_pad_px, tex_cw, tex_ch, hp_u, hp_v);
+    viz_ufo.active = 0;
+    viz_ufo.explode_timer = 3.0f; /* explosion animation time */
+    viz_ufo_cooldown = 60.0f;
+}
+
+static void viz_update_vectroids(float dt, float cw, float ch, float x_off,
                                    float top_pad_px, float vp_w, float vp_h,
                                    float tex_cw, float tex_ch, float hp_u, float hp_v)
 {
-    /* Dynamic ship count based on overall energy */
-    float energy = viz_kick + viz_mid * 0.5f;
-    int target_ships = 1 + (int)(energy * 3);
-    if (target_ships > VIZ_MAX_SHIPS) target_ships = VIZ_MAX_SHIPS;
-    if (target_ships > viz_ship_count) viz_ship_count = target_ships;
-    /* Slowly reduce if energy drops */
-    static float reduce_timer = 0;
-    reduce_timer -= dt;
-    if (reduce_timer <= 0 && viz_ship_count > target_ships) {
-        viz_ship_count--;
-        reduce_timer = 3.0f;
+    /* Detect music vs idle */
+    float raw_energy = viz_kick + viz_mid * 0.5f + viz_treble * 0.3f;
+    viz_music_energy = viz_music_energy * 0.95f + raw_energy * 0.05f;
+    int has_music = (viz_music_energy > VIZ_MUSIC_THRESHOLD);
+
+    /* ---- Ship count management ---- */
+    if (has_music) {
+        /* Music: 3-5 ships based on energy intensity */
+        float energy = viz_kick + viz_mid * 0.5f;
+        int target_ships = 3 + (int)(energy * 2.5f);
+        if (target_ships > VIZ_MAX_SHIPS) target_ships = VIZ_MAX_SHIPS;
+        if (target_ships < 3) target_ships = 3;
+        if (target_ships > viz_ship_count) viz_ship_count = target_ships;
+        /* Slowly reduce in slow sections */
+        static float music_reduce_timer = 0;
+        music_reduce_timer -= dt;
+        if (music_reduce_timer <= 0 && viz_ship_count > target_ships) {
+            viz_ship_count--;
+            music_reduce_timer = 3.0f;
+        }
+        /* All ships present during music */
+        for (int i = 0; i < viz_ship_count; i++)
+            viz_ships[i].present = 1;
+    } else {
+        /* No music: 1-3 ships, 2nd occasional, 3rd rare */
+        viz_ship_count = 1; /* always at least 1 */
+        viz_ships[0].present = 1;
+        for (int i = 1; i < 3; i++) {
+            viz_ship_t *s = &viz_ships[i];
+            /* Handle departing ships — they fly off, then go non-present */
+            if (s->departing && s->present) {
+                if (s->x < -60 || s->x > vp_w + 60 ||
+                    s->y < -60 || s->y > vp_h + 60) {
+                    s->present = 0;
+                    s->departing = 0;
+                    s->presence_timer = viz_randf_range(15.0f, 40.0f);
+                }
+                /* Keep ship in ship_count while departing so it still updates/draws */
+                if (s->present && viz_ship_count < i + 1)
+                    viz_ship_count = i + 1;
+                continue;
+            }
+            s->presence_timer -= dt;
+            if (s->presence_timer <= 0) {
+                if (s->present && s->alive) {
+                    /* Ship begins exit — pick a natural exit trajectory */
+                    s->departing = 1;
+                    s->target_type = 0; /* stop fighting */
+                    /* Aim toward nearest screen edge */
+                    float edge_l = s->x, edge_r = vp_w - s->x;
+                    float edge_t = s->y, edge_b = vp_h - s->y;
+                    float min_edge = edge_l;
+                    float ex_ang = 3.14159f; /* left */
+                    if (edge_r < min_edge) { min_edge = edge_r; ex_ang = 0; }
+                    if (edge_t < min_edge) { min_edge = edge_t; ex_ang = -1.5708f; }
+                    if (edge_b < min_edge) { ex_ang = 1.5708f; }
+                    /* Add some randomness to exit angle */
+                    ex_ang += viz_randf_range(-0.4f, 0.4f);
+                    s->angle = ex_ang;
+                    s->vx = cosf(ex_ang) * 300.0f;
+                    s->vy = sinf(ex_ang) * 300.0f;
+                    s->wander_t = 99.0f; /* don't retarget */
+                } else if (!s->present) {
+                    /* Ship arrives — chance depends on ship index */
+                    float chance = (i == 1) ? 0.5f : 0.25f;
+                    if (viz_randf() < chance) {
+                        s->present = 1;
+                        s->departing = 0;
+                        s->x = 0; s->y = 0;
+                        s->alive = 1;
+                        s->hp = 3;
+                    }
+                    s->presence_timer = viz_randf_range(8.0f, 25.0f);
+                }
+            }
+            if (s->present) {
+                if (viz_ship_count < i + 1) viz_ship_count = i + 1;
+            }
+        }
+        /* Ships 3-4 only during music */
+        for (int i = 3; i < VIZ_MAX_SHIPS; i++) {
+            viz_ships[i].present = 0;
+        }
     }
 
-    /* Update all active ships */
-    for (int si = 0; si < viz_ship_count; si++)
-        viz_update_one_ship(&viz_ships[si], dt, cw, ch, x_off, top_pad_px, vp_w, vp_h);
+    /* ---- Update ships ---- */
+    for (int si = 0; si < viz_ship_count; si++) {
+        viz_ship_t *s = &viz_ships[si];
+        if (!s->present) continue;
 
-    /* Fire weapons on beat */
-    if (viz_beat_hit) {
+        /* Handle respawn */
+        if (!s->alive) {
+            s->respawn_timer -= dt;
+            if (s->respawn_timer <= 0) {
+                s->alive = 1;
+                s->hp = 3;
+                s->x = 0; s->y = 0; /* trigger init in update_one_ship */
+                s->target_type = 0;
+            }
+            continue;
+        }
+
+        /* Random chance to start fighting another ship (not while departing) */
+        if (s->target_type == 0 && viz_ship_count > 1 && !s->departing) {
+            float fight_chance = dt * 0.03f; /* ~3% per second */
+            if (viz_randf() < fight_chance) {
+                /* Pick a random other alive ship */
+                int target = rand() % viz_ship_count;
+                if (target != si && viz_ships[target].alive && viz_ships[target].present) {
+                    s->target_type = 1;
+                    s->target_ship = target;
+                    s->fight_timer = viz_randf_range(5.0f, 15.0f);
+                }
+            }
+        }
+        /* Random chance to target UFO (not while departing) */
+        if (s->target_type == 0 && viz_ufo.active && !s->departing) {
+            float ufo_chance = dt * 0.05f; /* ~5% per second */
+            if (viz_randf() < ufo_chance) {
+                s->target_type = 2;
+                s->fight_timer = viz_randf_range(5.0f, 12.0f);
+            }
+        }
+
+        /* Update fight timer */
+        if (s->target_type > 0) {
+            s->fight_timer -= dt;
+            if (s->fight_timer <= 0) {
+                s->target_type = 0; /* back to text */
+            }
+            /* If targeting a dead/absent ship, stop */
+            if (s->target_type == 1) {
+                viz_ship_t *ts = &viz_ships[s->target_ship];
+                if (!ts->alive || !ts->present)
+                    s->target_type = 0;
+            }
+            if (s->target_type == 2 && !viz_ufo.active)
+                s->target_type = 0;
+        }
+
+        /* Steer toward target */
+        if (s->target_type == 1) {
+            /* Fighting another ship: override target position */
+            viz_ship_t *ts = &viz_ships[s->target_ship];
+            s->tx = ts->x;
+            s->ty = ts->y;
+            s->wander_t = 0.5f; /* keep retargeting */
+        } else if (s->target_type == 2) {
+            /* Fighting UFO */
+            s->tx = viz_ufo.x;
+            s->ty = viz_ufo.y;
+            s->wander_t = 0.5f;
+        }
+
+        viz_update_one_ship(s, dt, cw, ch, x_off, top_pad_px, vp_w, vp_h);
+    }
+
+    /* ---- Fire weapons ---- */
+    int should_fire = 0;
+    if (has_music) {
+        should_fire = viz_beat_hit;
+    } else {
+        /* Occasional shooting without music */
+        viz_idle_fire_timer -= dt;
+        if (viz_idle_fire_timer <= 0) {
+            should_fire = 1;
+            viz_idle_fire_timer = viz_randf_range(3.0f, 8.0f);
+        }
+    }
+
+    if (should_fire) {
         for (int si = 0; si < viz_ship_count; si++) {
             viz_ship_t *s = &viz_ships[si];
+            if (!s->alive || !s->present || s->departing) continue;
             if (s->firing > 0) { s->firing--; continue; }
 
-            int weapon = 0; /* default: normal shot */
-            /* Every 4th beat: spread shot */
-            if ((viz_beat_num % 4) == 0) weapon = 1;
-            /* Every 8th beat: beam */
-            if ((viz_beat_num % 8) == 0) weapon = 2;
-            /* Every 12th beat: cluster */
-            if ((viz_beat_num % 12) == 0) weapon = 3;
+            float fire_angle = s->angle;
+            /* If targeting ship/UFO, aim at target */
+            if (s->target_type > 0) {
+                float tdx = s->tx - s->x, tdy = s->ty - s->y;
+                fire_angle = atan2f(tdy, tdx);
+            }
+
+            int weapon = 0;
+            if (has_music) {
+                if ((viz_beat_num % 4) == 0) weapon = 1;
+                if ((viz_beat_num % 8) == 0) weapon = 2;
+                if ((viz_beat_num % 12) == 0) weapon = 3;
+            }
 
             if (weapon == 0) {
-                /* Normal laser */
-                viz_fire_laser(s, s->angle, 900.0f);
+                viz_fire_laser(s, fire_angle, 900.0f);
                 s->firing = 2;
             } else if (weapon == 1) {
-                /* Spread shot — 6 orbs in a fan */
                 for (int j = -2; j <= 3; j++) {
-                    float spread_a = s->angle + j * 0.18f;
+                    float spread_a = fire_angle + j * 0.18f;
                     viz_fire_laser(s, spread_a, 600.0f);
                 }
                 s->firing = 3;
             } else if (weapon == 2) {
-                /* Beam — thick line, shatter everything in path */
-                float ca = cosf(s->angle), sa = sinf(s->angle);
+                float ca = cosf(fire_angle), sa = sinf(fire_angle);
                 for (float d = 20; d < 400; d += ch * 0.5f) {
                     float bx = s->x + ca * d;
                     float by = s->y + sa * d;
                     int br = (int)((by - top_pad_px) / ch);
                     int bc = (int)((bx - x_off) / cw);
-                    /* Beam is 3 cells wide */
                     for (int wo = -1; wo <= 1; wo++) {
                         int cr = br + wo;
                         if (cr >= 0 && cr < TERM_ROWS && bc >= 0 && bc < TERM_COLS) {
@@ -894,19 +1386,16 @@ static void viz_update_asteroids(float dt, float cw, float ch, float x_off,
                         }
                     }
                 }
-                /* Beam sparks along the line */
                 for (int j = 0; j < 12; j++) {
                     float d = viz_randf_range(20, 350);
                     viz_spawn_debris(s->x + ca * d, s->y + sa * d,
                                     ca * 100, sa * 100, 2);
                 }
-                /* Also fire a visual laser for the beam */
-                viz_fire_laser(s, s->angle, 1200.0f);
+                viz_fire_laser(s, fire_angle, 1200.0f);
                 s->firing = 5;
             } else if (weapon == 3) {
-                /* Cluster missiles — 8 shots in all directions */
                 for (int j = 0; j < 8; j++) {
-                    float a = s->angle + j * (6.28318f / 8) + viz_randf_range(-0.2f, 0.2f);
+                    float a = fire_angle + j * (6.28318f / 8) + viz_randf_range(-0.2f, 0.2f);
                     viz_fire_laser(s, a, viz_randf_range(400, 700));
                 }
                 s->firing = 4;
@@ -914,11 +1403,15 @@ static void viz_update_asteroids(float dt, float cw, float ch, float x_off,
         }
     }
 
-    /* Decrement firing cooldown each frame */
+    /* Decrement firing cooldown */
     for (int si = 0; si < viz_ship_count; si++)
-        if (viz_ships[si].firing > 0 && !viz_beat_hit) viz_ships[si].firing--;
+        if (viz_ships[si].firing > 0 && !should_fire) viz_ships[si].firing--;
 
-    /* Update lasers */
+    /* ---- Update UFO ---- */
+    viz_update_ufo(dt, cw, ch, x_off, top_pad_px, vp_w, vp_h,
+                   tex_cw, tex_ch, hp_u, hp_v, has_music);
+
+    /* ---- Update lasers ---- */
     for (int i = 0; i < VIZ_MAX_LASERS; i++) {
         viz_laser_t *l = &viz_lasers[i];
         if (!l->active) continue;
@@ -929,6 +1422,52 @@ static void viz_update_asteroids(float dt, float cw, float ch, float x_off,
             l->y < -20 || l->y > vp_h + 20) {
             l->active = 0;
             continue;
+        }
+
+        /* Laser-ship collision (ship-vs-ship combat) */
+        for (int si = 0; si < viz_ship_count; si++) {
+            viz_ship_t *s = &viz_ships[si];
+            if (!s->alive || !s->present) continue;
+            if (l->owner == si) continue; /* don't hit yourself */
+            float dx = l->x - s->x, dy = l->y - s->y;
+            float hit_r = 18.0f * viz_scale;
+            if (dx*dx + dy*dy < hit_r * hit_r) {
+                s->hp--;
+                viz_spawn_debris(l->x, l->y, l->vx * 0.1f, l->vy * 0.1f, 6);
+                l->active = 0;
+                if (s->hp <= 0) {
+                    /* Ship shatters into vector pieces! */
+                    viz_spawn_ship_shatter(s->x, s->y, s->angle, s->cr, s->cg, s->cb);
+                    viz_explode_text_radius(s->x, s->y, 60.0f * viz_scale,
+                                            cw, ch, x_off, top_pad_px,
+                                            tex_cw, tex_ch, hp_u, hp_v);
+                    s->alive = 0;
+                    s->respawn_timer = 10.0f;
+                    /* Anyone targeting this ship should stop */
+                    for (int j = 0; j < viz_ship_count; j++) {
+                        if (viz_ships[j].target_type == 1 && viz_ships[j].target_ship == si)
+                            viz_ships[j].target_type = 0;
+                    }
+                }
+                break; /* laser consumed */
+            }
+        }
+        if (!l->active) continue;
+
+        /* Laser-UFO collision */
+        if (viz_ufo.active) {
+            float dx = l->x - viz_ufo.x, dy = l->y - viz_ufo.y;
+            float hit_r = 30.0f * viz_scale;
+            if (dx*dx + dy*dy < hit_r * hit_r) {
+                viz_ufo.hp--;
+                viz_spawn_debris(l->x, l->y, l->vx * 0.1f, l->vy * 0.1f, 8);
+                l->active = 0;
+                if (viz_ufo.hp <= 0) {
+                    viz_kill_ufo(cw, ch, x_off, top_pad_px,
+                                 tex_cw, tex_ch, hp_u, hp_v);
+                }
+                continue;
+            }
         }
 
         /* Laser-text collision */
@@ -954,6 +1493,8 @@ static void viz_update(float dt, float cw, float ch, float x_off,
 {
     if (viz_mode == VIZ_NONE) return;
     viz_time += dt;
+    viz_scale = vp_h / 1080.0f;
+    if (viz_scale < 0.5f) viz_scale = 0.5f;
 
     /* Read beat state once per frame */
     viz_read_beat();
@@ -1024,8 +1565,8 @@ static void viz_update(float dt, float cw, float ch, float x_off,
             viz_update_matrix(dt, cw, ch, x_off, top_pad_px, vp_w, vp_h,
                               tex_cw, tex_ch, hp_u, hp_v);
             break;
-        case VIZ_ASTEROIDS:
-            viz_update_asteroids(dt, cw, ch, x_off, top_pad_px, vp_w, vp_h,
+        case VIZ_VECTROIDS:
+            viz_update_vectroids(dt, cw, ch, x_off, top_pad_px, vp_w, vp_h,
                                   tex_cw, tex_ch, hp_u, hp_v);
             break;
         default: break;
@@ -1278,20 +1819,23 @@ static void viz_push_quads(float cw, float ch, float x_off, float top_pad_px,
         }
     }
 
-    /* Draw asteroids ships (vector style, 2x size) */
-    if (viz_mode == VIZ_ASTEROIDS) {
+    /* Draw Vectroids ships (clean vector triangles, resolution-scaled) */
+    if (viz_mode == VIZ_VECTROIDS) {
+      float sc = viz_scale;
       for (int si = 0; si < viz_ship_count; si++) {
         viz_ship_t *s = &viz_ships[si];
+        if (!s->alive || !s->present) continue;
         if (s->x == 0 && s->y == 0) continue;
         float ca = cosf(s->angle), sa = sinf(s->angle);
-        /* 2x bigger: 28 nose, 20 wings, 12 rear */
-        float nose_x = s->x + ca * 28, nose_y = s->y + sa * 28;
-        float lwing_x = s->x + cosf(s->angle + 2.5f) * 20;
-        float lwing_y = s->y + sinf(s->angle + 2.5f) * 20;
-        float rwing_x = s->x + cosf(s->angle - 2.5f) * 20;
-        float rwing_y = s->y + sinf(s->angle - 2.5f) * 20;
-        float rear_x = s->x - ca * 12, rear_y = s->y - sa * 12;
-        float lw = 2.0f;
+        /* Resolution-scaled ship geometry */
+        float nose_d = 28.0f * sc, wing_d = 20.0f * sc, rear_d = 12.0f * sc;
+        float nose_x = s->x + ca * nose_d, nose_y = s->y + sa * nose_d;
+        float lwing_x = s->x + cosf(s->angle + 2.5f) * wing_d;
+        float lwing_y = s->y + sinf(s->angle + 2.5f) * wing_d;
+        float rwing_x = s->x + cosf(s->angle - 2.5f) * wing_d;
+        float rwing_y = s->y + sinf(s->angle - 2.5f) * wing_d;
+        float rear_x = s->x - ca * rear_d, rear_y = s->y - sa * rear_d;
+        float lw = 1.2f * sc; /* thinner lines for cleaner look */
         /* Per-ship color with beat glow */
         float sr = s->cr + beat_glow * 0.4f;
         float sg = s->cg + beat_glow * 0.3f;
@@ -1300,68 +1844,99 @@ static void viz_push_quads(float cw, float ch, float x_off, float top_pad_px,
         if (sg > 1.0f) sg = 1.0f;
         if (sb > 1.0f) sb = 1.0f;
 
-        /* Phosphor glow layers (drawn first = behind core edges) */
+        /* ---- Multi-layer blurred drop shadow ---- */
         {
-            float gnx, gny, glen;
-            /* --- Outer bloom (wide, faint) --- */
-            float gw2 = 10.0f;
-            float ga2 = 0.06f + beat_glow * 0.03f;
-            /* Nose → Left wing */
-            gnx = -(lwing_y - nose_y); gny = (lwing_x - nose_x);
-            glen = sqrtf(gnx*gnx+gny*gny); if(glen>0){gnx/=glen;gny/=glen;}
-            push_quad_free(VPX(nose_x+gnx*gw2), VPY(nose_y+gny*gw2),
-                           VPX(lwing_x+gnx*gw2), VPY(lwing_y+gny*gw2),
-                           VPX(lwing_x-gnx*gw2), VPY(lwing_y-gny*gw2),
-                           VPX(nose_x-gnx*gw2), VPY(nose_y-gny*gw2),
-                           sr, sg, sb, ga2);
-            /* Nose → Right wing */
-            gnx = -(rwing_y - nose_y); gny = (rwing_x - nose_x);
-            glen = sqrtf(gnx*gnx+gny*gny); if(glen>0){gnx/=glen;gny/=glen;}
-            push_quad_free(VPX(nose_x+gnx*gw2), VPY(nose_y+gny*gw2),
-                           VPX(rwing_x+gnx*gw2), VPY(rwing_y+gny*gw2),
-                           VPX(rwing_x-gnx*gw2), VPY(rwing_y-gny*gw2),
-                           VPX(nose_x-gnx*gw2), VPY(nose_y-gny*gw2),
-                           sr, sg, sb, ga2);
-            /* Rear */
-            gnx = -(rwing_y - lwing_y); gny = (rwing_x - lwing_x);
-            glen = sqrtf(gnx*gnx+gny*gny); if(glen>0){gnx/=glen;gny/=glen;}
-            push_quad_free(VPX(lwing_x+gnx*gw2), VPY(lwing_y+gny*gw2),
-                           VPX(rwing_x+gnx*gw2), VPY(rwing_y+gny*gw2),
-                           VPX(rwing_x-gnx*gw2), VPY(rwing_y-gny*gw2),
-                           VPX(lwing_x-gnx*gw2), VPY(lwing_y-gny*gw2),
-                           sr, sg, sb, ga2);
-
-            /* --- Inner glow (medium, soft) --- */
-            float gw1 = 6.0f;
-            float ga1 = 0.15f + beat_glow * 0.06f;
-            /* Nose → Left wing */
-            gnx = -(lwing_y - nose_y); gny = (lwing_x - nose_x);
-            glen = sqrtf(gnx*gnx+gny*gny); if(glen>0){gnx/=glen;gny/=glen;}
-            push_quad_free(VPX(nose_x+gnx*gw1), VPY(nose_y+gny*gw1),
-                           VPX(lwing_x+gnx*gw1), VPY(lwing_y+gny*gw1),
-                           VPX(lwing_x-gnx*gw1), VPY(lwing_y-gny*gw1),
-                           VPX(nose_x-gnx*gw1), VPY(nose_y-gny*gw1),
-                           sr, sg, sb, ga1);
-            /* Nose → Right wing */
-            gnx = -(rwing_y - nose_y); gny = (rwing_x - nose_x);
-            glen = sqrtf(gnx*gnx+gny*gny); if(glen>0){gnx/=glen;gny/=glen;}
-            push_quad_free(VPX(nose_x+gnx*gw1), VPY(nose_y+gny*gw1),
-                           VPX(rwing_x+gnx*gw1), VPY(rwing_y+gny*gw1),
-                           VPX(rwing_x-gnx*gw1), VPY(rwing_y-gny*gw1),
-                           VPX(nose_x-gnx*gw1), VPY(nose_y-gny*gw1),
-                           sr, sg, sb, ga1);
-            /* Rear */
-            gnx = -(rwing_y - lwing_y); gny = (rwing_x - lwing_x);
-            glen = sqrtf(gnx*gnx+gny*gny); if(glen>0){gnx/=glen;gny/=glen;}
-            push_quad_free(VPX(lwing_x+gnx*gw1), VPY(lwing_y+gny*gw1),
-                           VPX(rwing_x+gnx*gw1), VPY(rwing_y+gny*gw1),
-                           VPX(rwing_x-gnx*gw1), VPY(rwing_y-gny*gw1),
-                           VPX(lwing_x-gnx*gw1), VPY(lwing_y-gny*gw1),
-                           sr, sg, sb, ga1);
+            float shd_off = 3.0f * sc;
+            float sn_x = nose_x + shd_off, sn_y = nose_y + shd_off;
+            float slw_x = lwing_x + shd_off, slw_y = lwing_y + shd_off;
+            float srw_x = rwing_x + shd_off, srw_y = rwing_y + shd_off;
+            float snx, sny, slen;
+            /* 3 layers: wide+faint, medium, tight — simulates blur */
+            float shd_layers[][2] = { {10.0f, 0.08f}, {6.0f, 0.15f}, {3.0f, 0.25f} };
+            for (int sl = 0; sl < 3; sl++) {
+                float sw = shd_layers[sl][0] * sc;
+                float sa2 = shd_layers[sl][1];
+                /* Nose→Left wing */
+                snx = -(slw_y - sn_y); sny = (slw_x - sn_x);
+                slen = sqrtf(snx*snx+sny*sny); if(slen>0){snx/=slen;sny/=slen;}
+                push_quad_free(VPX(sn_x+snx*sw), VPY(sn_y+sny*sw),
+                               VPX(slw_x+snx*sw), VPY(slw_y+sny*sw),
+                               VPX(slw_x-snx*sw), VPY(slw_y-sny*sw),
+                               VPX(sn_x-snx*sw), VPY(sn_y-sny*sw),
+                               0,0,0, sa2);
+                /* Nose→Right wing */
+                snx = -(srw_y - sn_y); sny = (srw_x - sn_x);
+                slen = sqrtf(snx*snx+sny*sny); if(slen>0){snx/=slen;sny/=slen;}
+                push_quad_free(VPX(sn_x+snx*sw), VPY(sn_y+sny*sw),
+                               VPX(srw_x+snx*sw), VPY(srw_y+sny*sw),
+                               VPX(srw_x-snx*sw), VPY(srw_y-sny*sw),
+                               VPX(sn_x-snx*sw), VPY(sn_y-sny*sw),
+                               0,0,0, sa2);
+                /* Rear */
+                snx = -(srw_y - slw_y); sny = (srw_x - slw_x);
+                slen = sqrtf(snx*snx+sny*sny); if(slen>0){snx/=slen;sny/=slen;}
+                push_quad_free(VPX(slw_x+snx*sw), VPY(slw_y+sny*sw),
+                               VPX(srw_x+snx*sw), VPY(srw_y+sny*sw),
+                               VPX(srw_x-snx*sw), VPY(srw_y-sny*sw),
+                               VPX(slw_x-snx*sw), VPY(slw_y-sny*sw),
+                               0,0,0, sa2);
+                /* Shadow vertex dots */
+                float svr = sw * 0.7f;
+                push_quad(VPX(sn_x-svr), VPY(sn_y-svr), VPX(sn_x+svr), VPY(sn_y+svr),
+                          su0,sv0,su1,sv1, 0,0,0, sa2);
+                push_quad(VPX(slw_x-svr), VPY(slw_y-svr), VPX(slw_x+svr), VPY(slw_y+svr),
+                          su0,sv0,su1,sv1, 0,0,0, sa2);
+                push_quad(VPX(srw_x-svr), VPY(srw_y-svr), VPX(srw_x+svr), VPY(srw_y+svr),
+                          su0,sv0,su1,sv1, 0,0,0, sa2);
+            }
         }
 
+        /* ---- Phosphor glow (outer bloom + inner glow) ---- */
+        {
+            float gnx, gny, glen;
+            float gw2 = 10.0f * sc;
+            float ga2 = 0.06f + beat_glow * 0.03f;
+            float gw1 = 5.0f * sc;
+            float ga1 = 0.12f + beat_glow * 0.06f;
+            /* Draw both glow layers for each edge */
+            float glow_w[] = { gw2, gw1 };
+            float glow_a[] = { ga2, ga1 };
+            for (int gl = 0; gl < 2; gl++) {
+                float gw = glow_w[gl], ga = glow_a[gl];
+                gnx = -(lwing_y - nose_y); gny = (lwing_x - nose_x);
+                glen = sqrtf(gnx*gnx+gny*gny); if(glen>0){gnx/=glen;gny/=glen;}
+                push_quad_free(VPX(nose_x+gnx*gw), VPY(nose_y+gny*gw),
+                               VPX(lwing_x+gnx*gw), VPY(lwing_y+gny*gw),
+                               VPX(lwing_x-gnx*gw), VPY(lwing_y-gny*gw),
+                               VPX(nose_x-gnx*gw), VPY(nose_y-gny*gw),
+                               sr, sg, sb, ga);
+                gnx = -(rwing_y - nose_y); gny = (rwing_x - nose_x);
+                glen = sqrtf(gnx*gnx+gny*gny); if(glen>0){gnx/=glen;gny/=glen;}
+                push_quad_free(VPX(nose_x+gnx*gw), VPY(nose_y+gny*gw),
+                               VPX(rwing_x+gnx*gw), VPY(rwing_y+gny*gw),
+                               VPX(rwing_x-gnx*gw), VPY(rwing_y-gny*gw),
+                               VPX(nose_x-gnx*gw), VPY(nose_y-gny*gw),
+                               sr, sg, sb, ga);
+                gnx = -(rwing_y - lwing_y); gny = (rwing_x - lwing_x);
+                glen = sqrtf(gnx*gnx+gny*gny); if(glen>0){gnx/=glen;gny/=glen;}
+                push_quad_free(VPX(lwing_x+gnx*gw), VPY(lwing_y+gny*gw),
+                               VPX(rwing_x+gnx*gw), VPY(rwing_y+gny*gw),
+                               VPX(rwing_x-gnx*gw), VPY(rwing_y-gny*gw),
+                               VPX(lwing_x-gnx*gw), VPY(lwing_y-gny*gw),
+                               sr, sg, sb, ga);
+                /* Glow vertex dots (fill gaps in glow too) */
+                float gvr = gw * 0.6f;
+                push_quad(VPX(nose_x-gvr), VPY(nose_y-gvr), VPX(nose_x+gvr), VPY(nose_y+gvr),
+                          su0,sv0,su1,sv1, sr,sg,sb, ga);
+                push_quad(VPX(lwing_x-gvr), VPY(lwing_y-gvr), VPX(lwing_x+gvr), VPY(lwing_y+gvr),
+                          su0,sv0,su1,sv1, sr,sg,sb, ga);
+                push_quad(VPX(rwing_x-gvr), VPY(rwing_y-gvr), VPX(rwing_x+gvr), VPY(rwing_y+gvr),
+                          su0,sv0,su1,sv1, sr,sg,sb, ga);
+            }
+        }
+
+        /* ---- Core wireframe edges (thin, bright) ---- */
         float nx, ny;
-        /* Nose → Left wing */
         nx = -(lwing_y - nose_y); ny = (lwing_x - nose_x);
         { float len = sqrtf(nx*nx+ny*ny); if(len>0){nx/=len;ny/=len;} }
         push_quad_free(VPX(nose_x+nx*lw), VPY(nose_y+ny*lw),
@@ -1369,7 +1944,6 @@ static void viz_push_quads(float cw, float ch, float x_off, float top_pad_px,
                        VPX(lwing_x-nx*lw), VPY(lwing_y-ny*lw),
                        VPX(nose_x-nx*lw), VPY(nose_y-ny*lw),
                        sr, sg, sb, 1.0f);
-        /* Nose → Right wing */
         nx = -(rwing_y - nose_y); ny = (rwing_x - nose_x);
         { float len = sqrtf(nx*nx+ny*ny); if(len>0){nx/=len;ny/=len;} }
         push_quad_free(VPX(nose_x+nx*lw), VPY(nose_y+ny*lw),
@@ -1377,7 +1951,6 @@ static void viz_push_quads(float cw, float ch, float x_off, float top_pad_px,
                        VPX(rwing_x-nx*lw), VPY(rwing_y-ny*lw),
                        VPX(nose_x-nx*lw), VPY(nose_y-ny*lw),
                        sr, sg, sb, 1.0f);
-        /* Rear */
         nx = -(rwing_y - lwing_y); ny = (rwing_x - lwing_x);
         { float len = sqrtf(nx*nx+ny*ny); if(len>0){nx/=len;ny/=len;} }
         push_quad_free(VPX(lwing_x+nx*lw), VPY(lwing_y+ny*lw),
@@ -1386,37 +1959,127 @@ static void viz_push_quads(float cw, float ch, float x_off, float top_pad_px,
                        VPX(lwing_x-nx*lw), VPY(lwing_y-ny*lw),
                        sr, sg, sb, 1.0f);
 
+        /* ---- Vertex dots (fill line joints for seamless triangle) ---- */
+        {
+            float vr = lw * 1.5f; /* dot radius slightly larger than line width */
+            push_quad(VPX(nose_x-vr), VPY(nose_y-vr), VPX(nose_x+vr), VPY(nose_y+vr),
+                      su0,sv0,su1,sv1, sr,sg,sb, 1.0f);
+            push_quad(VPX(lwing_x-vr), VPY(lwing_y-vr), VPX(lwing_x+vr), VPY(lwing_y+vr),
+                      su0,sv0,su1,sv1, sr,sg,sb, 1.0f);
+            push_quad(VPX(rwing_x-vr), VPY(rwing_y-vr), VPX(rwing_x+vr), VPY(rwing_y+vr),
+                      su0,sv0,su1,sv1, sr,sg,sb, 1.0f);
+        }
+
         /* Thrust flame */
         float speed = sqrtf(s->vx*s->vx + s->vy*s->vy);
         if (speed > 30) {
-            float flame_len = 8 + speed * 0.05f + viz_randf() * 8;
+            float flame_len = (8 + speed * 0.05f + viz_randf() * 8) * sc;
+            float flame_w = 3.0f * sc;
             float ffx = rear_x - ca * flame_len;
             float ffy = rear_y - sa * flame_len;
-            push_quad_free(VPX(rear_x+ny*3), VPY(rear_y-nx*3),
+            push_quad_free(VPX(rear_x+ny*flame_w), VPY(rear_y-nx*flame_w),
                            VPX(ffx), VPY(ffy),
                            VPX(ffx), VPY(ffy),
-                           VPX(rear_x-ny*3), VPY(rear_y+nx*3),
+                           VPX(rear_x-ny*flame_w), VPY(rear_y+nx*flame_w),
                            1.0f, 0.6f + beat_glow * 0.4f, 0.1f, 0.8f);
         }
       }
 
-        /* Lasers — purple for beams, red for normal */
+        /* Draw UFO */
+        if (viz_ufo.active) {
+            float ux = viz_ufo.x, uy = viz_ufo.y;
+            float ufo_w = 30.0f * sc, ufo_h = 10.0f * sc;
+            float dome_h = 8.0f * sc;
+            float ulw = 2.0f * sc;
+
+            /* UFO shadow */
+            float us_off = 4.0f * sc;
+            float us_w = ulw + 5.0f * sc;
+            push_quad(VPX(ux - ufo_w + us_off), VPY(uy - ufo_h * 0.3f + us_off),
+                      VPX(ux + ufo_w + us_off), VPY(uy + ufo_h * 0.3f + us_off),
+                      su0, sv0, su1, sv1, 0, 0, 0, 0.3f);
+
+            /* UFO body — flat ellipse (top + bottom halves) */
+            float ufo_r = 0.6f, ufo_g = 0.2f, ufo_b = 1.0f; /* purple */
+            ufo_r += beat_glow * 0.3f; ufo_g += beat_glow * 0.2f; ufo_b += beat_glow * 0.2f;
+            if (ufo_r > 1.0f) ufo_r = 1.0f; if (ufo_b > 1.0f) ufo_b = 1.0f;
+
+            /* Outer glow */
+            push_quad(VPX(ux - ufo_w - 6*sc), VPY(uy - ufo_h - 4*sc),
+                      VPX(ux + ufo_w + 6*sc), VPY(uy + ufo_h + 4*sc),
+                      su0, sv0, su1, sv1, ufo_r, ufo_g, ufo_b, 0.06f);
+            /* Body */
+            push_quad(VPX(ux - ufo_w), VPY(uy - ufo_h * 0.3f),
+                      VPX(ux + ufo_w), VPY(uy + ufo_h * 0.3f),
+                      su0, sv0, su1, sv1, ufo_r * 0.5f, ufo_g * 0.3f, ufo_b * 0.5f, 0.6f);
+            /* Top edge */
+            push_quad(VPX(ux - ufo_w), VPY(uy - ufo_h * 0.3f - ulw),
+                      VPX(ux + ufo_w), VPY(uy - ufo_h * 0.3f + ulw),
+                      su0, sv0, su1, sv1, ufo_r, ufo_g, ufo_b, 1.0f);
+            /* Bottom edge */
+            push_quad(VPX(ux - ufo_w), VPY(uy + ufo_h * 0.3f - ulw),
+                      VPX(ux + ufo_w), VPY(uy + ufo_h * 0.3f + ulw),
+                      su0, sv0, su1, sv1, ufo_r, ufo_g, ufo_b, 1.0f);
+            /* Dome */
+            push_quad(VPX(ux - ufo_w * 0.4f), VPY(uy - ufo_h * 0.3f - dome_h),
+                      VPX(ux + ufo_w * 0.4f), VPY(uy - ufo_h * 0.3f),
+                      su0, sv0, su1, sv1, ufo_r * 0.7f, ufo_g * 0.5f, ufo_b * 0.7f, 0.5f);
+            /* Dome edge */
+            push_quad(VPX(ux - ufo_w * 0.4f), VPY(uy - ufo_h * 0.3f - dome_h - ulw),
+                      VPX(ux + ufo_w * 0.4f), VPY(uy - ufo_h * 0.3f - dome_h + ulw),
+                      su0, sv0, su1, sv1, ufo_r, ufo_g, ufo_b, 0.8f);
+            /* Left/right edges (vertical lines at saucer edges) */
+            push_quad(VPX(ux - ufo_w - ulw), VPY(uy - ufo_h * 0.3f),
+                      VPX(ux - ufo_w + ulw), VPY(uy + ufo_h * 0.3f),
+                      su0, sv0, su1, sv1, ufo_r, ufo_g, ufo_b, 0.8f);
+            push_quad(VPX(ux + ufo_w - ulw), VPY(uy - ufo_h * 0.3f),
+                      VPX(ux + ufo_w + ulw), VPY(uy + ufo_h * 0.3f),
+                      su0, sv0, su1, sv1, ufo_r, ufo_g, ufo_b, 0.8f);
+
+            /* UFO laser beam */
+            if (viz_ufo.firing) {
+                float bw = viz_ufo.laser_width;
+                float ba = viz_ufo.laser_alpha;
+                /* Core beam — bright inner */
+                push_quad(VPX(ux - bw * 0.3f), VPY(uy + ufo_h * 0.3f),
+                          VPX(ux + bw * 0.3f), VPY((float)vp_h),
+                          su0, sv0, su1, sv1, 0.8f, 0.3f, 1.0f, ba * 0.8f);
+                /* Outer glow */
+                push_quad(VPX(ux - bw * 0.6f), VPY(uy + ufo_h * 0.3f),
+                          VPX(ux + bw * 0.6f), VPY((float)vp_h),
+                          su0, sv0, su1, sv1, 0.6f, 0.1f, 0.8f, ba * 0.3f);
+                /* Wide ambient glow */
+                push_quad(VPX(ux - bw), VPY(uy + ufo_h * 0.3f),
+                          VPX(ux + bw), VPY((float)vp_h),
+                          su0, sv0, su1, sv1, 0.4f, 0.1f, 0.6f, ba * 0.1f);
+            }
+
+            /* HP indicator: small dots */
+            for (int h = 0; h < viz_ufo.hp; h++) {
+                float hx = ux - (viz_ufo.hp - 1) * 4.0f * sc * 0.5f + h * 4.0f * sc;
+                float hy = uy + ufo_h * 0.3f + 6.0f * sc;
+                float hs = 2.0f * sc;
+                push_quad(VPX(hx - hs), VPY(hy - hs), VPX(hx + hs), VPY(hy + hs),
+                          su0, sv0, su1, sv1, 1.0f, 0.3f, 0.3f, 0.8f);
+            }
+        }
+
+        /* Lasers */
         for (int i = 0; i < VIZ_MAX_LASERS; i++) {
             viz_laser_t *l = &viz_lasers[i];
             if (!l->active) continue;
-            float llen = 16.0f;
+            float llen = 16.0f * sc;
             float lnx = l->vx, lny = l->vy;
             float lspd = sqrtf(lnx*lnx + lny*lny);
             if (lspd > 0) { lnx /= lspd; lny /= lspd; }
             float ttx = l->x - lnx * llen, tty = l->y - lny * llen;
             float pnx = -lny, pny = lnx;
-            /* Use laser's ship color, brighten beams, soften spreads */
             float lr = l->lr, lg = l->lg, lb = l->lb;
-            if (lspd > 1000) { lr = lr*0.7f + 0.3f; lg *= 0.5f; lb = lb*0.5f + 0.5f; } /* beam: shift toward white/purple */
-            else if (lspd < 500) { lr *= 0.6f; lg = lg*0.6f + 0.4f; lb *= 0.6f; } /* spread: shift toward green */
+            if (lspd > 1000) { lr = lr*0.7f + 0.3f; lg *= 0.5f; lb = lb*0.5f + 0.5f; }
+            else if (lspd < 500) { lr *= 0.6f; lg = lg*0.6f + 0.4f; lb *= 0.6f; }
             lr += beat_glow * 0.3f; lg += beat_glow * 0.2f; lb += beat_glow * 0.3f;
             if (lr > 1.0f) lr = 1.0f; if (lg > 1.0f) lg = 1.0f; if (lb > 1.0f) lb = 1.0f;
-            float thick = (lspd > 1000) ? 2.5f : 1.2f;
+            float thick = ((lspd > 1000) ? 2.5f : 1.2f) * sc;
             push_quad_free(VPX(l->x+pnx*thick), VPY(l->y+pny*thick),
                            VPX(ttx+pnx*thick*0.3f), VPY(tty+pny*thick*0.3f),
                            VPX(ttx-pnx*thick*0.3f), VPY(tty-pny*thick*0.3f),

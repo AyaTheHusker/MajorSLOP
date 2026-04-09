@@ -664,7 +664,6 @@ static const ttf_font_entry_t ttf_fonts[] = {
     { "B612 Mono",              "B612Mono-Regular.ttf" },
     { "Share Tech Mono",        "ShareTechMono-Regular.ttf" },
     { "Overpass Mono",          "OverpassMono-Regular.ttf" },
-    { "Xanh Mono",              "XanhMono-Regular.ttf" },
     { "Victor Mono",            "VictorMono-Regular.ttf" },
     { "Fantasque Sans Mono",    "FantasqueSansMono-Regular.ttf" },
     { "Fantasque Sans Bold",    "FantasqueSansMono-Bold.ttf" },
@@ -673,15 +672,18 @@ static const ttf_font_entry_t ttf_fonts[] = {
 };
 #define NUM_TTF_FONTS (int)(sizeof(ttf_fonts) / sizeof(ttf_fonts[0]))
 
-/* Returns 1 if font_idx is a pixel/bitmap-style font (needs NEAREST filter, no UV inset) */
+/* Returns 1 if font is a bitmap-style font (CP437 built-in, Px437 TTFs, Unscii TTFs).
+ * These have hard alpha edges that cause artifact lines in the liquid shader's
+ * neighbor-sampling passes (shadow blur, dark outline, sobel). */
 static int is_pixel_font(int font_idx)
 {
-    if (font_idx < 0) return 1; /* CP437 bitmap */
+    if (font_idx < 0) return 1; /* built-in CP437 bitmap */
     if (font_idx >= NUM_TTF_FONTS) return 0;
     const char *fn = ttf_fonts[font_idx].filename;
     if (!fn) return 0;
-    if (fn[0] == 'P' && fn[1] == 'x' && fn[2] == '4') return 1; /* Px437_* */
-    if (fn[0] == 'u' && fn[1] == 'n' && fn[2] == 's') return 1; /* unscii* */
+    /* Px437_* and unscii-* are bitmap-style TTFs with sharp alpha edges */
+    if (fn[0] == 'P' && fn[1] == 'x' && fn[2] == '4') return 1;
+    if (fn[0] == 'u' && fn[1] == 'n' && fn[2] == 's') return 1;
     return 0;
 }
 
@@ -729,7 +731,8 @@ static int ttf_loaded[MAX_TTF_FONTS] = {0};
 #define VKM_WID_PSTATS   4   /* Player Statistics */
 #define VKM_WID_RADIO    5   /* MUDRadio */
 #define VKM_WID_BSCROLL  6   /* Backscroll */
-#define VKM_WID_COUNT    7
+#define VKM_WID_ICONBAR  7   /* MegaMUD Icon Bar */
+#define VKM_WID_COUNT    8
 
 /* FX submenu items */
 #define VKM_FX_LIQUID    0
@@ -739,8 +742,9 @@ static int ttf_loaded[MAX_TTF_FONTS] = {0};
 #define VKM_FX_SCANLINES 4
 #define VKM_FX_SMOKY     5
 #define VKM_FX_SHADOW    6
-#define VKM_FX_WOBBLE    7
-#define VKM_FX_COUNT     8   /* wobble only shown when vk_experimental=True */
+#define VKM_FX_RAIN      7
+#define VKM_FX_WOBBLE    8
+#define VKM_FX_COUNT     9   /* wobble only shown when vk_experimental=True */
 
 /* Settings submenu items */
 #define VKM_SUB_EXTRAS   7
@@ -877,6 +881,7 @@ static void  bsp_copy_selection(void);
 
 /* MUDRadio types + state + forward declarations */
 #include "mudradio.h"
+#include "vib_icons.h"
 static void pst_draw(int vp_w, int vp_h);
 static void pst_toggle(void);
 static void pst_feed(const char *data, int len);
@@ -885,6 +890,7 @@ static void pst_reset_combat(void);
 static void pst_recap_poll(void);
 static void pst_flush_round(void);
 static void pst_on_round_tick(int round_num);
+static int vib_visible; /* forward decl for icon bar visibility */
 
 static int vkm_open = 0;          /* VKM_CLOSED or VKM_ROOT */
 static void vkt_save_settings(void);
@@ -2971,6 +2977,11 @@ static int fx_fbm_mode = 0;       /* 0 = off, 1 = FBM noise warp */
 static int fx_sobel_mode = 0;     /* 0 = off, 1 = sobel/sharp/plastic */
 static int fx_scanline_mode = 0;  /* 0 = off, 1 = CRT scanlines */
 static int fx_smoky_mode = 0;       /* 0 = off, 1 = smoky letters */
+static int fx_rain_mode = 0;        /* 0 = off, 1 = raindrop ripple warp */
+static float rain_size = 0.06f;     /* drop radius in NDC */
+static float rain_speed = 1.0f;     /* animation speed multiplier */
+static float rain_freq = 3.0f;      /* drop density */
+static float rain_warp = 0.02f;     /* displacement strength */
 static float fx_time = 0.0f;      /* animation time in seconds */
 
 /* Smoky Letters parameters */
@@ -3061,6 +3072,24 @@ static void  smk_draw(int vp_w, int vp_h);
 static int   smk_mouse_down(int mx, int my);
 static void  smk_mouse_move(int mx, int my);
 static void  smk_mouse_up(void);
+
+/* Rain drops settings panel */
+#define RN_SLIDER_COUNT 4
+static int   rn_visible = 0;
+static int   rn_scaled = 0;
+static float rn_x = 40, rn_y = 100;
+static float rn_w = 280, rn_h = 200;
+static int   rn_dragging = 0;
+static float rn_drag_ox = 0, rn_drag_oy = 0;
+static int   rn_active_slider = -1;
+static float *rn_slider_ptr[RN_SLIDER_COUNT];
+static const float rn_slider_min[RN_SLIDER_COUNT] = { 0.02f, 0.5f, 1.0f, 0.005f };
+static const float rn_slider_max[RN_SLIDER_COUNT] = { 0.15f, 3.0f, 8.0f, 0.05f };
+static const char *rn_labels[RN_SLIDER_COUNT] = { "Drop Size", "Speed", "Frequency", "Warp Str" };
+static void  rn_draw(int vp_w, int vp_h);
+static int   rn_mouse_down(int mx, int my);
+static void  rn_mouse_move(int mx, int my);
+static void  rn_mouse_up(void);
 
 /* Drop shadow settings panel */
 #define SHD_SLIDER_COUNT 5
@@ -3261,6 +3290,15 @@ static VkSampler ui_font_sampler = VK_NULL_HANDLE;
 static VkDescriptorSet ui_desc_set = VK_NULL_HANDLE;
 static uint32_t ui_atlas_w = 256, ui_atlas_h = 512;
 static int ui_font_ready = 0;
+
+/* Icon atlas texture (color emoji from NotoColorEmoji) */
+static VkImage vib_icon_img = VK_NULL_HANDLE;
+static VkDeviceMemory vib_icon_mem = VK_NULL_HANDLE;
+static VkImageView vib_icon_view = VK_NULL_HANDLE;
+static VkSampler vib_icon_sampler = VK_NULL_HANDLE;
+static VkDescriptorSet vib_desc_set = VK_NULL_HANDLE;
+static int vib_icon_ready = 0;
+static int vib_quad_start = 0, vib_quad_end = 0;
 static int pl_quad_start = 0;  /* index in quad buffer where P&L quads begin */
 static int pl_quad_end = 0;    /* index where P&L quads end (menu quads follow) */
 
@@ -3313,6 +3351,10 @@ static DWORD vsb_last_read = 0;       /* tick of last status read */
 static int  vsb_prev_mana = -1;       /* previous mana for tick detection */
 static DWORD vsb_mana_tick_time = 0;  /* GetTickCount of last mana tick */
 static int  vsb_mana_tick_show = 0;   /* 1 = flash active */
+static int  vsb_mana_tick_val = 0;    /* amount gained on last tick */
+static int  vsb_prev_pathing = 0;     /* previous pathing state for 0->1 detection */
+static int  vsb_prev_looping = 0;     /* previous looping state for 0->1 detection */
+static __int64 vsb_exp_rate = 0;      /* exp/hr from player stats, updated by pst code */
 
 /* ---- Exp Bar Widget ---- */
 #define VXB_BAR_H_BASE 20     /* bar height in pixels at 1080p */
@@ -5323,6 +5365,9 @@ static void vkm_draw(int vp_w, int vp_h)
                 } else if (i == VKM_WID_BSCROLL) {
                     label = bsp_visible ? "\x04 Backscroll" : "  Backscroll";
                     is_active = bsp_visible;
+                } else if (i == VKM_WID_ICONBAR) {
+                    label = vib_visible ? "\x04 Icon Bar" : "  Icon Bar";
+                    is_active = vib_visible;
                 }
             } else if (vkm_sub == VKM_SUB_RECENT) {
                 if (vkm_goto_count == 0) {
@@ -5349,6 +5394,7 @@ static void vkm_draw(int vp_w, int vp_h)
                 else if (i == VKM_FX_SCANLINES) { label = "CRT Scanlines"; is_active = fx_scanline_mode; }
                 else if (i == VKM_FX_SMOKY) { label = "Smoky Letters"; is_active = fx_smoky_mode; }
                 else if (i == VKM_FX_SHADOW) { label = "Drop Shadow"; is_active = fx_shadow_mode; }
+                else if (i == VKM_FX_RAIN) { label = "Rain Drops"; is_active = fx_rain_mode; }
                 else if (i == VKM_FX_WOBBLE && vk_experimental) { label = "Wobbly Widgets \x1b[33m[EXP]"; is_active = fx_wobble_mode; }
             } else if (vkm_sub == VKM_SUB_EXTRAS) {
                 if (i == VKM_EXT_SOUND) {
@@ -5719,6 +5765,7 @@ static void vsb_read_status(void)
     /* Mana tick detection: mana increased while resting/meditating */
     if (vsb_prev_mana >= 0 && vsb_cur_mana > vsb_prev_mana &&
         (vsb_is_resting || vsb_is_medit) && !vsb_in_combat) {
+        vsb_mana_tick_val = vsb_cur_mana - vsb_prev_mana;
         vsb_mana_tick_time = now;
         vsb_mana_tick_show = 1;
     }
@@ -5731,8 +5778,18 @@ static void vsb_read_status(void)
     vsb_is_medit = api->read_struct_i32(VSB_OFF_IS_MEDIT);
     vsb_cur_step = api->read_struct_i32(VSB_OFF_CUR_STEP);
     vsb_total_steps = api->read_struct_i32(VSB_OFF_TOTAL_STEPS);
-    vsb_pathing = api->read_struct_i32(VSB_OFF_PATHING);
-    vsb_looping = api->read_struct_i32(VSB_OFF_LOOPING);
+    {
+        int new_pathing = api->read_struct_i32(VSB_OFF_PATHING);
+        int new_looping = api->read_struct_i32(VSB_OFF_LOOPING);
+        /* Reset exp tracking when pathing or looping starts (0→1 transition) */
+        if ((new_pathing && !vsb_prev_pathing) || (new_looping && !vsb_prev_looping)) {
+            pst_reset_exp();
+        }
+        vsb_prev_pathing = new_pathing;
+        vsb_prev_looping = new_looping;
+        vsb_pathing = new_pathing;
+        vsb_looping = new_looping;
+    }
     vsb_roaming = api->read_struct_i32(VSB_OFF_ROAMING);
     vsb_autocombat = api->read_struct_i32(VSB_OFF_AUTOCOMBAT);
 
@@ -5875,7 +5932,7 @@ static void vsb_draw(int vp_w, int vp_h)
         float mb = mn_ratio > 0.5f ? 1.0f : (mn_ratio > 0.25f ? 0.0f : 0.2f);
         VSB_SECTION("Mana: ", buf, lr, lg, lb, mr, mg, mb);
 
-        /* Mana tick indicator — flashes when mana regenerates */
+        /* Mana tick indicator — flashes when mana regenerates, shows amount */
         if (vsb_mana_tick_show) {
             DWORD elapsed = GetTickCount() - vsb_mana_tick_time;
             float alpha = (elapsed < 500) ? 1.0f : 1.0f - (float)(elapsed - 500) / 1500.0f;
@@ -5885,9 +5942,12 @@ static void vsb_draw(int vp_w, int vp_h)
             ptext(tx, ty, "\x04", 0.3f * pulse, 1.0f * pulse, 1.0f * pulse * alpha,
                   vp_w, vp_h, cw, ch);
             tx += cw;
-            ptext(tx, ty, "Tick", 0.3f, 0.9f * alpha, 1.0f * alpha,
+            char tick_buf[16];
+            _snprintf(tick_buf, sizeof(tick_buf), "+%d", vsb_mana_tick_val);
+            tick_buf[sizeof(tick_buf) - 1] = '\0';
+            ptext(tx, ty, tick_buf, 0.3f, 0.9f * alpha, 1.0f * alpha,
                   vp_w, vp_h, cw, ch);
-            tx += 4 * cw + VSB_PAD;
+            tx += (int)strlen(tick_buf) * cw + VSB_PAD;
             psolid((float)tx, 3.0f*ui_scale, (float)(tx + VSB_SEP_W), (float)(VSB_BAR_H) - 3.0f*ui_scale,
                    t->text[0], t->text[1], t->text[2], 0.2f, vp_w, vp_h);
             tx += VSB_SEP_W + VSB_PAD;
@@ -5907,7 +5967,438 @@ static void vsb_draw(int vp_w, int vp_h)
         VSB_SECTION("Status: ", vsb_status_text, lr, lg, lb, sr, sg, sb);
     }
 
+    /* Section: Exp/hr from Player Stats tracker */
+    if (vsb_exp_rate > 0) {
+        if (vsb_exp_rate >= 1000000LL)
+            _snprintf(buf, sizeof(buf), "%lldm/hr", vsb_exp_rate / 1000000LL);
+        else if (vsb_exp_rate >= 1000LL)
+            _snprintf(buf, sizeof(buf), "%lldk/hr", vsb_exp_rate / 1000LL);
+        else
+            _snprintf(buf, sizeof(buf), "%lld/hr", vsb_exp_rate);
+        buf[sizeof(buf) - 1] = '\0';
+        VSB_SECTION("Exp: ", buf, lr, lg, lb, 0.3f, 1.0f, 0.3f);
+    }
+
     #undef VSB_SECTION
+}
+
+/* ============================================================
+ * MegaMUD Icon Bar — toggle buttons synced with MegaMUD state
+ * ============================================================ */
+
+#define VIB_BAR_H_BASE 48    /* icon bar height at 1080p */
+static int VIB_BAR_H = 48;
+static int vib_visible = 0;
+
+/* Auto-hide slide animation */
+static float vib_slide = 0.0f;         /* 0 = fully hidden, 1 = fully revealed */
+static DWORD vib_last_interact = 0;    /* tick of last mouse interaction */
+static DWORD vib_last_frame = 0;       /* for delta-time animation */
+#define VIB_SHOW_MS   3000   /* stay visible 3 seconds after last interaction */
+#define VIB_SLIDE_SPEED 5.0f /* slide speed (units per second, 1=full travel) */
+
+/* Button definitions: tooltip, icon char, config offset, runtime offset, is_toggle */
+typedef struct {
+    const char *tip;         /* hover tooltip */
+    const char *icon;        /* CP437 icon character */
+    unsigned int cfg_off;    /* 0x4Dxx config offset */
+    unsigned int rt_off;     /* 0x57xx runtime offset */
+    int is_toggle;           /* 1 = toggle, 0 = action button */
+} vib_btn_t;
+
+#define VIB_OFF_GO_FLAG    0x564C
+#define VIB_OFF_CONNECTED  0x563C
+#define VIB_OFF_CONFIRM_HU 0x8AB8
+
+static const vib_btn_t vib_buttons[] = {
+    { "Combat", "\x0F", 0x4D00, 0x573C, 1 },  /* ☼ */
+    { "Heal",   "\x03", 0x4D08, 0x5748, 1 },  /* ♥ */
+    { "Bless",  "\x0E", 0x4D0C, 0x574C, 1 },  /* ♫ */
+    { "Cash",   "$",    0x4D14, 0x5754, 1 },
+    { "Items",  "\x04", 0x4D18, 0x5758, 1 },  /* ♦ */
+    { "Search", "?",    0x4D1C, 0x575C, 1 },
+    { "Sneak",  "\xF0", 0x4D20, 0x5764, 1 },  /* ≡ */
+    { "Hide",   "\xB1", 0x4D24, 0x5768, 1 },  /* ▒ */
+    { "Go",     "\x10", 0,      VIB_OFF_GO_FLAG, 1 },  /* ► */
+    { "Back",   "\x11", 0, 0, 0 },             /* ◄ */
+    { "Phone",  "\x0C", 0, 0, 0 },             /* ♀ (handset) */
+};
+#define VIB_BTN_COUNT (sizeof(vib_buttons) / sizeof(vib_buttons[0]))
+#define VIB_BTN_GO    8
+#define VIB_BTN_BACK  9
+#define VIB_BTN_PHONE 10
+
+static int  vib_hover = -1;    /* button under mouse */
+static int  vib_pressed = -1;  /* button being clicked */
+static int  vib_pinned = 1;    /* 1 = always visible, 0 = auto-hide */
+static int  vib_pin_hover = 0; /* mouse over pin button */
+static DWORD vib_last_read = 0;
+static int  vib_states[VIB_BTN_COUNT]; /* cached on/off states */
+static int  vib_cur_bar_y = -100; /* current animated Y position, updated each frame */
+
+static DWORD vib_last_log = 0;
+static void vib_read_states(void)
+{
+    DWORD now = GetTickCount();
+    if (now - vib_last_read < 250) return;
+    vib_last_read = now;
+    if (!api) return;
+    unsigned int sbase = api->get_struct_base();
+    if (!sbase) return;
+    int do_log = (now - vib_last_log > 5000); /* log every 5s */
+    if (do_log) vib_last_log = now;
+    for (int i = 0; i < (int)VIB_BTN_COUNT; i++) {
+        if (vib_buttons[i].is_toggle && vib_buttons[i].cfg_off) {
+            /* Read config offset (0x4Dxx) — runtime (0x57xx) resets to 0 on connect */
+            int raw = api->read_struct_i32(vib_buttons[i].cfg_off);
+            vib_states[i] = raw != 0;
+            if (do_log)
+                api->log("[vib] %s: cfg=0x%04X raw=%d state=%d\n",
+                         vib_buttons[i].tip, vib_buttons[i].cfg_off, raw, vib_states[i]);
+        } else if (i == VIB_BTN_GO) {
+            /* Go/Stop has no config offset, use runtime */
+            int raw = api->read_struct_i32(VIB_OFF_GO_FLAG);
+            vib_states[i] = raw != 0;
+            if (do_log)
+                api->log("[vib] Go: raw=%d state=%d\n", raw, vib_states[i]);
+        } else if (i == VIB_BTN_PHONE) {
+            int raw = api->read_struct_i32(VIB_OFF_CONNECTED);
+            vib_states[i] = raw != 0;
+            if (do_log)
+                api->log("[vib] Phone: raw=%d state=%d\n", raw, vib_states[i]);
+        }
+    }
+}
+
+static void vib_click(int idx)
+{
+    if (idx < 0 || idx >= (int)VIB_BTN_COUNT) return;
+    if (!api) return;
+    /* Block all buttons except Phone when disconnected */
+    if (idx != VIB_BTN_PHONE && !vib_states[VIB_BTN_PHONE]) return;
+    unsigned int sbase = api->get_struct_base();
+    if (!sbase) return;
+    unsigned char *base = (unsigned char *)(uintptr_t)sbase;
+
+    if (vib_buttons[idx].is_toggle) {
+        if (idx == VIB_BTN_GO) {
+            /* Stop/Go — send MegaMUD's toolbar WM_COMMAND */
+            HWND mw = api->get_mmmain_hwnd();
+            if (mw) SendMessageA(mw, WM_COMMAND, 0x0803, 0);
+        } else {
+            /* Toggle: read from config, flip, write to BOTH config and runtime */
+            int cur = *(int *)(base + vib_buttons[idx].cfg_off);
+            int nv = cur ? 0 : 1;
+            *(int *)(base + vib_buttons[idx].cfg_off) = nv;
+            if (vib_buttons[idx].rt_off)
+                *(int *)(base + vib_buttons[idx].rt_off) = nv;
+            vib_states[idx] = nv;
+        }
+    } else if (idx == VIB_BTN_PHONE) {
+        /* Hangup/Connect toggle */
+        HWND mw = api->get_mmmain_hwnd();
+        if (!mw) return;
+        int connected = api->read_struct_i32(VIB_OFF_CONNECTED);
+        if (connected) {
+            /* Disable confirmation dialog, then send phone button */
+            *(int *)(base + VIB_OFF_CONFIRM_HU) = 0;
+        }
+        SendMessageA(mw, WM_COMMAND, 0x07D4, 0);
+    }
+    /* VIB_BTN_BACK: not hooked up yet */
+}
+
+/* Push a single icon quad from the icon atlas. icon_idx = 0..VIB_ICON_COUNT-1.
+ * r,g,b tint the icon (1,1,1 = full color, 0.3,0.3,0.3 = dim). */
+static void push_icon_quad(float x0, float y0, float x1, float y1,
+                           int icon_idx, float r, float g, float b, float a,
+                           int vp_w, int vp_h)
+{
+    float u0 = (float)(icon_idx * VIB_ICON_CELL) / (float)VIB_ICON_ATLAS_W;
+    float u1 = (float)((icon_idx + 1) * VIB_ICON_CELL) / (float)VIB_ICON_ATLAS_W;
+    float v0 = 0.0f, v1 = 1.0f;
+    #define VI2X(px) (((float)(px) / (float)vp_w) * 2.0f - 1.0f)
+    #define VI2Y(py) (((float)(py) / (float)vp_h) * 2.0f - 1.0f)
+    push_quad(VI2X(x0), VI2Y(y0), VI2X(x1), VI2Y(y1),
+              u0, v0, u1, v1, r, g, b, a);
+    #undef VI2X
+    #undef VI2Y
+}
+
+/* Icon bar geometry helpers */
+static int vib_btn_size(void) { return (int)(40 * ui_scale); } /* square button size */
+static int vib_gap(void)      { return (int)(3 * ui_scale); }
+static int vib_pin_size(void) { return (int)(18 * ui_scale); } /* small pin button */
+static int vib_total_w(void)  {
+    return (int)VIB_BTN_COUNT * vib_btn_size() + ((int)VIB_BTN_COUNT - 1) * vib_gap()
+           + (int)(12 * ui_scale) + vib_gap() + vib_pin_size() + (int)(4 * ui_scale);
+}
+
+/* Anchor: top edge the tab slides down from */
+static int vib_anchor_y(void) { return vsb_visible ? VSB_BAR_H : 0; }
+
+/* Update slide animation each frame. Returns current tab top Y. */
+static int vib_update_slide(int mouse_y, int vp_w)
+{
+    if (!vib_visible) { vib_slide = 0.0f; return -VIB_BAR_H; }
+
+    DWORD now = GetTickCount();
+    float dt = (vib_last_frame > 0) ? (float)(now - vib_last_frame) / 1000.0f : 0.016f;
+    if (dt > 0.1f) dt = 0.1f;
+    vib_last_frame = now;
+
+    int anchor = vib_anchor_y();
+    int tw = vib_total_w();
+    int tab_x0 = (vp_w - tw) / 2;
+
+    /* Trigger zone: mouse near anchor, within tab horizontal bounds (+ margin) */
+    int margin = (int)(30 * ui_scale);
+    int in_trigger = (mouse_y >= 0 && mouse_y < anchor + (int)(10 * ui_scale) &&
+                      vkm_mouse_x >= tab_x0 - margin && vkm_mouse_x < tab_x0 + tw + margin);
+    /* Stay open while mouse is over the tab itself */
+    float eased = 1.0f - (1.0f - vib_slide) * (1.0f - vib_slide);
+    int bar_y = anchor - (int)((1.0f - eased) * VIB_BAR_H);
+    int in_tab = (vib_slide > 0.1f && mouse_y >= bar_y && mouse_y < bar_y + VIB_BAR_H &&
+                  vkm_mouse_x >= tab_x0 && vkm_mouse_x < tab_x0 + tw);
+
+    if (in_trigger || in_tab || vib_pressed >= 0)
+        vib_last_interact = now;
+
+    int want_show;
+    if (vib_pinned) {
+        want_show = 1;
+    } else {
+        /* Auto-hide: stay visible while any toggle/phone is active, or recent interaction */
+        int any_on = vib_states[VIB_BTN_PHONE];
+        for (int i = 0; !any_on && i < (int)VIB_BTN_COUNT; i++)
+            if (vib_buttons[i].is_toggle && vib_states[i]) { any_on = 1; break; }
+        want_show = any_on || (now - vib_last_interact < VIB_SHOW_MS) || in_trigger || in_tab || vib_pressed >= 0;
+    }
+    float target = want_show ? 1.0f : 0.0f;
+    float speed = VIB_SLIDE_SPEED * dt;
+    if (vib_slide < target) {
+        vib_slide += speed;
+        if (vib_slide > target) vib_slide = target;
+    } else if (vib_slide > target) {
+        vib_slide -= speed * 0.6f;
+        if (vib_slide < target) vib_slide = target;
+    }
+
+    eased = 1.0f - (1.0f - vib_slide) * (1.0f - vib_slide);
+    return anchor - (int)((1.0f - eased) * VIB_BAR_H);
+}
+
+static void vib_draw(int vp_w, int vp_h, int bar_y)
+{
+    if (!vib_visible || vib_slide < 0.01f || !vib_icon_ready) {
+        /* No icon quads — collapse range so render loop draws UI quads normally */
+        vib_quad_start = vib_quad_end = quad_count;
+        return;
+    }
+
+    vib_read_states();
+
+    const ui_theme_t *t = &ui_themes[current_theme];
+    void (*psolid)(float, float, float, float, float, float, float, float, int, int) =
+        ui_font_ready ? push_solid_ui : push_solid;
+    void (*ptext)(int, int, const char *, float, float, float, int, int, int, int) =
+        ui_font_ready ? push_text_ui : push_text;
+
+    int bs = vib_btn_size();
+    int gap = vib_gap();
+    int tw = vib_total_w();
+    int pad = (int)(6 * ui_scale);
+    int tab_x = (vp_w - tw) / 2;
+    float alpha = (vib_slide < 0.3f) ? vib_slide / 0.3f : 1.0f;
+    int corner = (int)(3 * ui_scale);
+    float anim_t = (float)GetTickCount() / 1000.0f; /* seconds for orbit animation */
+
+    /* Tab background */
+    psolid((float)tab_x, (float)bar_y, (float)(tab_x + tw), (float)(bar_y + VIB_BAR_H),
+           t->bg[0] + 0.04f, t->bg[1] + 0.04f, t->bg[2] + 0.04f, 0.93f * alpha,
+           vp_w, vp_h);
+    /* Bottom edge */
+    psolid((float)(tab_x + corner), (float)(bar_y + VIB_BAR_H - 1),
+           (float)(tab_x + tw - corner), (float)(bar_y + VIB_BAR_H),
+           t->accent[0], t->accent[1], t->accent[2], 0.5f * alpha,
+           vp_w, vp_h);
+    /* Side edges */
+    psolid((float)tab_x, (float)(bar_y + corner), (float)(tab_x + 1), (float)(bar_y + VIB_BAR_H - corner),
+           t->accent[0], t->accent[1], t->accent[2], 0.2f * alpha, vp_w, vp_h);
+    psolid((float)(tab_x + tw - 1), (float)(bar_y + corner), (float)(tab_x + tw), (float)(bar_y + VIB_BAR_H - corner),
+           t->accent[0], t->accent[1], t->accent[2], 0.2f * alpha, vp_w, vp_h);
+
+    int bx = tab_x + pad;
+    int by = bar_y + (VIB_BAR_H - bs) / 2;
+
+    /* Pass 1: button backgrounds, borders (all use UI font atlas / solid quads) */
+    for (int i = 0; i < (int)VIB_BTN_COUNT; i++) {
+        const vib_btn_t *b = &vib_buttons[i];
+        int is_on = vib_states[i];
+        int is_hov = (vib_hover == i);
+        int is_press = (vib_pressed == i);
+
+        /* Button background */
+        float br, bg, bb, ba;
+        if (is_press) {
+            br = t->accent[0] * 0.5f; bg = t->accent[1] * 0.5f; bb = t->accent[2] * 0.5f; ba = 0.95f;
+        } else if (is_on) {
+            br = 0.02f; bg = 0.06f; bb = 0.02f; ba = 0.92f; /* dark green tint */
+        } else if (is_hov) {
+            br = t->bg[0] + 0.15f; bg = t->bg[1] + 0.15f; bb = t->bg[2] + 0.15f; ba = 0.95f;
+        } else {
+            br = t->bg[0] + 0.08f; bg = t->bg[1] + 0.08f; bb = t->bg[2] + 0.08f; ba = 0.7f;
+        }
+        ba *= alpha;
+        psolid((float)bx, (float)by, (float)(bx + bs), (float)(by + bs),
+               br, bg, bb, ba, vp_w, vp_h);
+
+        /* Border: bright green when ON, normal 3D when off */
+        if (is_on) {
+            /* Thick green border — unmistakable ON indicator */
+            int bw = (int)(2.0f * ui_scale); if (bw < 2) bw = 2;
+            /* Top */
+            psolid((float)bx, (float)by, (float)(bx + bs), (float)(by + bw),
+                   0.2f, 1.0f, 0.3f, 0.95f * alpha, vp_w, vp_h);
+            /* Bottom */
+            psolid((float)bx, (float)(by + bs - bw), (float)(bx + bs), (float)(by + bs),
+                   0.2f, 1.0f, 0.3f, 0.95f * alpha, vp_w, vp_h);
+            /* Left */
+            psolid((float)bx, (float)by, (float)(bx + bw), (float)(by + bs),
+                   0.2f, 1.0f, 0.3f, 0.95f * alpha, vp_w, vp_h);
+            /* Right */
+            psolid((float)(bx + bs - bw), (float)by, (float)(bx + bs), (float)(by + bs),
+                   0.2f, 1.0f, 0.3f, 0.95f * alpha, vp_w, vp_h);
+        } else {
+            /* Raised 3D border */
+            psolid((float)bx, (float)by, (float)(bx + bs), (float)(by + 1),
+                   1.0f, 1.0f, 1.0f, 0.12f * alpha, vp_w, vp_h);
+            psolid((float)bx, (float)by, (float)(bx + 1), (float)(by + bs),
+                   1.0f, 1.0f, 1.0f, 0.08f * alpha, vp_w, vp_h);
+            psolid((float)(bx + bs - 1), (float)by, (float)(bx + bs), (float)(by + bs),
+                   0.0f, 0.0f, 0.0f, 0.2f * alpha, vp_w, vp_h);
+            psolid((float)bx, (float)(by + bs - 1), (float)(bx + bs), (float)(by + bs),
+                   0.0f, 0.0f, 0.0f, 0.2f * alpha, vp_w, vp_h);
+        }
+
+        /* Hover tooltip */
+        if (is_hov && vib_slide > 0.8f) {
+            const char *tip = b->tip;
+            if (i == VIB_BTN_PHONE) tip = is_on ? "Disconnect" : "Connect";
+            else if (i == VIB_BTN_GO) tip = is_on ? "Stop" : "Go";
+            int tip_len = (int)strlen(tip);
+            int tip_cw = (int)(VSB_CHAR_W * ui_scale);
+            int tip_ch = (int)(VSB_CHAR_H * ui_scale);
+            int tip_w = tip_len * tip_cw + (int)(8 * ui_scale);
+            int tip_h = tip_ch + (int)(6 * ui_scale);
+            int tip_x = bx + bs / 2 - tip_w / 2;
+            int tip_y = bar_y + VIB_BAR_H + (int)(2 * ui_scale);
+            if (tip_x < 2) tip_x = 2;
+            if (tip_x + tip_w > vp_w - 2) tip_x = vp_w - 2 - tip_w;
+            psolid((float)tip_x, (float)tip_y, (float)(tip_x + tip_w), (float)(tip_y + tip_h),
+                   t->bg[0], t->bg[1], t->bg[2], 0.92f, vp_w, vp_h);
+            psolid((float)tip_x, (float)tip_y, (float)(tip_x + tip_w), (float)(tip_y + 1),
+                   0.3f, 1.0f, 0.4f, 0.5f, vp_w, vp_h);
+            ptext(tip_x + (int)(4 * ui_scale), tip_y + (int)(3 * ui_scale),
+                  tip, t->text[0], t->text[1], t->text[2], vp_w, vp_h, tip_cw, tip_ch);
+        }
+
+        bx += bs + gap;
+    }
+
+    /* Pin/unpin button — small toggle on the right edge */
+    {
+        int ps = vib_pin_size();
+        int px = bx + gap;
+        int py = bar_y + VIB_BAR_H / 2 - ps / 2;
+        float pr, pg, pb, pa;
+        if (vib_pinned) {
+            pr = 0.15f; pg = 0.5f; pb = 0.15f; pa = 0.85f;
+        } else if (vib_pin_hover) {
+            pr = t->bg[0] + 0.15f; pg = t->bg[1] + 0.15f; pb = t->bg[2] + 0.15f; pa = 0.8f;
+        } else {
+            pr = t->bg[0] + 0.06f; pg = t->bg[1] + 0.06f; pb = t->bg[2] + 0.06f; pa = 0.6f;
+        }
+        pa *= alpha;
+        psolid((float)px, (float)py, (float)(px + ps), (float)(py + ps),
+               pr, pg, pb, pa, vp_w, vp_h);
+        /* Draw a tiny pin icon using UI font: filled dot if pinned, hollow if not */
+        int pcw = (int)(VSB_CHAR_W * ui_scale * 0.7f);
+        int pch = (int)(VSB_CHAR_H * ui_scale * 0.7f);
+        const char *pin_ch = vib_pinned ? "\x04" : "\x09"; /* diamond=pinned, circle=auto */
+        ptext(px + ps / 2 - pcw / 2, py + ps / 2 - pch / 2,
+              pin_ch, 0.7f, 1.0f, 0.7f, vp_w, vp_h, pcw, pch);
+        /* Tooltip */
+        if (vib_pin_hover && vib_slide > 0.8f) {
+            const char *tip = vib_pinned ? "Auto-hide" : "Pin bar";
+            int tip_len = (int)strlen(tip);
+            int tip_cw = (int)(VSB_CHAR_W * ui_scale);
+            int tip_ch = (int)(VSB_CHAR_H * ui_scale);
+            int tip_w = tip_len * tip_cw + (int)(8 * ui_scale);
+            int tip_h = tip_ch + (int)(6 * ui_scale);
+            int tip_x = px + ps / 2 - tip_w / 2;
+            int tip_y = bar_y + VIB_BAR_H + (int)(2 * ui_scale);
+            if (tip_x + tip_w > vp_w - 2) tip_x = vp_w - 2 - tip_w;
+            psolid((float)tip_x, (float)tip_y, (float)(tip_x + tip_w), (float)(tip_y + tip_h),
+                   t->bg[0], t->bg[1], t->bg[2], 0.92f, vp_w, vp_h);
+            ptext(tip_x + (int)(4 * ui_scale), tip_y + (int)(3 * ui_scale),
+                  tip, t->text[0], t->text[1], t->text[2], vp_w, vp_h, tip_cw, tip_ch);
+        }
+    }
+
+    /* Pass 2: icon emoji quads — these use the icon atlas descriptor set */
+    vib_quad_start = quad_count;
+    bx = tab_x + pad;
+    {
+        int icon_pad = (int)(4 * ui_scale); /* padding inside button for icon */
+        for (int i = 0; i < (int)VIB_BTN_COUNT; i++) {
+            int is_on = vib_states[i];
+            int is_hov = (vib_hover == i);
+            float a;
+            if (is_on) a = 1.0f;
+            else if (is_hov) a = 0.85f;
+            else a = 0.35f; /* dim when off */
+            /* r=-1 signals the shader to use full texture RGB (color emoji mode) */
+            push_icon_quad((float)(bx + icon_pad), (float)(by + icon_pad),
+                           (float)(bx + bs - icon_pad), (float)(by + bs - icon_pad),
+                           i, -1.0f, 0.0f, 0.0f, a * alpha, vp_w, vp_h);
+            bx += bs + gap;
+        }
+    }
+    vib_quad_end = quad_count;
+}
+
+/* Hit test: returns button index, -2 for pin button, or -1 for miss. */
+#define VIB_HIT_PIN -2
+static int vib_hit_test(int mx, int my, int bar_y)
+{
+    if (!vib_visible || vib_slide < 0.5f) return -1;
+
+    int bs = vib_btn_size();
+    int gap = vib_gap();
+    int tw = vib_total_w();
+    int pad = (int)(6 * ui_scale);
+    int tab_x = ((int)vk_sc_extent.width - tw) / 2;
+    int by = bar_y + (VIB_BAR_H - bs) / 2;
+
+    /* Check main buttons */
+    if (my >= by && my < by + bs) {
+        int bx = tab_x + pad;
+        for (int i = 0; i < (int)VIB_BTN_COUNT; i++) {
+            if (mx >= bx && mx < bx + bs) return i;
+            bx += bs + gap;
+        }
+    }
+
+    /* Check pin button */
+    int ps = vib_pin_size();
+    int bx_end = tab_x + pad + (int)VIB_BTN_COUNT * (bs + gap);
+    int px = bx_end + gap;
+    int py = bar_y + VIB_BAR_H / 2 - ps / 2;
+    if (mx >= px && mx < px + ps && my >= py && my < py + ps)
+        return VIB_HIT_PIN;
+
+    return -1;
 }
 
 /* ---- Exp Bar: read status ---- */
@@ -6136,14 +6627,25 @@ static void vkt_build_vertices(void)
     float x_offset = (float)margin_px;
     last_cw_px = cw; last_ch_px = ch;  /* store for smoke shader push constants */
 
+    /* Precompute integer cell boundaries — eliminates sub-pixel gaps between
+     * adjacent character quads (the #1 cause of vertical black lines in
+     * tile/terminal renderers). Every quad edge is shared exactly. */
+    static int col_x[TERM_COLS + 1];
+    static int row_y[TERM_ROWS + 1];
+    for (int c = 0; c <= TERM_COLS; c++)
+        col_x[c] = (int)(x_offset + c * cw + 0.5f);
+    for (int r = 0; r <= TERM_ROWS; r++)
+        row_y[r] = (int)(top_pad + r * ch + 0.5f);
+
     /* UV constants for font atlas (16x16 grid).
-     * Half-texel inset for LINEAR-filtered TTF fonts prevents bilinear bleed.
-     * Pixel fonts use NEAREST filtering so inset would cut into glyphs. */
+     * Half-texel inset prevents LINEAR filtering from bleeding across cell borders. */
     float tex_cw = 1.0f / 16.0f;
     float tex_ch = 1.0f / 16.0f;
-    int pixel_fnt = is_pixel_font(current_font);
-    float hp_u = pixel_fnt ? 0.0f : (0.5f / (float)cur_atlas_w);
-    float hp_v = pixel_fnt ? 0.0f : (0.5f / (float)cur_atlas_h);
+    /* Only the built-in CP437 bitmap (font<0) skips inset — it uses NEAREST filter.
+     * All TTF-rendered fonts (including Px437/Unscii) need the half-texel inset
+     * to prevent LINEAR filter bleed across adjacent atlas cells. */
+    float hp_u = (current_font < 0) ? 0.0f : 0.5f / (float)cur_atlas_w;
+    float hp_v = (current_font < 0) ? 0.0f : 0.5f / (float)cur_atlas_h;
 
     /* Helper: pixel to NDC */
     #define PX2NDC_X(px) (((float)(px) / (float)vp_w) * 2.0f - 1.0f)
@@ -6206,9 +6708,9 @@ static void vkt_build_vertices(void)
             int run_start = c;
             while (c < TERM_COLS && (ansi_term.grid[r][c].attr.bg & 0x07) == bg)
                 c++;
-            /* Emit one quad for the entire run */
-            float px0 = x_offset + run_start * cw, py0 = top_pad + r * ch;
-            float px1 = x_offset + c * cw,         py1 = py0 + ch;
+            /* Emit one quad for the entire run — use integer grid for gap-free edges */
+            float px0 = (float)col_x[run_start], py0 = (float)row_y[r];
+            float px1 = (float)col_x[c],         py1 = (float)row_y[r + 1];
             /* Alpha 0.75 signals shader to skip color post-processing (hue/sat/etc)
              * so recap/highlighted backgrounds keep their true ANSI color */
             push_quad(PX2NDC_X(px0), PX2NDC_Y(py0), PX2NDC_X(px1), PX2NDC_Y(py1),
@@ -6231,17 +6733,10 @@ static void vkt_build_vertices(void)
                 if (byte == 0 || byte == 32) continue;
                 /* Skip box-drawing chars (they use programmatic rendering) */
                 if (byte >= 0xB0 && byte <= 0xDF) continue;
-                float px0, py0, px1, py1;
-                if (pixel_fnt) {
-                    px0 = floorf(x_offset + c * cw) + sdx;
-                    py0 = floorf(top_pad + r * ch) + sdy;
-                    px1 = floorf(x_offset + (c + 1) * cw) + sdx;
-                    py1 = floorf(top_pad + (r + 1) * ch) + sdy;
-                } else {
-                    px0 = x_offset + c * cw + sdx;
-                    py0 = top_pad + r * ch + sdy;
-                    px1 = px0 + cw; py1 = py0 + ch;
-                }
+                float px0 = (float)col_x[c] + sdx;
+                float py0 = (float)row_y[r] + sdy;
+                float px1 = (float)col_x[c + 1] + sdx;
+                float py1 = (float)row_y[r + 1] + sdy;
                 /* Apply viz displacement if active */
                 if (viz_mode != VIZ_NONE && r < VIZ_ROWS && c < VIZ_COLS) {
                     if (viz_cells[r][c].shattered) continue;
@@ -6332,17 +6827,10 @@ static void vkt_build_vertices(void)
             /* Sample the theme gradient ramp */
             rgb_t col = sample_ramp(&theme_ramps[fg], grad_t);
 
-            float px0, py0, px1, py1;
-            if (pixel_fnt) {
-                px0 = floorf(x_offset + c * cw);
-                py0 = floorf(top_pad + r * ch);
-                px1 = floorf(x_offset + (c + 1) * cw);
-                py1 = floorf(top_pad + (r + 1) * ch);
-            } else {
-                px0 = x_offset + c * cw;
-                py0 = top_pad + r * ch;
-                px1 = px0 + cw; py1 = py0 + ch;
-            }
+            float px0 = (float)col_x[c];
+            float py0 = (float)row_y[r];
+            float px1 = (float)col_x[c + 1];
+            float py1 = (float)row_y[r + 1];
 
             /* Apply viz displacement */
             if (viz_mode != VIZ_NONE && r < VIZ_ROWS && c < VIZ_COLS) {
@@ -6557,6 +7045,9 @@ static void vkt_build_vertices(void)
     /* Draw UI-font elements (status bar + P&L window) — tracked separately */
     pl_quad_start = quad_count;
     vsb_draw(vp_w, vp_h);
+    VIB_BAR_H = (int)(VIB_BAR_H_BASE * ui_scale);
+    vib_cur_bar_y = vib_update_slide(vkm_mouse_y, vp_w);
+    vib_draw(vp_w, vp_h, vib_cur_bar_y);
     vxb_draw(vp_w, vp_h);
     pl_draw(vp_w, vp_h);
     pst_draw(vp_w, vp_h);
@@ -6565,8 +7056,8 @@ static void vkt_build_vertices(void)
     scm_draw(vp_w, vp_h);
     /* Settings panels — draw focused one last (on top) */
     {
-        void (*sp_draws[])(int,int) = { clr_draw, bgp_draw, smk_draw, shd_draw, snd_draw, fnt_draw };
-        int sp_count = 6;
+        void (*sp_draws[])(int,int) = { clr_draw, bgp_draw, smk_draw, shd_draw, snd_draw, fnt_draw, rn_draw };
+        int sp_count = 7;
         for (int i = 0; i < sp_count; i++)
             if (i != sp_focus) sp_draws[i](vp_w, vp_h);
         if (sp_focus >= 0 && sp_focus < sp_count)
@@ -7225,8 +7716,7 @@ static uint8_t *vkt_build_font_pixels(int font_idx, uint32_t *out_w, uint32_t *o
 fallback_bitmap:;
     /* ---- Original CP437 bitmap ---- */
     /* 8x16 bitmap → 9x16 VGA-style cells, 4x nearest-neighbor upscale.
-     * Real VGA uses 9-pixel-wide cells: 9th column blank for most chars,
-     * duplicates column 8 for box-drawing (0xC0-0xDF). */
+     * 9th column blank for most chars, duplicates col 8 for box-drawing. */
     #define FONT_SCALE 4
     #define VGA_CELL_W 9
     uint32_t aw = VGA_CELL_W * 16 * FONT_SCALE, ah = 256 * FONT_SCALE;
@@ -7240,6 +7730,7 @@ fallback_bitmap:;
                 if (col < 8) {
                     lit = (bits & (0x80 >> col)) != 0;
                 } else {
+                    /* 9th column: duplicate col 8 for box-drawing (0xC0-0xDF) */
                     if (g >= 0xC0 && g <= 0xDF)
                         lit = (bits & 0x01) != 0;
                 }
@@ -7353,10 +7844,9 @@ static int vkt_upload_font_texture(uint8_t *pixels, uint32_t atlas_w, uint32_t a
     ivci.subresourceRange = (VkImageSubresourceRange){ VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
     vkCreateImageView(vk_dev, &ivci, NULL, &vk_font_view);
 
-    /* Sampler — NEAREST for bitmap, LINEAR for TTF antialiased */
+    /* Sampler */
     VkSamplerCreateInfo saci = { VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
-    /* NEAREST for crisp pixel fonts (CP437, Px437, Unscii), LINEAR for TTF */
-    VkFilter filt = is_pixel_font(current_font) ? VK_FILTER_NEAREST : VK_FILTER_LINEAR;
+    VkFilter filt = VK_FILTER_LINEAR;
     saci.magFilter = filt;
     saci.minFilter = filt;
     saci.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
@@ -7575,6 +8065,109 @@ static void vkt_init_ui_font(void)
                       ttf_fonts[font_idx].name, aw, ah);
 }
 
+/* ---- Icon atlas init: upload color emoji to Vulkan texture ---- */
+static void vib_init_icon_atlas(void)
+{
+    uint32_t aw = VIB_ICON_ATLAS_W, ah = VIB_ICON_ATLAS_H;
+
+    /* Create VkImage */
+    VkImageCreateInfo ici = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+    ici.imageType = VK_IMAGE_TYPE_2D;
+    ici.format = VK_FORMAT_R8G8B8A8_UNORM;
+    ici.extent = (VkExtent3D){ aw, ah, 1 };
+    ici.mipLevels = 1; ici.arrayLayers = 1;
+    ici.samples = VK_SAMPLE_COUNT_1_BIT;
+    ici.tiling = VK_IMAGE_TILING_LINEAR;
+    ici.usage = VK_IMAGE_USAGE_SAMPLED_BIT;
+    ici.initialLayout = VK_IMAGE_LAYOUT_PREINITIALIZED;
+    vkCreateImage(vk_dev, &ici, NULL, &vib_icon_img);
+
+    VkMemoryRequirements mr;
+    vkGetImageMemoryRequirements(vk_dev, vib_icon_img, &mr);
+    VkMemoryAllocateInfo mai = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+    mai.allocationSize = mr.size;
+    mai.memoryTypeIndex = vk_find_memory(vk_pdev, mr.memoryTypeBits,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    vkAllocateMemory(vk_dev, &mai, NULL, &vib_icon_mem);
+    vkBindImageMemory(vk_dev, vib_icon_img, vib_icon_mem, 0);
+
+    /* Copy pixel data */
+    void *mapped;
+    vkMapMemory(vk_dev, vib_icon_mem, 0, mr.size, 0, &mapped);
+    VkImageSubresource sub = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0 };
+    VkSubresourceLayout layout;
+    vkGetImageSubresourceLayout(vk_dev, vib_icon_img, &sub, &layout);
+    for (uint32_t row = 0; row < ah; row++) {
+        memcpy((uint8_t *)mapped + layout.offset + row * layout.rowPitch,
+               vib_icon_data + row * aw * 4, aw * 4);
+    }
+    vkUnmapMemory(vk_dev, vib_icon_mem);
+
+    /* Transition to SHADER_READ_ONLY_OPTIMAL */
+    VkCommandBuffer tmp_cmd;
+    VkCommandBufferAllocateInfo cbai = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+    cbai.commandPool = vk_cmd_pool;
+    cbai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    cbai.commandBufferCount = 1;
+    vkAllocateCommandBuffers(vk_dev, &cbai, &tmp_cmd);
+    VkCommandBufferBeginInfo cbbi = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+    cbbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(tmp_cmd, &cbbi);
+    VkImageMemoryBarrier imb = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+    imb.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT;
+    imb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    imb.oldLayout = VK_IMAGE_LAYOUT_PREINITIALIZED;
+    imb.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    imb.image = vib_icon_img;
+    imb.subresourceRange = (VkImageSubresourceRange){ VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+    vkCmdPipelineBarrier(tmp_cmd, VK_PIPELINE_STAGE_HOST_BIT,
+                         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0,
+                         0, NULL, 0, NULL, 1, &imb);
+    vkEndCommandBuffer(tmp_cmd);
+    VkFence tmp_fence;
+    VkFenceCreateInfo fci = { VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
+    vkCreateFence(vk_dev, &fci, NULL, &tmp_fence);
+    VkSubmitInfo si2 = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
+    si2.commandBufferCount = 1;
+    si2.pCommandBuffers = &tmp_cmd;
+    vkQueueSubmit(vk_queue, 1, &si2, tmp_fence);
+    vkWaitForFences(vk_dev, 1, &tmp_fence, VK_TRUE, UINT64_MAX);
+    vkDestroyFence(vk_dev, tmp_fence, NULL);
+    vkFreeCommandBuffers(vk_dev, vk_cmd_pool, 1, &tmp_cmd);
+
+    /* Image view */
+    VkImageViewCreateInfo ivci = { VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+    ivci.image = vib_icon_img;
+    ivci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    ivci.format = VK_FORMAT_R8G8B8A8_UNORM;
+    ivci.subresourceRange = (VkImageSubresourceRange){ VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+    vkCreateImageView(vk_dev, &ivci, NULL, &vib_icon_view);
+
+    /* Sampler — LINEAR for smooth scaled emoji */
+    VkSamplerCreateInfo saci = { VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
+    saci.magFilter = VK_FILTER_LINEAR;
+    saci.minFilter = VK_FILTER_LINEAR;
+    saci.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    saci.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    vkCreateSampler(vk_dev, &saci, NULL, &vib_icon_sampler);
+
+    /* Update icon descriptor set */
+    VkDescriptorImageInfo dii = {0};
+    dii.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    dii.imageView = vib_icon_view;
+    dii.sampler = vib_icon_sampler;
+    VkWriteDescriptorSet wds = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+    wds.dstSet = vib_desc_set;
+    wds.dstBinding = 0;
+    wds.descriptorCount = 1;
+    wds.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    wds.pImageInfo = &dii;
+    vkUpdateDescriptorSets(vk_dev, 1, &wds, 0, NULL);
+
+    vib_icon_ready = 1;
+    if (api) api->log("[vk_terminal] Icon atlas ready: %dx%d (%d icons)\n", aw, ah, VIB_ICON_COUNT);
+}
+
 /* Switch font at runtime — called ONLY from inside vkt_render_frame
  * after the fence wait, so previous frame is guaranteed complete.
  * No vkDeviceWaitIdle needed (which can deadlock under Wine FIFO present
@@ -7673,10 +8266,10 @@ static int vkt_create_descriptors(void)
     dslci.pBindings = &binding;
     vkCreateDescriptorSetLayout(vk_dev, &dslci, NULL, &vk_desc_layout);
 
-    /* Pool — 2 sets: main font + UI font */
-    VkDescriptorPoolSize ps = { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2 };
+    /* Pool — 3 sets: main font + UI font + icon atlas */
+    VkDescriptorPoolSize ps = { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 3 };
     VkDescriptorPoolCreateInfo dpci = { VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
-    dpci.maxSets = 2;
+    dpci.maxSets = 3;
     dpci.poolSizeCount = 1;
     dpci.pPoolSizes = &ps;
     vkCreateDescriptorPool(vk_dev, &dpci, NULL, &vk_desc_pool);
@@ -7690,6 +8283,8 @@ static int vkt_create_descriptors(void)
 
     /* Allocate UI font descriptor set */
     vkAllocateDescriptorSets(vk_dev, &dsai, &ui_desc_set);
+    /* Allocate icon atlas descriptor set */
+    vkAllocateDescriptorSets(vk_dev, &dsai, &vib_desc_set);
 
     /* Update with font texture */
     VkDescriptorImageInfo dii = {0};
@@ -7976,7 +8571,7 @@ static int vkt_create_swapchain(void)
         VkPushConstantRange pcr = {0};
         pcr.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
         pcr.offset = 0;
-        pcr.size = sizeof(float) * 21;
+        pcr.size = sizeof(float) * 27;
 
         VkPipelineLayoutCreateInfo lplci = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
         lplci.setLayoutCount = 1;
@@ -7993,7 +8588,7 @@ static int vkt_create_swapchain(void)
 
         VkShaderModuleCreateInfo lfsci = { VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO };
         lfsci.codeSize = liquid_frag_spv_size;
-        lfsci.pCode = liquid_frag_spv;
+        lfsci.pCode = (const uint32_t *)liquid_frag_spv;
         VkShaderModule lfs;
         vkCreateShaderModule(vk_dev, &lfsci, NULL, &lfs);
 
@@ -8023,7 +8618,7 @@ static int vkt_create_swapchain(void)
         VkPushConstantRange pcr = {0};
         pcr.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
         pcr.offset = 0;
-        pcr.size = sizeof(float) * 21; /* BG shader push constants */
+        pcr.size = sizeof(float) * 27; /* BG shader push constants */
 
         VkPipelineLayoutCreateInfo bplci = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
         bplci.setLayoutCount = 1;
@@ -8141,7 +8736,10 @@ static void vkt_render_frame(void)
     vkCmdBeginRenderPass(vk_cmd_buf, &rpbi, VK_SUBPASS_CONTENTS_INLINE);
 
     int pp_active = (pp_brightness != 0.0f || pp_contrast != 1.0f || pp_hue != 0.0f || pp_saturation != 1.0f);
-    int fx_active = (fx_liquid_mode || fx_waves_mode || fx_scanline_mode || fx_fbm_mode || fx_sobel_mode || fx_smoky_mode || fx_shadow_mode || pp_active) && vk_liquid_pipeline;
+    int fx_active = (fx_liquid_mode || fx_waves_mode || fx_scanline_mode || fx_fbm_mode || fx_sobel_mode || fx_smoky_mode || fx_shadow_mode || fx_rain_mode || pp_active) && vk_liquid_pipeline;
+    /* Bitmap-style fonts use the liquid pipeline but the shader guards
+     * neighbor-sampling passes (shadow blur, liquid letters, dark outline,
+     * sobel) via the is_pixel_font push constant to prevent artifact lines. */
 
     VkDeviceSize offset = 0;
     vkCmdBindVertexBuffers(vk_cmd_buf, 0, 1, &vk_vbuf, &offset);
@@ -8194,7 +8792,7 @@ static void vkt_render_frame(void)
         vkCmdBindPipeline(vk_cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS, vk_liquid_pipeline);
         vkCmdBindDescriptorSets(vk_cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                 vk_liquid_pipe_layout, 0, 1, &vk_desc_set, 0, NULL);
-        float pc_data[21] = { fx_time,
+        float pc_data[27] = { fx_time,
                               fx_liquid_mode ? 1.0f : 0.0f,
                               fx_waves_mode ? 1.0f : 0.0f,
                               fx_scanline_mode ? 1.0f : 0.0f,
@@ -8206,7 +8804,10 @@ static void vkt_render_frame(void)
                               smoke_hue, smoke_saturation, smoke_value,
                               last_cw_px, last_ch_px,
                               fx_shadow_mode ? shadow_opacity : 0.0f,
-                              shadow_blur };
+                              shadow_blur,
+                              is_pixel_font(current_font) ? 1.0f : 0.0f,
+                              fx_rain_mode ? 1.0f : 0.0f,
+                              rain_size, rain_speed, rain_freq, rain_warp };
         vkCmdPushConstants(vk_cmd_buf, vk_liquid_pipe_layout,
                            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                            0, sizeof(pc_data), pc_data);
@@ -8221,23 +8822,37 @@ static void vkt_render_frame(void)
             if (chrome_quads > 0)
                 vkCmdDrawIndexed(vk_cmd_buf, chrome_quads * 6, 1, fx_split_quad * 6, 0, 0);
         }
-        /* Draw 3: P&L window with UI font atlas (or main font if UI font unavailable) */
+        /* Draw 3: UI chrome with UI font atlas — split around icon bar quads */
         {
-            int pl_quads = pl_quad_end - pl_quad_start;
-            if (pl_quads > 0) {
-                if (ui_font_ready)
+            if (ui_font_ready)
+                vkCmdBindDescriptorSets(vk_cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                        vk_pipe_layout, 0, 1, &ui_desc_set, 0, NULL);
+            /* 3a: UI quads before icon bar */
+            int pre_icon = vib_quad_start - pl_quad_start;
+            if (pre_icon > 0)
+                vkCmdDrawIndexed(vk_cmd_buf, pre_icon * 6, 1, pl_quad_start * 6, 0, 0);
+            /* 3b: Icon bar emoji quads with icon atlas */
+            int icon_quads = vib_quad_end - vib_quad_start;
+            if (icon_quads > 0 && vib_icon_ready) {
+                vkCmdBindDescriptorSets(vk_cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                        vk_pipe_layout, 0, 1, &vib_desc_set, 0, NULL);
+                vkCmdDrawIndexed(vk_cmd_buf, icon_quads * 6, 1, vib_quad_start * 6, 0, 0);
+            }
+            /* 3c: UI quads after icon bar (P&L, settings, etc.) */
+            int post_icon = pl_quad_end - vib_quad_end;
+            if (post_icon > 0) {
+                if (icon_quads > 0 && vib_icon_ready)
                     vkCmdBindDescriptorSets(vk_cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                             vk_pipe_layout, 0, 1, &ui_desc_set, 0, NULL);
-                vkCmdDrawIndexed(vk_cmd_buf, pl_quads * 6, 1, pl_quad_start * 6, 0, 0);
+                vkCmdDrawIndexed(vk_cmd_buf, post_icon * 6, 1, vib_quad_end * 6, 0, 0);
             }
         }
         /* Draw 4: Context menu (back to main font, drawn last = on top) */
         {
             int menu_quads = quad_count - pl_quad_end;
             if (menu_quads > 0) {
-                if (ui_font_ready) /* rebind main font */
-                    vkCmdBindDescriptorSets(vk_cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                            vk_pipe_layout, 0, 1, &vk_desc_set, 0, NULL);
+                vkCmdBindDescriptorSets(vk_cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                        vk_pipe_layout, 0, 1, &vk_desc_set, 0, NULL);
                 vkCmdDrawIndexed(vk_cmd_buf, menu_quads * 6, 1, pl_quad_end * 6, 0, 0);
             }
         }
@@ -8247,7 +8862,7 @@ static void vkt_render_frame(void)
             vkCmdBindPipeline(vk_cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS, vk_liquid_pipeline);
             vkCmdBindDescriptorSets(vk_cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                     vk_liquid_pipe_layout, 0, 1, &vk_desc_set, 0, NULL);
-            float pc_data[21] = { fx_time,
+            float pc_data[27] = { fx_time,
                                   fx_liquid_mode ? 1.0f : 0.0f,
                                   fx_waves_mode ? 1.0f : 0.0f,
                                   fx_scanline_mode ? 1.0f : 0.0f,
@@ -8259,7 +8874,10 @@ static void vkt_render_frame(void)
                                   smoke_hue, smoke_saturation, smoke_value,
                                   0.0f, 0.0f, /* cw/ch not needed */
                                   fx_shadow_mode ? shadow_opacity : 0.0f,
-                                  shadow_blur };
+                                  shadow_blur,
+                                  is_pixel_font(current_font) ? 1.0f : 0.0f,
+                                  fx_rain_mode ? 1.0f : 0.0f,
+                                  rain_size, rain_speed, rain_freq, rain_warp };
             vkCmdPushConstants(vk_cmd_buf, vk_liquid_pipe_layout,
                                VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                                0, sizeof(pc_data), pc_data);
@@ -8271,26 +8889,39 @@ static void vkt_render_frame(void)
         /* Draw terminal + UI chrome up to P&L (skip bg quads) */
         if (pl_quad_start > term_start)
             vkCmdDrawIndexed(vk_cmd_buf, (pl_quad_start - term_start) * 6, 1, term_start * 6, 0, 0);
-        /* P&L with UI font */
+        /* UI chrome with UI font — split around icon bar quads */
         {
-            int pl_quads = pl_quad_end - pl_quad_start;
-            if (pl_quads > 0) {
-                if (ui_font_ready) {
-                    vkCmdBindPipeline(vk_cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS, vk_pipeline);
+            if (ui_font_ready) {
+                vkCmdBindPipeline(vk_cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS, vk_pipeline);
+                vkCmdBindDescriptorSets(vk_cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                        vk_pipe_layout, 0, 1, &ui_desc_set, 0, NULL);
+            }
+            /* Pre-icon UI quads */
+            int pre_icon = vib_quad_start - pl_quad_start;
+            if (pre_icon > 0)
+                vkCmdDrawIndexed(vk_cmd_buf, pre_icon * 6, 1, pl_quad_start * 6, 0, 0);
+            /* Icon bar emoji quads with icon atlas */
+            int icon_quads = vib_quad_end - vib_quad_start;
+            if (icon_quads > 0 && vib_icon_ready) {
+                vkCmdBindDescriptorSets(vk_cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                        vk_pipe_layout, 0, 1, &vib_desc_set, 0, NULL);
+                vkCmdDrawIndexed(vk_cmd_buf, icon_quads * 6, 1, vib_quad_start * 6, 0, 0);
+            }
+            /* Post-icon UI quads */
+            int post_icon = pl_quad_end - vib_quad_end;
+            if (post_icon > 0) {
+                if (icon_quads > 0 && vib_icon_ready)
                     vkCmdBindDescriptorSets(vk_cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                             vk_pipe_layout, 0, 1, &ui_desc_set, 0, NULL);
-                }
-                vkCmdDrawIndexed(vk_cmd_buf, pl_quads * 6, 1, pl_quad_start * 6, 0, 0);
+                vkCmdDrawIndexed(vk_cmd_buf, post_icon * 6, 1, vib_quad_end * 6, 0, 0);
             }
         }
         /* Menu quads (back to main font) */
         {
             int menu_quads = quad_count - pl_quad_end;
             if (menu_quads > 0) {
-                if (ui_font_ready) {
-                    vkCmdBindDescriptorSets(vk_cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                            vk_pipe_layout, 0, 1, &vk_desc_set, 0, NULL);
-                }
+                vkCmdBindDescriptorSets(vk_cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                        vk_pipe_layout, 0, 1, &vk_desc_set, 0, NULL);
                 vkCmdDrawIndexed(vk_cmd_buf, menu_quads * 6, 1, pl_quad_end * 6, 0, 0);
             }
         }
@@ -8587,6 +9218,10 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             smk_mouse_move(mx2, my2);
             return 0;
         }
+        if (rn_dragging || rn_active_slider >= 0) {
+            rn_mouse_move(mx2, my2);
+            return 0;
+        }
         if (shd_dragging || shd_active_slider >= 0) {
             shd_mouse_move(mx2, my2);
             return 0;
@@ -8630,6 +9265,12 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 vkw_ctx_hover = (my2 - cy2 - 2) / item_h2;
             else
                 vkw_ctx_hover = -1;
+        }
+        /* Icon bar hover */
+        {
+            int vh = vib_hit_test(mx2, my2, vib_cur_bar_y);
+            vib_pin_hover = (vh == VIB_HIT_PIN);
+            vib_hover = (vh >= 0) ? vh : -1;
         }
         /* Round timer context menu hover */
         if (vrt_ctx_open) {
@@ -8867,17 +9508,26 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         if (bsp_mouse_down(mx, my)) return 0;
         /* MUDRadio panel click */
         if (mr_mouse_down(mx, my)) return 0;
+        /* Icon bar click (includes pin button at -2) */
+        {
+            int bi = vib_hit_test(mx, my, vib_cur_bar_y);
+            if (bi >= 0 || bi == VIB_HIT_PIN) {
+                vib_pressed = bi;
+                vib_last_interact = GetTickCount();
+                return 0;
+            }
+        }
         /* Settings panels — check focused one first for z-order consistency */
         {
             struct { int (*fn)(int,int); int idx; } sp[] = {
-                { clr_mouse_down, 0 }, { bgp_mouse_down, 1 }, { smk_mouse_down, 2 }, { shd_mouse_down, 3 }, { snd_mouse_down, 4 }, { fnt_mouse_down, 5 }
+                { clr_mouse_down, 0 }, { bgp_mouse_down, 1 }, { smk_mouse_down, 2 }, { shd_mouse_down, 3 }, { snd_mouse_down, 4 }, { fnt_mouse_down, 5 }, { rn_mouse_down, 6 }
             };
             /* Check focused panel first */
-            if (sp_focus >= 0 && sp_focus < 6 && sp[sp_focus].fn(mx, my)) {
+            if (sp_focus >= 0 && sp_focus < 7 && sp[sp_focus].fn(mx, my)) {
                 return 0;
             }
             /* Then check others */
-            for (int i = 0; i < 6; i++) {
+            for (int i = 0; i < 7; i++) {
                 if (i != sp_focus && sp[i].fn(mx, my)) {
                     sp_focus = i;
                     return 0;
@@ -8958,12 +9608,24 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         if (clr_dragging || clr_active_slider >= 0) { clr_mouse_up(); return 0; }
         if (bgp_dragging || bgp_active_slider >= 0) { bgp_mouse_up(); return 0; }
         if (smk_dragging || smk_active_slider >= 0) { smk_mouse_up(); return 0; }
+        if (rn_dragging || rn_active_slider >= 0) { rn_mouse_up(); return 0; }
         if (shd_dragging || shd_active_slider >= 0) { shd_mouse_up(); return 0; }
         if (snd_dragging || snd_active_slider >= 0) { snd_mouse_up(); return 0; }
         if (fnt_dragging || fnt_active_slider >= 0) { fnt_mouse_up(); return 0; }
         if (pst_dragging) { pst_dragging = 0; return 0; }
         if (bsp_dragging || bsp_resizing || bsp_selecting) { bsp_mouse_up(); return 0; }
         if (vrt_dragging) { vrt_dragging = 0; return 0; }
+        /* Icon bar: fire click on button release */
+        if (vib_pressed >= 0 || vib_pressed == VIB_HIT_PIN) {
+            int bi = vib_hit_test(mx, my, vib_cur_bar_y);
+            if (bi == VIB_HIT_PIN && vib_pressed == VIB_HIT_PIN) {
+                vib_pinned = !vib_pinned;
+            } else if (bi >= 0 && bi == vib_pressed) {
+                vib_click(bi);
+            }
+            vib_pressed = -1;
+            return 0;
+        }
         vkw_mouse_up(); /* end any drag/resize */
 
         if (!vkm_open) return 0;
@@ -8998,6 +9660,8 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 mr_toggle();
             } else if (si == VKM_WID_BSCROLL) {
                 bsp_toggle((int)vk_sc_extent.width, (int)vk_sc_extent.height);
+            } else if (si == VKM_WID_ICONBAR) {
+                vib_visible = !vib_visible;
             }
             vkm_open = 0;
             vkm_sub = VKM_SUB_NONE;
@@ -9036,6 +9700,7 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                                   fx_liquid_mode ? "ON" : "OFF");
             } else if (si == VKM_FX_WAVES) {
                 fx_waves_mode = !fx_waves_mode;
+                if (fx_waves_mode) { fx_rain_mode = 0; rn_visible = 0; }
                 if (api) api->log("[vk_terminal] Diagonal Waves: %s\n",
                                   fx_waves_mode ? "ON" : "OFF");
             } else if (si == VKM_FX_FBM) {
@@ -9056,6 +9721,15 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 if (!fx_smoky_mode) smk_visible = 0;
                 if (api) api->log("[vk_terminal] Smoky Letters: %s\n",
                                   fx_smoky_mode ? "ON" : "OFF");
+            } else if (si == VKM_FX_RAIN) {
+                fx_rain_mode = !fx_rain_mode;
+                if (fx_rain_mode) {
+                    fx_waves_mode = 0; /* mutually exclusive */
+                    if (!rn_visible) { rn_visible = 1; sp_focus = 6; }
+                }
+                if (!fx_rain_mode) rn_visible = 0;
+                if (api) api->log("[vk_terminal] Rain Drops: %s\n",
+                                  fx_rain_mode ? "ON" : "OFF");
             } else if (si == VKM_FX_SHADOW) {
                 fx_shadow_mode = !fx_shadow_mode;
                 if (fx_shadow_mode && !shd_visible) { shd_visible = 1; sp_focus = 3; }
@@ -9269,6 +9943,12 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             int wmy = mouse_ty((short)HIWORD(lParam));
             int wd = (short)HIWORD(wParam);
             if (mr_scroll_wheel(wmx, wmy, wd)) return 0;
+        }
+        /* Scroll font panel */
+        if (fnt_visible) {
+            int wmx = mouse_tx((short)LOWORD(lParam));
+            int wmy = mouse_ty((short)HIWORD(lParam));
+            int wd = (short)HIWORD(wParam);
             if (fnt_scroll_wheel(wmx, wmy, wd > 0 ? 1 : -1)) return 0;
         }
         /* Scroll backscroll panel */
@@ -9372,6 +10052,7 @@ static DWORD WINAPI vkt_thread(LPVOID param)
     if (vkt_create_buffers() != 0) return 1;
     if (vkt_create_descriptors() != 0) return 1;
     vkt_init_ui_font();
+    vib_init_icon_atlas();
 
     /* Register window class */
     WNDCLASSA wc = {0};
@@ -9548,6 +10229,13 @@ static void vkt_cleanup_vulkan(void)
     if (ui_font_img) { vkDestroyImage(vk_dev, ui_font_img, NULL); ui_font_img = VK_NULL_HANDLE; }
     if (ui_font_mem) { vkFreeMemory(vk_dev, ui_font_mem, NULL); ui_font_mem = VK_NULL_HANDLE; }
     ui_font_ready = 0;
+
+    /* Icon atlas cleanup */
+    if (vib_icon_sampler) { vkDestroySampler(vk_dev, vib_icon_sampler, NULL); vib_icon_sampler = VK_NULL_HANDLE; }
+    if (vib_icon_view) { vkDestroyImageView(vk_dev, vib_icon_view, NULL); vib_icon_view = VK_NULL_HANDLE; }
+    if (vib_icon_img) { vkDestroyImage(vk_dev, vib_icon_img, NULL); vib_icon_img = VK_NULL_HANDLE; }
+    if (vib_icon_mem) { vkFreeMemory(vk_dev, vib_icon_mem, NULL); vib_icon_mem = VK_NULL_HANDLE; }
+    vib_icon_ready = 0;
 
     if (vk_desc_pool) { vkDestroyDescriptorPool(vk_dev, vk_desc_pool, NULL); vk_desc_pool = VK_NULL_HANDLE; }
     if (vk_desc_layout) { vkDestroyDescriptorSetLayout(vk_dev, vk_desc_layout, NULL); vk_desc_layout = VK_NULL_HANDLE; }
@@ -9801,7 +10489,13 @@ static void pst_parse_line(const char *line)
         const char *yg = strstr(line, "You gain ");
         if (yg && strstr(yg, " experience")) {
             int val = atoi(yg + 9); /* "You gain " = 9 chars */
-            if (val > 0) pst_s.exp_gained += val;
+            if (val > 0) {
+                pst_s.exp_gained += val;
+                /* Update status bar exp rate */
+                DWORD ems = GetTickCount() - pst_s.exp_start_tick;
+                if (ems > 5000)
+                    vsb_exp_rate = pst_s.exp_gained * 3600000LL / (__int64)ems;
+            }
             return;
         }
     }
@@ -9977,6 +10671,7 @@ static void pst_reset_exp(void) {
     pst_s.exp_start_tick = GetTickCount();
     pst_s.exp_gained = 0;
     pst_s.kills = 0;
+    vsb_exp_rate = 0;
 }
 
 static void pst_reset_combat(void) {
@@ -12651,6 +13346,150 @@ static void smk_mouse_up(void) {
     smk_active_slider = -1;
 }
 
+/* ============ Rain Drops Settings Panel ============ */
+
+static void rn_draw(int vp_w, int vp_h) {
+    if (!rn_visible) return;
+    if (!rn_scaled) { rn_w = 280*ui_scale; rn_h = 200*ui_scale; rn_x = 40*ui_scale; rn_y = 100*ui_scale; rn_scaled = 1; }
+    const ui_theme_t *t = &ui_themes[current_theme];
+    int cw = (int)(VKM_CHAR_W * ui_scale), ch = (int)(VKM_CHAR_H * ui_scale);
+    float x0 = rn_x, y0 = rn_y;
+    float pw = rn_w;
+    int titlebar_h = ch + 8;
+
+    rn_slider_ptr[0] = &rain_size;
+    rn_slider_ptr[1] = &rain_speed;
+    rn_slider_ptr[2] = &rain_freq;
+    rn_slider_ptr[3] = &rain_warp;
+
+    push_solid((int)x0, (int)y0, (int)(x0 + pw), (int)(y0 + rn_h),
+               t->bg[0], t->bg[1], t->bg[2], 0.92f, vp_w, vp_h);
+    push_solid((int)x0, (int)y0, (int)(x0 + pw), (int)(y0 + 1),
+               t->accent[0], t->accent[1], t->accent[2], 0.6f, vp_w, vp_h);
+    push_solid((int)x0, (int)(y0 + rn_h - 1), (int)(x0 + pw), (int)(y0 + rn_h),
+               t->accent[0], t->accent[1], t->accent[2], 0.6f, vp_w, vp_h);
+    push_solid((int)x0, (int)y0, (int)(x0 + 1), (int)(y0 + rn_h),
+               t->accent[0], t->accent[1], t->accent[2], 0.6f, vp_w, vp_h);
+    push_solid((int)(x0 + pw - 1), (int)y0, (int)(x0 + pw), (int)(y0 + rn_h),
+               t->accent[0], t->accent[1], t->accent[2], 0.6f, vp_w, vp_h);
+
+    {
+        float acr = t->accent[0], acg = t->accent[1], acb = t->accent[2];
+        float tbr = acr * 0.25f + t->bg[0] * 0.5f;
+        float tbg = acg * 0.25f + t->bg[1] * 0.5f;
+        float tbb = acb * 0.25f + t->bg[2] * 0.5f;
+        int ty0 = (int)y0 + 2, ty1 = (int)y0 + titlebar_h;
+        push_solid((int)x0 + 2, ty0, (int)(x0 + pw) - 2, ty1,
+                   tbr, tbg, tbb, 0.95f, vp_w, vp_h);
+        push_solid((int)x0 + 2, ty0, (int)(x0 + pw) - 2, ty0 + titlebar_h / 2,
+                   1.0f, 1.0f, 1.0f, 0.06f, vp_w, vp_h);
+        push_solid((int)x0 + 2, ty1 - 1, (int)(x0 + pw) - 2, ty1,
+                   acr, acg, acb, 0.5f, vp_w, vp_h);
+    }
+    push_text((int)(x0 + 6) + 1, (int)(y0 + 4) + 1, "Rain Drops",
+              0.0f, 0.0f, 0.0f, vp_w, vp_h, cw, ch);
+    push_text((int)(x0 + 6), (int)(y0 + 4), "Rain Drops",
+              t->text[0], t->text[1], t->text[2], vp_w, vp_h, cw, ch);
+    push_text((int)(x0 + pw - 16), (int)(y0 + 4), "X",
+              t->text[0] * 0.6f, t->text[1] * 0.6f, t->text[2] * 0.6f, vp_w, vp_h, cw, ch);
+    push_text((int)(x0 + pw - 55), (int)(y0 + 4), "Reset",
+              t->text[0] * 0.5f, t->text[1] * 0.5f, t->text[2] * 0.5f, vp_w, vp_h, cw, ch);
+
+    float cy = y0 + titlebar_h + 12;
+    float row_h = ch + 14;
+    char vbuf[32];
+
+    for (int i = 0; i < RN_SLIDER_COUNT; i++) {
+        float val = *rn_slider_ptr[i];
+        _snprintf(vbuf, sizeof(vbuf), "%.3f", val);
+        clr_draw_slider(x0 + 8, cy, pw - 16, row_h, val,
+                        rn_slider_min[i], rn_slider_max[i],
+                        rn_labels[i], vbuf, vp_w, vp_h, t);
+        cy += row_h;
+    }
+
+    rn_h = cy - y0 + 8;
+}
+
+static int rn_hit_slider(int mx, int my, float *out_pct) {
+    int cw = (int)(VKM_CHAR_W * ui_scale), ch = (int)(VKM_CHAR_H * ui_scale);
+    int titlebar_h = ch + 8;
+    float row_h = ch + 14;
+    float sx0 = rn_x + 8 + 110;
+    float sx1 = rn_x + rn_w - 16 - 50 + 8;
+    for (int i = 0; i < RN_SLIDER_COUNT; i++) {
+        float sy = rn_y + titlebar_h + 12 + i * row_h;
+        if (my >= (int)sy && my < (int)(sy + row_h) &&
+            mx >= (int)(sx0 - 4) && mx <= (int)(sx1 + 4)) {
+            float pct = ((float)mx - sx0) / (sx1 - sx0);
+            if (pct < 0) pct = 0; if (pct > 1) pct = 1;
+            *out_pct = pct;
+            return i;
+        }
+    }
+    return -1;
+}
+
+static void rn_set_from_pct(int slider, float pct) {
+    if (slider < 0 || slider >= RN_SLIDER_COUNT) return;
+    float val = rn_slider_min[slider] + pct * (rn_slider_max[slider] - rn_slider_min[slider]);
+    *rn_slider_ptr[slider] = val;
+}
+
+static int rn_mouse_down(int mx, int my) {
+    if (!rn_visible) return 0;
+    if (mx < (int)rn_x || mx >= (int)(rn_x + rn_w) ||
+        my < (int)rn_y || my >= (int)(rn_y + rn_h)) return 0;
+    int ch = (int)(VKM_CHAR_H * ui_scale);
+    int titlebar_h = ch + 8;
+    int ly = my - (int)rn_y;
+    if (ly < titlebar_h && mx >= (int)(rn_x + rn_w - 20)) {
+        rn_visible = 0;
+        return 1;
+    }
+    if (ly < titlebar_h && mx >= (int)(rn_x + rn_w - 60) && mx < (int)(rn_x + rn_w - 20)) {
+        rain_size = 0.06f; rain_speed = 1.0f;
+        rain_freq = 3.0f; rain_warp = 0.02f;
+        return 1;
+    }
+    if (ly < titlebar_h) {
+        rn_dragging = 1;
+        rn_drag_ox = (float)mx - rn_x;
+        rn_drag_oy = (float)my - rn_y;
+        sp_focus = 6;
+        return 1;
+    }
+    float pct;
+    int s = rn_hit_slider(mx, my, &pct);
+    if (s >= 0) {
+        rn_active_slider = s;
+        rn_set_from_pct(s, pct);
+        sp_focus = 6;
+        return 1;
+    }
+    return 1;
+}
+
+static void rn_mouse_move(int mx, int my) {
+    if (rn_dragging) {
+        rn_x = (float)mx - rn_drag_ox;
+        rn_y = (float)my - rn_drag_oy;
+        return;
+    }
+    if (rn_active_slider >= 0) {
+        float sx0 = rn_x + 8 + 110;
+        float sx1 = rn_x + rn_w - 16 - 50 + 8;
+        float pct = ((float)mx - sx0) / (sx1 - sx0);
+        if (pct < 0) pct = 0; if (pct > 1) pct = 1;
+        rn_set_from_pct(rn_active_slider, pct);
+    }
+}
+
+static void rn_mouse_up(void) {
+    rn_dragging = 0;
+    rn_active_slider = -1;
+}
+
 /* ============ Drop Shadow Settings Panel ============ */
 
 static int shd_scaled = 0;
@@ -13221,9 +14060,16 @@ static void vkt_save_settings(void)
     SAVE_INT("fx_smoky", fx_smoky_mode);
     SAVE_INT("fx_shadow", fx_shadow_mode);
     SAVE_INT("fx_wobble", fx_wobble_mode);
+    SAVE_INT("fx_rain", fx_rain_mode);
+    SAVE_FLOAT("rain_size", rain_size);
+    SAVE_FLOAT("rain_speed", rain_speed);
+    SAVE_FLOAT("rain_freq", rain_freq);
+    SAVE_FLOAT("rain_warp", rain_warp);
     SAVE_INT("round_timer", vrt_visible);
     SAVE_INT("vrt_orbits", vrt_orbits_visible);
     SAVE_INT("status_bar", vsb_visible);
+    SAVE_INT("icon_bar", vib_visible);
+    SAVE_INT("icon_bar_pin", vib_pinned);
     SAVE_INT("exp_bar", vxb_visible);
     SAVE_INT("player_stats", pst_visible);
     SAVE_INT("round_recap", pst_round_recap);
@@ -13310,9 +14156,17 @@ static void vkt_load_settings(void)
     LOAD_INT("fx_scanlines", fx_scanline_mode, 0);
     LOAD_INT("fx_smoky", fx_smoky_mode, 0);
     LOAD_INT("fx_wobble", fx_wobble_mode, 0);
+    LOAD_INT("fx_rain", fx_rain_mode, 0);
+    LOAD_FLOAT("rain_size", rain_size, 0.06);
+    LOAD_FLOAT("rain_speed", rain_speed, 1.0);
+    LOAD_FLOAT("rain_freq", rain_freq, 3.0);
+    LOAD_FLOAT("rain_warp", rain_warp, 0.02);
+    if (fx_rain_mode && fx_waves_mode) fx_waves_mode = 0; /* enforce exclusivity */
     LOAD_INT("round_timer", vrt_visible, 0);
     LOAD_INT("vrt_orbits", vrt_orbits_visible, 1);
     LOAD_INT("status_bar", vsb_visible, 0);
+    LOAD_INT("icon_bar", vib_visible, 0);
+    LOAD_INT("icon_bar_pin", vib_pinned, 1);
     LOAD_INT("exp_bar", vxb_visible, 0);
     LOAD_INT("player_stats", pst_visible, 0);
     LOAD_INT("round_recap", pst_round_recap, 1);
@@ -13408,9 +14262,14 @@ static void vkt_reset_settings(void)
     shadow_blur = 1.0f;
     shadow_r = shadow_g = shadow_b = 0.0f;
     shd_visible = 0;
+    fx_rain_mode = 0;
+    rain_size = 0.06f; rain_speed = 1.0f;
+    rain_freq = 3.0f; rain_warp = 0.02f;
+    rn_visible = 0;
     fx_wobble_mode = 0;
     vrt_visible = 0;
     vsb_visible = 0;
+    vib_visible = 0;
     vxb_visible = 0;
     pst_visible = 0;
     pst_round_recap = 1;
