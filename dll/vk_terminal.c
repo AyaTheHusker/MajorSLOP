@@ -10522,16 +10522,15 @@ static void pst_parse_line(const char *line)
 
     /* --- Player Hit (line contains " damage!") --- */
     if (pst_contains(line, " damage!")) {
-        /* Is this us hitting a monster, or a monster hitting us? */
+        /* Is this us hitting a monster, or a monster hitting us?
+         * Enemy lines contain " you " before " damage!" (e.g. "impales you with") */
         const char *dmg_pos = strstr(line, " damage!");
-        int is_monster_hit = 0;
         if (dmg_pos) {
-            const char *yf = strstr(line, " you for ");
-            if (yf && yf < dmg_pos) is_monster_hit = 1;
-            const char *hy = strstr(line, " you!");
-            if (hy) is_monster_hit = 1;
+            const char *yu = strstr(line, " you ");
+            if (yu && yu < dmg_pos) return; /* enemy hit on us */
+            const char *yf = strstr(line, " you!");
+            if (yf) return;
         }
-        if (is_monster_hit) return; /* don't track monster hits on us */
 
         /* Player hit — parse damage and categorize */
         int dmg = pst_parse_dmg(line);
