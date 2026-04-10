@@ -109,7 +109,7 @@ static const ui_theme_t ui_themes[NUM_THEMES] = {
     {"Jorah",          F3(8,12,28),    F3(176,192,232), F3(85,102,170),  F3(51,102,204)},
     {"Putakwa",        F3(6,16,14),    F3(160,216,200), F3(68,136,102),  F3(34,170,136)},
     {"Void",           F3(14,6,24),    F3(208,176,232), F3(119,68,170),  F3(136,68,204)},
-    {"Ozzrinom",       F3(16,6,8),     F3(224,176,176), F3(136,68,68),   F3(204,51,68)},
+    {"Ozzrinom",       F3(12,4,4),     F3(200,180,180), F3(120,50,50),   F3(180,20,20)},
     {"Phoenix",        F3(16,8,4),     F3(232,208,168), F3(136,102,64),  F3(221,102,34)},
     {"Mad Wizard",     F3(10,6,20),    F3(224,240,255), F3(102,170,204), F3(0,238,255)},
     {"Tasloi",         F3(10,16,8),    F3(192,216,160), F3(102,136,68),  F3(68,170,34)},
@@ -245,16 +245,16 @@ static void apply_theme_palette(int theme_idx)
 
     static const float specs[NUM_THEMES][8][5][4] = {
 
-    /* 0: Classic ANSI — exact standard ANSI colors, no tinting */
+    /* 0: Classic ANSI — standard ANSI colors, dim=0.42 bright=1.0 via 2.4x boost */
     {
      /*blk*/ {KF(0,0,0.0,0.02), KF(1,0,0.0,0.02), {0},{0},{0}},
-     /*red*/ {KF(0,0,1.0,0.67), KF(1,0,1.0,0.67), {0},{0},{0}},
-     /*grn*/ {KF(0,120,1.0,0.67), KF(1,120,1.0,0.67), {0},{0},{0}},
-     /*brn*/ {KF(0,30,1.0,0.67), KF(1,30,1.0,0.67), {0},{0},{0}},
-     /*blu*/ {KF(0,240,1.0,0.67), KF(1,240,1.0,0.67), {0},{0},{0}},
-     /*mag*/ {KF(0,300,1.0,0.67), KF(1,300,1.0,0.67), {0},{0},{0}},
-     /*cyn*/ {KF(0,180,1.0,0.67), KF(1,180,1.0,0.67), {0},{0},{0}},
-     /*wht*/ {KF(0,0,0.0,0.67), KF(1,0,0.0,0.67), {0},{0},{0}},
+     /*red*/ {KF(0,0,1.0,0.42), KF(1,0,1.0,0.42), {0},{0},{0}},
+     /*grn*/ {KF(0,120,1.0,0.42), KF(1,120,1.0,0.42), {0},{0},{0}},
+     /*brn*/ {KF(0,30,1.0,0.42), KF(1,30,1.0,0.42), {0},{0},{0}},
+     /*blu*/ {KF(0,240,1.0,0.42), KF(1,240,1.0,0.42), {0},{0},{0}},
+     /*mag*/ {KF(0,300,1.0,0.42), KF(1,300,1.0,0.42), {0},{0},{0}},
+     /*cyn*/ {KF(0,180,1.0,0.42), KF(1,180,1.0,0.42), {0},{0},{0}},
+     /*wht*/ {KF(0,0,0.0,0.42), KF(1,0,0.0,0.42), {0},{0},{0}},
     },
 
     /* 1: Grey Lord — cold steel blues, icy silvers */
@@ -353,16 +353,16 @@ static void apply_theme_palette(int theme_idx)
      {KF(0,278,0.1,0.68), KF(0.4,285,0.12,0.78), KF(0.7,290,0.08,0.82), KF(1,282,0.06,0.72), {0}},
     },
 
-    /* 9: Ozzrinom — crimson blood, dark ruby, embers */
+    /* 9: Ozzrinom — vampire blood red, dark grey/blacks only */
     {
-     {KF(0,355,0.15,0.03), KF(1,0,0.15,0.05), {0},{0},{0}},
-     {KF(0,350,0.75,0.55), KF(0.3,0,0.8,0.68), KF(0.6,10,0.75,0.72), KF(0.8,5,0.7,0.65), KF(1,355,0.65,0.58)},
-     {KF(0,20,0.6,0.48), KF(0.4,30,0.65,0.58), KF(0.7,40,0.6,0.55), KF(1,28,0.55,0.50), {0}},
-     {KF(0,15,0.65,0.52), KF(0.5,25,0.7,0.62), KF(1,20,0.6,0.55), {0},{0}},
-     {KF(0,335,0.55,0.42), KF(0.4,345,0.6,0.52), KF(0.7,355,0.55,0.48), KF(1,340,0.5,0.44), {0}},
-     {KF(0,310,0.6,0.48), KF(0.4,320,0.65,0.58), KF(0.7,330,0.6,0.55), KF(1,318,0.55,0.50), {0}},
-     {KF(0,5,0.5,0.55), KF(0.4,15,0.55,0.65), KF(0.7,25,0.5,0.62), KF(1,12,0.45,0.58), {0}},
-     {KF(0,358,0.1,0.70), KF(0.4,2,0.15,0.80), KF(0.7,5,0.1,0.82), KF(1,0,0.08,0.75), {0}},
+     /*blk*/ {KF(0,355,0.12,0.03), KF(1,0,0.12,0.04), {0},{0},{0}},
+     /*red*/ {KF(0,355,0.80,0.45), KF(0.3,0,0.85,0.55), KF(0.6,5,0.80,0.60), KF(0.8,0,0.75,0.50), KF(1,355,0.70,0.45)},
+     /*grn*/ {KF(0,350,0.45,0.35), KF(0.4,355,0.50,0.42), KF(0.7,0,0.45,0.40), KF(1,352,0.40,0.35), {0}},
+     /*brn*/ {KF(0,352,0.50,0.38), KF(0.5,358,0.55,0.45), KF(1,355,0.48,0.40), {0},{0}},
+     /*blu*/ {KF(0,348,0.40,0.30), KF(0.3,352,0.45,0.38), KF(0.6,356,0.42,0.35), KF(1,350,0.38,0.30), {0}},
+     /*mag*/ {KF(0,345,0.55,0.40), KF(0.4,350,0.60,0.48), KF(0.7,355,0.55,0.45), KF(1,348,0.50,0.40), {0}},
+     /*cyn*/ {KF(0,355,0.30,0.35), KF(0.4,0,0.35,0.42), KF(0.7,5,0.32,0.40), KF(1,358,0.28,0.36), {0}},
+     /*wht*/ {KF(0,355,0.08,0.68), KF(0.4,0,0.10,0.75), KF(0.7,5,0.08,0.78), KF(1,358,0.06,0.72), {0}},
     },
 
     /* 10: Phoenix — fire orange, solar flare, molten gold */
@@ -479,10 +479,19 @@ static void apply_theme_palette(int theme_idx)
         /* Afroman override: each ANSI color gets its OWN unique R-W-B gradient.
          * All start at a unique red, flow through a unique white, into a unique blue,
          * back through white, and repeat. Same ANSI color = same gradient always. */
-        /* Build bright variant (ansi + 8): boost value by ~30% */
+        /* Build bright variant (ansi + 8): boost so peak channel hits 1.0.
+         * This gives maximum dim/bright contrast for every theme. */
         color_ramp_t bright;
+        /* Find the peak value across all stops in the dim ramp */
+        float peak = 0.001f;
         for (int s = 0; s < GRAD_STOPS; s++) {
-            float boost = 1.35f;
+            if (theme_ramps[ansi].stops[s].r > peak) peak = theme_ramps[ansi].stops[s].r;
+            if (theme_ramps[ansi].stops[s].g > peak) peak = theme_ramps[ansi].stops[s].g;
+            if (theme_ramps[ansi].stops[s].b > peak) peak = theme_ramps[ansi].stops[s].b;
+        }
+        float boost = 1.0f / peak; /* scale so peak → 1.0 */
+        if (boost < 1.3f) boost = 1.3f; /* minimum 30% boost even if already near 1.0 */
+        for (int s = 0; s < GRAD_STOPS; s++) {
             bright.stops[s].r = theme_ramps[ansi].stops[s].r * boost;
             bright.stops[s].g = theme_ramps[ansi].stops[s].g * boost;
             bright.stops[s].b = theme_ramps[ansi].stops[s].b * boost;
@@ -699,7 +708,7 @@ static int ttf_loaded[MAX_TTF_FONTS] = {0};
 #define VKM_ITEM_VISUAL  0   /* Visual > (Theme, Font, FX) */
 #define VKM_ITEM_WIDGETS 1   /* Widgets > (Round Timer, Conversation) */
 #define VKM_ITEM_SEP     2
-#define VKM_ITEM_CONSOLE 3
+#define VKM_ITEM_MEGASETTINGS 3   /* MegaMUD Settings — opens settings window */
 #define VKM_ITEM_PATHS   4   /* Paths & Loops — opens VKW window */
 #define VKM_ITEM_RECENT  5   /* Recent > last 10 goto destinations */
 #define VKM_ITEM_EXTRAS  6   /* Settings > (Sound, Color, HideMM) */
@@ -721,7 +730,8 @@ static int ttf_loaded[MAX_TTF_FONTS] = {0};
 #define VKM_VIS_THEME    0
 #define VKM_VIS_FONT     1
 #define VKM_VIS_FX       2
-#define VKM_VIS_COUNT    3
+#define VKM_VIS_COLOR    3
+#define VKM_VIS_COUNT    4
 
 /* Widgets submenu items */
 #define VKM_WID_RTIMER   0
@@ -831,7 +841,7 @@ static int  pst_round_recap = 1;  /* Show Combat Round Totals in terminal */
 static char pst_last_recap[256] = "";  /* plain-text last round recap for MMUDPy */
 static int  pst_recap_dmg = 0, pst_recap_hits = 0, pst_recap_crits = 0;
 static int  pst_recap_extra = 0, pst_recap_spell = 0, pst_recap_bs = 0;
-static int  pst_recap_miss = 0, pst_recap_dodge = 0;
+static int  pst_recap_miss = 0, pst_recap_glance = 0, pst_recap_dodge = 0;
 static int  pst_recap_seq = 0;  /* increments each recap, MMUDPy can detect new ones */
 static float pst_x = 100.0f, pst_y = 60.0f;
 static float pst_w = 340.0f, pst_h = 390.0f;
@@ -884,6 +894,15 @@ static void  bsp_copy_selection(void);
 #include "vib_icons.h"
 static void pst_draw(int vp_w, int vp_h);
 static void pst_toggle(void);
+static void stw_draw(int vp_w, int vp_h, int mx, int my, int clicked);
+static void stw_toggle(void);
+static void vft_draw(int vp_w, int vp_h);
+static int  vft_quad_start, vft_quad_end;
+static int  stw_visible;
+static float stw_x, stw_y, stw_w, stw_h;
+static int  stw_scaled;
+static int  stw_dragging;
+static float stw_drag_ox, stw_drag_oy;
 static void pst_feed(const char *data, int len);
 static void pst_reset_exp(void);
 static void pst_reset_combat(void);
@@ -909,8 +928,34 @@ static DWORD vkm_hover_root_tick = 0;
 /* Recent GOTO destinations (rotating list, newest first) */
 #define VKM_GOTO_MAX 10
 static char vkm_goto_names[VKM_GOTO_MAX][64];
-static int  vkm_goto_nums[VKM_GOTO_MAX];  /* room number for goto command */
 static int  vkm_goto_count = 0;
+
+/* Add a destination to the recent list (dedup + promote to top) */
+static void vkm_goto_add(const char *name)
+{
+    if (!name || !name[0]) return;
+
+    /* Check if already in list — if so, promote to position 0 */
+    for (int i = 0; i < vkm_goto_count; i++) {
+        if (_stricmp(vkm_goto_names[i], name) == 0) {
+            /* Shift entries above it down to close the gap */
+            char tmp[64];
+            memcpy(tmp, vkm_goto_names[i], 64);
+            for (int j = i; j > 0; j--)
+                memcpy(vkm_goto_names[j], vkm_goto_names[j-1], 64);
+            memcpy(vkm_goto_names[0], tmp, 64);
+            return;
+        }
+    }
+
+    /* Not in list — shift everything down and insert at 0 */
+    int limit = vkm_goto_count < VKM_GOTO_MAX ? vkm_goto_count : VKM_GOTO_MAX - 1;
+    for (int i = limit; i > 0; i--)
+        memcpy(vkm_goto_names[i], vkm_goto_names[i-1], 64);
+    strncpy(vkm_goto_names[0], name, 63);
+    vkm_goto_names[0][63] = 0;
+    if (vkm_goto_count < VKM_GOTO_MAX) vkm_goto_count++;
+}
 
 /* Mouse coordinate scaling: window client area may differ from Vulkan surface
  * extent under Wine/XWayland with DPI scaling. All mouse coords must be
@@ -1310,8 +1355,14 @@ static mmudpy_queue_eval_fn vkt_resolve_eval(void)
     return pQueueEval;
 }
 
+/* Forward declaration — implemented after the SLOP command table */
+static int vkt_try_slop_dispatch(const char *input);
+
 static void vkt_eval_python(const char *code, int target_wnd_id)
 {
+    /* Try SLOP command dispatch first (smoke.help(), bg.set_mode(1), etc.) */
+    if (vkt_try_slop_dispatch(code)) return;
+
     mmudpy_queue_eval_fn fn = vkt_resolve_eval();
     if (fn) {
         fn(code, target_wnd_id);
@@ -1390,8 +1441,23 @@ static void vkw_print_ex(int idx, const char *text, int chan, int split)
         const char *nl = strchr(p, '\n');
         int len = nl ? (int)(nl - p) : (int)strlen(p);
         if (len >= VKW_LINE_LEN) len = VKW_LINE_LEN - 1;
-        memcpy(w->lines[w->line_head], p, len);
-        w->lines[w->line_head][len] = 0;
+        /* Strip ANSI escape sequences (\x1b[...m) since VKW renderer
+         * can't display them — they'd show as garbage characters */
+        {
+            char stripped[VKW_LINE_LEN];
+            int si = 0;
+            for (int ri = 0; ri < len; ri++) {
+                if (p[ri] == '\x1b' && ri + 1 < len && p[ri + 1] == '[') {
+                    /* Skip \x1b[ ... until 'm' or end */
+                    ri += 2;
+                    while (ri < len && p[ri] != 'm') ri++;
+                    continue; /* skip the 'm' too */
+                }
+                if (si < VKW_LINE_LEN - 1) stripped[si++] = p[ri];
+            }
+            stripped[si] = 0;
+            memcpy(w->lines[w->line_head], stripped, si + 1);
+        }
         w->line_chan[w->line_head] = chan;
         w->line_split[w->line_head] = split;
         w->line_head = (w->line_head + 1) % VKW_MAX_LINES;
@@ -2819,34 +2885,28 @@ static void pl_fire_remote(const char *cmd)
     if (h) CloseHandle(h);
 }
 
-/* Execute goto via fake_remote */
+static char vsb_goto_dest[64] = "";   /* name of goto destination for status display */
+
+/* Execute goto via fake_remote.
+ * fake_remote("goto X") already handles everything:
+ * stop_path, clear LOOPING/ON_ENTRY/PATHING/GO_FLAG, start_path, verify, kick. */
 static void pl_do_goto(const char *room_name)
 {
     if (!api || !api->fake_remote) return;
+
+    /* Save destination name for status display */
+    strncpy(vsb_goto_dest, room_name, sizeof(vsb_goto_dest) - 1);
+    vsb_goto_dest[sizeof(vsb_goto_dest) - 1] = '\0';
+
     char cmd[128];
     _snprintf(cmd, sizeof(cmd), "goto %s", room_name);
     cmd[sizeof(cmd) - 1] = '\0';
     pl_fire_remote(cmd);
 
-    /* Add to recent goto list */
-    if (vkm_goto_count < VKM_GOTO_MAX) {
-        for (int i = vkm_goto_count; i > 0; i--) {
-            memcpy(vkm_goto_names[i], vkm_goto_names[i-1], 64);
-            vkm_goto_nums[i] = vkm_goto_nums[i-1];
-        }
-        vkm_goto_count++;
-    } else {
-        for (int i = VKM_GOTO_MAX - 1; i > 0; i--) {
-            memcpy(vkm_goto_names[i], vkm_goto_names[i-1], 64);
-            vkm_goto_nums[i] = vkm_goto_nums[i-1];
-        }
-    }
-    strncpy(vkm_goto_names[0], room_name, 63);
-    vkm_goto_names[0][63] = 0;
-    vkm_goto_nums[0] = 1;
+    vkm_goto_add(room_name);
 }
 
-static void pl_do_loop(const char *file)
+static void pl_do_loop(const char *file, const char *room_name)
 {
     if (!api || !api->fake_remote) return;
     char cmd[128];
@@ -2857,6 +2917,10 @@ static void pl_do_loop(const char *file)
         _snprintf(cmd, sizeof(cmd), "loop %s.mp", file);
     cmd[sizeof(cmd) - 1] = '\0';
     pl_fire_remote(cmd);
+
+    /* Add starting room to recent destinations */
+    if (room_name && room_name[0])
+        vkm_goto_add(room_name);
 }
 
 /* ---- Exported functions for Python API ---- */
@@ -3291,6 +3355,27 @@ static VkDescriptorSet ui_desc_set = VK_NULL_HANDLE;
 static uint32_t ui_atlas_w = 256, ui_atlas_h = 512;
 static int ui_font_ready = 0;
 
+/* VFT (floating text) font atlas — separate high-res atlas with display fonts */
+#define VFT_NUM_FONTS 5
+static const char *vft_font_files[VFT_NUM_FONTS] = {
+    "plugins\\fonts\\VFT_BlackOps.ttf",   /* 0: Heavy military stencil */
+    "plugins\\fonts\\VFT_Teko.ttf",       /* 1: Clean condensed numbers */
+    "plugins\\fonts\\VFT_Russo.ttf",      /* 2: Geometric bold */
+    "plugins\\fonts\\VFT_Orbitron.ttf",   /* 3: Futuristic display */
+    "plugins\\fonts\\VFT_Rajdhani.ttf",   /* 4: Sharp angular */
+};
+static const char *vft_font_names[VFT_NUM_FONTS] = {
+    "Black Ops", "Teko", "Russo", "Orbitron", "Rajdhani"
+};
+static VkImage vft_font_img = VK_NULL_HANDLE;
+static VkDeviceMemory vft_font_mem = VK_NULL_HANDLE;
+static VkImageView vft_font_view = VK_NULL_HANDLE;
+static VkSampler vft_font_sampler = VK_NULL_HANDLE;
+static VkDescriptorSet vft_desc_set = VK_NULL_HANDLE;
+static uint32_t vft_atlas_w = 0, vft_atlas_h = 0;
+static int vft_font_ready = 0;
+static int vft_current_font = 0;  /* which VFT font is currently loaded */
+
 /* Icon atlas texture (color emoji from NotoColorEmoji) */
 static VkImage vib_icon_img = VK_NULL_HANDLE;
 static VkDeviceMemory vib_icon_mem = VK_NULL_HANDLE;
@@ -3326,6 +3411,9 @@ static int VSB_SEP_W = 2;
 #define VSB_OFF_PATHING    0x5664
 #define VSB_OFF_LOOPING    0x5668
 #define VSB_OFF_ROAMING    0x566C
+#define VSB_OFF_ON_ENTRY   0x54B4   /* 0=nothing, 1=resume loop, 2=auto-roam */
+#define VSB_OFF_MODE       0x54BC   /* 11=idle, 14=walking, 15=looping */
+#define VSB_OFF_GO_FLAG    0x564C   /* master go/stop toggle */
 #define VSB_OFF_COMBAT_TGT 0x552C
 #define VSB_OFF_AUTOCOMBAT 0x573C  /* runtime autocombat flag */
 
@@ -3765,7 +3853,7 @@ static void push_text_ui(int px, int py, const char *str,
 
 /* ---- Vulkan menu rendering ---- */
 
-static int vkm_is_sep(int idx) { return idx == VKM_ITEM_SEP || idx == VKM_ITEM_SEP2 || idx == VKM_ITEM_CONSOLE; }
+static int vkm_is_sep(int idx) { return idx == VKM_ITEM_SEP || idx == VKM_ITEM_SEP2; }
 
 static void vkm_get_root_item_rect(int idx, int *iy, int *ih)
 {
@@ -5184,7 +5272,7 @@ static int pl_exec_item(int item_idx)
                     if (pl_search[0] && !pl_stristr(pl_paths[pi].name, pl_search) &&
                         !pl_stristr(pl_paths[pi].file, pl_search)) continue;
                     if (idx == item_idx) {
-                        pl_do_loop(pl_paths[pi].file);
+                        pl_do_loop(pl_paths[pi].file, pl_paths[pi].start_room);
                         pl_wnd_open = 0;
                         return 1;
                     }
@@ -5281,7 +5369,7 @@ static void vkm_draw(int vp_w, int vp_h)
     /* Root menu items */
     const char *root_labels[VKM_ROOT_COUNT] = {
         "Visual  \x10", "Widgets  \x10", "",
-        "", "Paths & Loops", "Recent  \x10",
+        "MegaMUD Settings", "Paths & Loops", "Recent  \x10",
         "Settings  \x10", "Extras  \x10",
         "", "Close  (F11)"
     };
@@ -5342,6 +5430,7 @@ static void vkm_draw(int vp_w, int vp_h)
                 if (i == VKM_VIS_THEME) { label = "Theme  \x10"; has_arrow = 1; }
                 else if (i == VKM_VIS_FONT) { label = "Fonts & Text"; }
                 else if (i == VKM_VIS_FX) { label = "FX  \x10"; has_arrow = 1; }
+                else if (i == VKM_VIS_COLOR) { label = "Color/Brightness"; is_active = clr_visible; }
             } else if (vkm_sub == VKM_SUB_WIDGETS) {
                 if (i == VKM_WID_RTIMER) {
                     label = vrt_visible ? "\x04 Round Timer" : "  Round Timer";
@@ -5785,6 +5874,35 @@ static void vsb_read_status(void)
         if ((new_pathing && !vsb_prev_pathing) || (new_looping && !vsb_prev_looping)) {
             pst_reset_exp();
         }
+        /* GOTO LOOP PREVENTION: While a goto is active, continuously
+         * zero the loop resume triggers at 0x5988/0x598C every tick.
+         * VA_VERIFY_PATH checks these on arrival to decide idle vs loop.
+         * By zeroing them ~60Hz, we ensure the arrival handler always
+         * sees 0 and takes the idle branch — no extra step. */
+        if (vsb_goto_dest[0]) {
+            unsigned int sbase_addr = api->get_struct_base();
+            if (sbase_addr) {
+                unsigned char *sb = (unsigned char *)(uintptr_t)sbase_addr;
+                *(int *)(sb + 0x5988) = 0;  /* loop resume trigger A */
+                *(int *)(sb + 0x598C) = 0;  /* loop resume trigger B */
+                *(int *)(sb + VSB_OFF_LOOPING)  = 0;
+                *(int *)(sb + VSB_OFF_ON_ENTRY) = 0;
+            }
+            /* Backup watchdog: if looping STILL resumed somehow, kill it */
+            if (new_looping && !vsb_prev_looping) {
+                if (sbase_addr) {
+                    unsigned char *sb = (unsigned char *)(uintptr_t)sbase_addr;
+                    *(int *)(sb + VSB_OFF_PATHING)  = 0;
+                    *(int *)(sb + VSB_OFF_GO_FLAG)  = 0;
+                    *(int *)(sb + VSB_OFF_MODE)     = 11;
+                    new_looping = 0;
+                    new_pathing = 0;
+                }
+                vsb_goto_dest[0] = '\0';
+            }
+        }
+        /* Clear goto destination label when pathing ends normally */
+        if (!new_pathing && vsb_prev_pathing) vsb_goto_dest[0] = '\0';
         vsb_prev_pathing = new_pathing;
         vsb_prev_looping = new_looping;
         vsb_pathing = new_pathing;
@@ -5839,6 +5957,9 @@ static void vsb_read_status(void)
         _snprintf(vsb_status_text, sizeof(vsb_status_text), "Meditating");
     } else if (vsb_roaming) {
         _snprintf(vsb_status_text, sizeof(vsb_status_text), "Roaming");
+    } else if (vsb_goto_dest[0]) {
+        /* Goto initiated — always show destination, overrides looping */
+        _snprintf(vsb_status_text, sizeof(vsb_status_text), "Walking to %s", vsb_goto_dest);
     } else if (vsb_looping) {
         _snprintf(vsb_status_text, sizeof(vsb_status_text), "Looping");
     } else if (vsb_pathing) {
@@ -6243,7 +6364,11 @@ static void vib_draw(int vp_w, int vp_h, int bar_y)
         if (is_press) {
             br = t->accent[0] * 0.5f; bg = t->accent[1] * 0.5f; bb = t->accent[2] * 0.5f; ba = 0.95f;
         } else if (is_on) {
-            br = 0.02f; bg = 0.06f; bb = 0.02f; ba = 0.92f; /* dark green tint */
+            if (i == VIB_BTN_GO) {
+                br = 0.10f; bg = 0.02f; bb = 0.02f; ba = 0.92f; /* dark red for stopped */
+            } else {
+                br = 0.02f; bg = 0.06f; bb = 0.02f; ba = 0.92f; /* dark green tint */
+            }
         } else if (is_hov) {
             br = t->bg[0] + 0.15f; bg = t->bg[1] + 0.15f; bb = t->bg[2] + 0.15f; ba = 0.95f;
         } else {
@@ -6253,22 +6378,58 @@ static void vib_draw(int vp_w, int vp_h, int bar_y)
         psolid((float)bx, (float)by, (float)(bx + bs), (float)(by + bs),
                br, bg, bb, ba, vp_w, vp_h);
 
-        /* Border: bright green when ON, normal 3D when off */
+        /* Border: energy orbs orbiting the square edge when ON, 3D border when off */
         if (is_on) {
-            /* Thick green border — unmistakable ON indicator */
-            int bw = (int)(2.0f * ui_scale); if (bw < 2) bw = 2;
-            /* Top */
+            float bdr, bdg, bdb;
+            int is_go = (i == VIB_BTN_GO);
+            if (is_go) {
+                bdr = 1.0f; bdg = 0.2f; bdb = 0.2f; /* red for stopped */
+            } else {
+                bdr = 0.2f; bdg = 1.0f; bdb = 0.3f; /* green for active */
+            }
+            /* Dim border base — thin glow along edges */
+            int bw = (int)(1.0f * ui_scale); if (bw < 1) bw = 1;
             psolid((float)bx, (float)by, (float)(bx + bs), (float)(by + bw),
-                   0.2f, 1.0f, 0.3f, 0.95f * alpha, vp_w, vp_h);
-            /* Bottom */
+                   bdr, bdg, bdb, 0.25f * alpha, vp_w, vp_h);
             psolid((float)bx, (float)(by + bs - bw), (float)(bx + bs), (float)(by + bs),
-                   0.2f, 1.0f, 0.3f, 0.95f * alpha, vp_w, vp_h);
-            /* Left */
+                   bdr, bdg, bdb, 0.25f * alpha, vp_w, vp_h);
             psolid((float)bx, (float)by, (float)(bx + bw), (float)(by + bs),
-                   0.2f, 1.0f, 0.3f, 0.95f * alpha, vp_w, vp_h);
-            /* Right */
+                   bdr, bdg, bdb, 0.25f * alpha, vp_w, vp_h);
             psolid((float)(bx + bs - bw), (float)by, (float)(bx + bs), (float)(by + bs),
-                   0.2f, 1.0f, 0.3f, 0.95f * alpha, vp_w, vp_h);
+                   bdr, bdg, bdb, 0.25f * alpha, vp_w, vp_h);
+
+            /* Energy orbs traveling along the square perimeter.
+             * Uses CP437 bullet '•' (0x07) from UI TTF atlas for smooth round orbs. */
+            if (!is_go) {
+                int num_orbs = 2;
+                float perim = (float)(bs * 4);
+                for (int j = 0; j < num_orbs; j++) {
+                    float t_orb = fmodf(anim_t * 0.8f + (float)j * 0.5f + (float)i * 0.3f, 1.0f);
+                    float dist = t_orb * perim;
+                    float ox, oy;
+                    if (dist < (float)bs) {
+                        ox = (float)bx + dist; oy = (float)by;
+                    } else if (dist < (float)(bs * 2)) {
+                        ox = (float)(bx + bs); oy = (float)by + (dist - (float)bs);
+                    } else if (dist < (float)(bs * 3)) {
+                        ox = (float)(bx + bs) - (dist - (float)(bs * 2)); oy = (float)(by + bs);
+                    } else {
+                        ox = (float)bx; oy = (float)(by + bs) - (dist - (float)(bs * 3));
+                    }
+                    float pulse = 0.6f + 0.4f * sinf(anim_t * 5.0f + (float)j * 3.14f);
+                    int orb_sz = (int)(10.0f * ui_scale * (0.8f + 0.2f * pulse));
+                    /* Glow: larger, dimmer orb behind */
+                    int glow_sz = orb_sz * 3;
+                    ptext((int)(ox) - glow_sz/2, (int)(oy) - glow_sz/2,
+                          "\x07", bdr, bdg, bdb,
+                          vp_w, vp_h, glow_sz, glow_sz);
+                    /* Bright core orb */
+                    ptext((int)(ox) - orb_sz/2, (int)(oy) - orb_sz/2,
+                          "\x07",
+                          bdr * 0.3f + 0.7f, bdg * 0.3f + 0.7f, bdb * 0.3f + 0.7f,
+                          vp_w, vp_h, orb_sz, orb_sz);
+                }
+            }
         } else {
             /* Raised 3D border */
             psolid((float)bx, (float)by, (float)(bx + bs), (float)(by + 1),
@@ -6358,10 +6519,26 @@ static void vib_draw(int vp_w, int vp_h, int bar_y)
             if (is_on) a = 1.0f;
             else if (is_hov) a = 0.85f;
             else a = 0.35f; /* dim when off */
-            /* r=-1 signals the shader to use full texture RGB (color emoji mode) */
-            push_icon_quad((float)(bx + icon_pad), (float)(by + icon_pad),
-                           (float)(bx + bs - icon_pad), (float)(by + bs - icon_pad),
-                           i, -1.0f, 0.0f, 0.0f, a * alpha, vp_w, vp_h);
+            /* Go button: when stopped (is_on), show red stop sign;
+             * when going (!is_on), show bright green arrow */
+            if (i == VIB_BTN_GO) {
+                if (is_on) {
+                    /* Stopped — red tinted icon */
+                    push_icon_quad((float)(bx + icon_pad), (float)(by + icon_pad),
+                                   (float)(bx + bs - icon_pad), (float)(by + bs - icon_pad),
+                                   i, 1.0f, 0.1f, 0.1f, 1.0f * alpha, vp_w, vp_h);
+                } else {
+                    /* Going — bright green arrow */
+                    push_icon_quad((float)(bx + icon_pad), (float)(by + icon_pad),
+                                   (float)(bx + bs - icon_pad), (float)(by + bs - icon_pad),
+                                   i, 0.1f, 1.0f, 0.2f, 1.0f * alpha, vp_w, vp_h);
+                }
+            } else {
+                /* r=-1 signals the shader to use full texture RGB (color emoji mode) */
+                push_icon_quad((float)(bx + icon_pad), (float)(by + icon_pad),
+                               (float)(bx + bs - icon_pad), (float)(by + bs - icon_pad),
+                               i, -1.0f, 0.0f, 0.0f, a * alpha, vp_w, vp_h);
+            }
             bx += bs + gap;
         }
     }
@@ -6822,7 +6999,10 @@ static void vkt_build_vertices(void)
             float grad_t = (wlen > 1) ? (float)(c - word_start) / (float)(wlen - 1) : 0.0f;
 
             ap_attr_t *a = &ansi_term.grid[r][c].attr;
-            int fg = (a->fg & 0x07) | (a->bold ? 0x08 : 0);
+            /* fg 0-7 = dim, 8-15 = bright (via SGR 90-97).
+             * Bold (SGR 1) also promotes dim to bright. */
+            int fg = a->fg256 ? (a->fg & 0x0F) :
+                     (a->fg < 8) ? (a->fg | (a->bold ? 0x08 : 0)) : (a->fg & 0x0F);
 
             /* Sample the theme gradient ramp */
             rgb_t col = sample_ramp(&theme_ramps[fg], grad_t);
@@ -7051,6 +7231,7 @@ static void vkt_build_vertices(void)
     vxb_draw(vp_w, vp_h);
     pl_draw(vp_w, vp_h);
     pst_draw(vp_w, vp_h);
+    stw_draw(vp_w, vp_h, 0, 0, 0);  /* draw only, clicks handled in WM_LBUTTONDOWN */
     bsp_draw(vp_w, vp_h);
     mr_draw(vp_w, vp_h);
     scm_draw(vp_w, vp_h);
@@ -7065,8 +7246,13 @@ static void vkt_build_vertices(void)
     }
     pl_quad_end = quad_count;
 
-    /* Draw context menu on top of EVERYTHING (last = topmost) */
+    /* Draw context menu on top of UI chrome */
     vkm_draw(vp_w, vp_h);
+
+    /* Floating text on top of EVERYTHING (last = topmost, uses ui font atlas) */
+    vft_quad_start = quad_count;
+    vft_draw(vp_w, vp_h);
+    vft_quad_end = quad_count;
 }
 
 /* ---- Input handling ---- */
@@ -7900,8 +8086,8 @@ static void vkt_init_ui_font(void)
         return;
     }
 
-    /* Fixed cell size for high-quality UI text */
-    int cell_h = 28, cell_w = 14;
+    /* UI atlas — moderate res for menus/labels/windows. VFT has its own atlas. */
+    int cell_h = 48, cell_w = 24;
     uint32_t aw = (uint32_t)(cell_w * 16), ah = (uint32_t)(cell_h * 16);
     uint8_t *pixels = (uint8_t *)calloc(aw * ah * 4, 1);
     if (!pixels) return;
@@ -8063,6 +8249,222 @@ static void vkt_init_ui_font(void)
     ui_font_ready = 1;
     if (api) api->log("[vk_terminal] UI font ready: %s (%dx%d atlas)\n",
                       ttf_fonts[font_idx].name, aw, ah);
+}
+
+/* ---- VFT display font atlas — high-res, separate from UI atlas ---- */
+static void vkt_init_vft_font(int font_idx)
+{
+    if (font_idx < 0 || font_idx >= VFT_NUM_FONTS) font_idx = 0;
+
+    /* Load TTF file */
+    char path[512];
+    wsprintfA(path, "C:\\MegaMUD\\%s", vft_font_files[font_idx]);
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        if (api) api->log("[vk_terminal] VFT font not found: %s\n", path);
+        return;
+    }
+    fseek(f, 0, SEEK_END);
+    int sz = (int)ftell(f);
+    fseek(f, 0, SEEK_SET);
+    unsigned char *ttf_data = (unsigned char *)malloc(sz);
+    fread(ttf_data, 1, sz, f);
+    fclose(f);
+
+    stbtt_fontinfo font;
+    if (!stbtt_InitFont(&font, ttf_data, stbtt_GetFontOffsetForIndex(ttf_data, 0))) {
+        if (api) api->log("[vk_terminal] VFT stbtt_InitFont failed: %s\n", vft_font_names[font_idx]);
+        free(ttf_data);
+        return;
+    }
+
+    /* High-res cells: 48x96 per glyph, 16x16 grid = 768x1536 atlas
+     * ~3.5x the UI atlas (14x28) — crisp at large display sizes while
+     * staying under 5MB for 32-bit process. */
+    int cell_w = 48, cell_h = 96;
+    uint32_t aw = (uint32_t)(cell_w * 16), ah = (uint32_t)(cell_h * 16);
+    uint8_t *pixels = (uint8_t *)calloc(aw * ah * 4, 1);
+    if (!pixels) { free(ttf_data); return; }
+
+    float scale = stbtt_ScaleForPixelHeight(&font, (float)cell_h);
+    int ascent, descent, lineGap;
+    stbtt_GetFontVMetrics(&font, &ascent, &descent, &lineGap);
+    int baseline = (int)(ascent * scale);
+
+    /* Render printable ASCII (32-126) + a few useful CP437 chars */
+    for (int cp = 32; cp < 127; cp++) {
+        int glyph = stbtt_FindGlyphIndex(&font, cp);
+        if (glyph == 0) continue;
+
+        int x0, y0, x1, y1;
+        stbtt_GetGlyphBitmapBox(&font, glyph, scale, scale, &x0, &y0, &x1, &y1);
+        int gw = x1 - x0, gh = y1 - y0;
+        if (gw <= 0 || gh <= 0) continue;
+
+        int bw, bh, bxoff, byoff;
+        unsigned char *bmp = stbtt_GetGlyphBitmap(&font, scale, scale, glyph,
+                                                   &bw, &bh, &bxoff, &byoff);
+        if (!bmp) continue;
+
+        int grid_x = (cp % 16) * cell_w;
+        int grid_y = (cp / 16) * cell_h;
+        int adv, lsb;
+        stbtt_GetGlyphHMetrics(&font, glyph, &adv, &lsb);
+        int x_off = (cell_w - (int)(adv * scale)) / 2 + (int)(lsb * scale);
+        int y_off = baseline + y0;
+
+        for (int row = 0; row < bh; row++) {
+            for (int col = 0; col < bw; col++) {
+                int px = grid_x + x_off + col;
+                int py = grid_y + y_off + row;
+                if (px < grid_x || px >= grid_x + cell_w) continue;
+                if (py < grid_y || py >= grid_y + cell_h) continue;
+                pixels[(py * aw + px) * 4 + 3] = bmp[row * bw + col];
+            }
+        }
+        stbtt_FreeBitmap(bmp, NULL);
+    }
+
+    /* Glyph 219 (full block) → solid white for particles/solids */
+    {
+        int g_x = (219 % 16) * cell_w, g_y = (219 / 16) * cell_h;
+        for (int yy = g_y; yy < g_y + cell_h; yy++)
+            for (int xx = g_x; xx < g_x + cell_w; xx++) {
+                int idx = (yy * aw + xx) * 4;
+                pixels[idx+0] = 255; pixels[idx+1] = 255;
+                pixels[idx+2] = 255; pixels[idx+3] = 255;
+            }
+    }
+    /* Glyph 7 (bullet •) for particles */
+    {
+        int g_x = (7 % 16) * cell_w, g_y = (7 / 16) * cell_h;
+        float cx = g_x + cell_w * 0.5f, cy = g_y + cell_h * 0.5f;
+        float r = cell_w * 0.35f;
+        for (int yy = g_y; yy < g_y + cell_h; yy++)
+            for (int xx = g_x; xx < g_x + cell_w; xx++) {
+                float dx = xx - cx, dy = yy - cy;
+                float d = sqrtf(dx*dx + dy*dy);
+                if (d < r) {
+                    float a = (d < r - 1.5f) ? 255.0f : (r - d) / 1.5f * 255.0f;
+                    int idx = (yy * aw + xx) * 4;
+                    pixels[idx+0] = 255; pixels[idx+1] = 255;
+                    pixels[idx+2] = 255; pixels[idx+3] = (uint8_t)a;
+                }
+            }
+    }
+
+    free(ttf_data);
+
+    /* Destroy previous VFT texture if any */
+    if (vft_font_view) { vkDestroyImageView(vk_dev, vft_font_view, NULL); vft_font_view = VK_NULL_HANDLE; }
+    if (vft_font_sampler) { vkDestroySampler(vk_dev, vft_font_sampler, NULL); vft_font_sampler = VK_NULL_HANDLE; }
+    if (vft_font_img) { vkDestroyImage(vk_dev, vft_font_img, NULL); vft_font_img = VK_NULL_HANDLE; }
+    if (vft_font_mem) { vkFreeMemory(vk_dev, vft_font_mem, NULL); vft_font_mem = VK_NULL_HANDLE; }
+
+    vft_atlas_w = aw; vft_atlas_h = ah;
+
+    /* Create VkImage */
+    VkImageCreateInfo ici = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+    ici.imageType = VK_IMAGE_TYPE_2D;
+    ici.format = VK_FORMAT_R8G8B8A8_UNORM;
+    ici.extent = (VkExtent3D){ aw, ah, 1 };
+    ici.mipLevels = 1; ici.arrayLayers = 1;
+    ici.samples = VK_SAMPLE_COUNT_1_BIT;
+    ici.tiling = VK_IMAGE_TILING_LINEAR;
+    ici.usage = VK_IMAGE_USAGE_SAMPLED_BIT;
+    ici.initialLayout = VK_IMAGE_LAYOUT_PREINITIALIZED;
+    if (vkCreateImage(vk_dev, &ici, NULL, &vft_font_img) != VK_SUCCESS) {
+        if (api) api->log("[vk_terminal] VFT vkCreateImage failed (%dx%d)\n", aw, ah);
+        free(pixels); return;
+    }
+
+    VkMemoryRequirements mr;
+    vkGetImageMemoryRequirements(vk_dev, vft_font_img, &mr);
+    VkMemoryAllocateInfo mai = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+    mai.allocationSize = mr.size;
+    mai.memoryTypeIndex = vk_find_memory(vk_pdev, mr.memoryTypeBits,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    if (vkAllocateMemory(vk_dev, &mai, NULL, &vft_font_mem) != VK_SUCCESS) {
+        if (api) api->log("[vk_terminal] VFT vkAllocateMemory failed (%llu bytes)\n",
+                          (unsigned long long)mr.size);
+        vkDestroyImage(vk_dev, vft_font_img, NULL); vft_font_img = VK_NULL_HANDLE;
+        free(pixels); return;
+    }
+    vkBindImageMemory(vk_dev, vft_font_img, vft_font_mem, 0);
+
+    /* Copy pixels */
+    void *mapped;
+    vkMapMemory(vk_dev, vft_font_mem, 0, mr.size, 0, &mapped);
+    VkImageSubresource sub = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0 };
+    VkSubresourceLayout layout;
+    vkGetImageSubresourceLayout(vk_dev, vft_font_img, &sub, &layout);
+    for (uint32_t row = 0; row < ah; row++)
+        memcpy((uint8_t *)mapped + layout.offset + row * layout.rowPitch,
+               pixels + row * aw * 4, aw * 4);
+    vkUnmapMemory(vk_dev, vft_font_mem);
+    free(pixels);
+
+    /* Transition layout */
+    VkCommandBuffer tmp_cmd;
+    VkCommandBufferAllocateInfo cbai = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+    cbai.commandPool = vk_cmd_pool; cbai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY; cbai.commandBufferCount = 1;
+    vkAllocateCommandBuffers(vk_dev, &cbai, &tmp_cmd);
+    VkCommandBufferBeginInfo cbbi = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+    cbbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(tmp_cmd, &cbbi);
+    VkImageMemoryBarrier imb = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+    imb.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT;
+    imb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    imb.oldLayout = VK_IMAGE_LAYOUT_PREINITIALIZED;
+    imb.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    imb.image = vft_font_img;
+    imb.subresourceRange = (VkImageSubresourceRange){ VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+    vkCmdPipelineBarrier(tmp_cmd, VK_PIPELINE_STAGE_HOST_BIT,
+                         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, NULL, 0, NULL, 1, &imb);
+    vkEndCommandBuffer(tmp_cmd);
+    VkFence tmp_fence;
+    VkFenceCreateInfo fci = { VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
+    vkCreateFence(vk_dev, &fci, NULL, &tmp_fence);
+    VkSubmitInfo si2 = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
+    si2.commandBufferCount = 1; si2.pCommandBuffers = &tmp_cmd;
+    vkQueueSubmit(vk_queue, 1, &si2, tmp_fence);
+    vkWaitForFences(vk_dev, 1, &tmp_fence, VK_TRUE, UINT64_MAX);
+    vkDestroyFence(vk_dev, tmp_fence, NULL);
+    vkFreeCommandBuffers(vk_dev, vk_cmd_pool, 1, &tmp_cmd);
+
+    /* Image view */
+    VkImageViewCreateInfo ivci = { VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+    ivci.image = vft_font_img;
+    ivci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    ivci.format = VK_FORMAT_R8G8B8A8_UNORM;
+    ivci.subresourceRange = (VkImageSubresourceRange){ VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+    vkCreateImageView(vk_dev, &ivci, NULL, &vft_font_view);
+
+    /* Sampler — LINEAR for smooth scaling */
+    VkSamplerCreateInfo saci = { VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
+    saci.magFilter = VK_FILTER_LINEAR;
+    saci.minFilter = VK_FILTER_LINEAR;
+    saci.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    saci.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    vkCreateSampler(vk_dev, &saci, NULL, &vft_font_sampler);
+
+    /* Update VFT descriptor set */
+    VkDescriptorImageInfo dii = {0};
+    dii.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    dii.imageView = vft_font_view;
+    dii.sampler = vft_font_sampler;
+    VkWriteDescriptorSet wds = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+    wds.dstSet = vft_desc_set;
+    wds.dstBinding = 0;
+    wds.descriptorCount = 1;
+    wds.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    wds.pImageInfo = &dii;
+    vkUpdateDescriptorSets(vk_dev, 1, &wds, 0, NULL);
+
+    vft_font_ready = 1;
+    vft_current_font = font_idx;
+    if (api) api->log("[vk_terminal] VFT font ready: %s (%dx%d atlas)\n",
+                      vft_font_names[font_idx], aw, ah);
 }
 
 /* ---- Icon atlas init: upload color emoji to Vulkan texture ---- */
@@ -8266,10 +8668,10 @@ static int vkt_create_descriptors(void)
     dslci.pBindings = &binding;
     vkCreateDescriptorSetLayout(vk_dev, &dslci, NULL, &vk_desc_layout);
 
-    /* Pool — 3 sets: main font + UI font + icon atlas */
-    VkDescriptorPoolSize ps = { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 3 };
+    /* Pool — 4 sets: main font + UI font + icon atlas + VFT font */
+    VkDescriptorPoolSize ps = { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 4 };
     VkDescriptorPoolCreateInfo dpci = { VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
-    dpci.maxSets = 3;
+    dpci.maxSets = 4;
     dpci.poolSizeCount = 1;
     dpci.pPoolSizes = &ps;
     vkCreateDescriptorPool(vk_dev, &dpci, NULL, &vk_desc_pool);
@@ -8285,6 +8687,8 @@ static int vkt_create_descriptors(void)
     vkAllocateDescriptorSets(vk_dev, &dsai, &ui_desc_set);
     /* Allocate icon atlas descriptor set */
     vkAllocateDescriptorSets(vk_dev, &dsai, &vib_desc_set);
+    /* Allocate VFT font descriptor set */
+    vkAllocateDescriptorSets(vk_dev, &dsai, &vft_desc_set);
 
     /* Update with font texture */
     VkDescriptorImageInfo dii = {0};
@@ -8847,13 +9251,25 @@ static void vkt_render_frame(void)
                 vkCmdDrawIndexed(vk_cmd_buf, post_icon * 6, 1, vib_quad_end * 6, 0, 0);
             }
         }
-        /* Draw 4: Context menu (back to main font, drawn last = on top) */
+        /* Draw 4: Context menu (back to main font) */
         {
-            int menu_quads = quad_count - pl_quad_end;
+            int menu_quads = vft_quad_start - pl_quad_end;
             if (menu_quads > 0) {
                 vkCmdBindDescriptorSets(vk_cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                         vk_pipe_layout, 0, 1, &vk_desc_set, 0, NULL);
                 vkCmdDrawIndexed(vk_cmd_buf, menu_quads * 6, 1, pl_quad_end * 6, 0, 0);
+            }
+        }
+        /* Draw 5: Floating text (VFT font atlas, or ui atlas fallback) */
+        {
+            int vft_quads = vft_quad_end - vft_quad_start;
+            if (vft_quads > 0) {
+                VkDescriptorSet ds = vft_font_ready ? vft_desc_set : ui_desc_set;
+                if (ds) {
+                    vkCmdBindDescriptorSets(vk_cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                            vk_pipe_layout, 0, 1, &ds, 0, NULL);
+                    vkCmdDrawIndexed(vk_cmd_buf, vft_quads * 6, 1, vft_quad_start * 6, 0, 0);
+                }
             }
         }
     } else {
@@ -8918,11 +9334,23 @@ static void vkt_render_frame(void)
         }
         /* Menu quads (back to main font) */
         {
-            int menu_quads = quad_count - pl_quad_end;
+            int menu_quads = vft_quad_start - pl_quad_end;
             if (menu_quads > 0) {
                 vkCmdBindDescriptorSets(vk_cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                         vk_pipe_layout, 0, 1, &vk_desc_set, 0, NULL);
                 vkCmdDrawIndexed(vk_cmd_buf, menu_quads * 6, 1, pl_quad_end * 6, 0, 0);
+            }
+        }
+        /* Floating text (VFT font atlas, or ui atlas fallback) */
+        {
+            int vft_quads = vft_quad_end - vft_quad_start;
+            if (vft_quads > 0) {
+                VkDescriptorSet ds = vft_font_ready ? vft_desc_set : ui_desc_set;
+                if (ds) {
+                    vkCmdBindDescriptorSets(vk_cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                            vk_pipe_layout, 0, 1, &ds, 0, NULL);
+                    vkCmdDrawIndexed(vk_cmd_buf, vft_quads * 6, 1, vft_quad_start * 6, 0, 0);
+                }
             }
         }
     }
@@ -9121,6 +9549,11 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         return 0;
     }
     case WM_SYSKEYDOWN:
+        /* Alt+F4 — kill MegaMUD instantly, no dialogs */
+        if (wParam == VK_F4) {
+            ExitProcess(0);
+            return 0;
+        }
         /* Alt+B when system key (alt held) */
         if (wParam == 'B' || wParam == 'b') {
             bsp_toggle((int)vk_sc_extent.width, (int)vk_sc_extent.height);
@@ -9234,6 +9667,12 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             fnt_mouse_move(mx2, my2);
             return 0;
         }
+        /* Settings window drag */
+        if (stw_dragging) {
+            stw_x = (float)mx2 - stw_drag_ox;
+            stw_y = (float)my2 - stw_drag_oy;
+            return 0;
+        }
         /* Player Stats drag */
         if (pst_dragging) {
             pst_x = (float)mx2 - pst_drag_ox;
@@ -9277,11 +9716,16 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             vrt_ctx_hover = vrt_ctx_hit(mx2, my2);
             return 0;
         }
-        /* Window drag/resize takes priority */
-        if (vkw_mouse_move(mx2, my2)) return 0;
-        /* Update cursor for VKW window edge hover */
-        if (!vkw_update_cursor(mx2, my2)) {
-            SetCursor(LoadCursor(NULL, IDC_ARROW));
+        /* When a context menu is open, it has top z-order priority —
+         * skip all window interaction so windows underneath don't
+         * steal hover/click events from the menu */
+        if (!vkm_open) {
+            /* Window drag/resize takes priority */
+            if (vkw_mouse_move(mx2, my2)) return 0;
+            /* Update cursor for VKW window edge hover */
+            if (!vkw_update_cursor(mx2, my2)) {
+                SetCursor(LoadCursor(NULL, IDC_ARROW));
+            }
         }
         if (vkm_open) {
             int rh = vkm_hit_root(mx2, my2);
@@ -9502,22 +9946,7 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             }
             return 0;
         }
-        /* Script Manager click */
-        if (scm_mouse_down(mx, my)) return 0;
-        /* Backscroll panel click */
-        if (bsp_mouse_down(mx, my)) return 0;
-        /* MUDRadio panel click */
-        if (mr_mouse_down(mx, my)) return 0;
-        /* Icon bar click (includes pin button at -2) */
-        {
-            int bi = vib_hit_test(mx, my, vib_cur_bar_y);
-            if (bi >= 0 || bi == VIB_HIT_PIN) {
-                vib_pressed = bi;
-                vib_last_interact = GetTickCount();
-                return 0;
-            }
-        }
-        /* Settings panels — check focused one first for z-order consistency */
+        /* Settings panels — check focused one FIRST (drawn on top) */
         {
             struct { int (*fn)(int,int); int idx; } sp[] = {
                 { clr_mouse_down, 0 }, { bgp_mouse_down, 1 }, { smk_mouse_down, 2 }, { shd_mouse_down, 3 }, { snd_mouse_down, 4 }, { fnt_mouse_down, 5 }, { rn_mouse_down, 6 }
@@ -9532,6 +9961,44 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                     sp_focus = i;
                     return 0;
                 }
+            }
+        }
+        /* Script Manager click */
+        if (scm_mouse_down(mx, my)) return 0;
+        /* Backscroll panel click */
+        if (bsp_mouse_down(mx, my)) return 0;
+        /* Settings window click (MegaMUD Settings — on top of MudAMP) */
+        if (stw_visible && mx >= (int)stw_x && mx < (int)(stw_x + stw_w) &&
+            my >= (int)stw_y && my < (int)(stw_y + stw_h)) {
+            int cw = (int)(VSB_CHAR_W * ui_scale), ch = (int)(VSB_CHAR_H * ui_scale);
+            int titlebar_h = ch + 10;
+            int ly = my - (int)stw_y;
+            /* Close button */
+            if (ly < titlebar_h && mx >= (int)(stw_x + stw_w - 24)) {
+                stw_visible = 0;
+                return 0;
+            }
+            /* Title bar drag */
+            if (ly < titlebar_h) {
+                stw_dragging = 1;
+                stw_drag_ox = (float)mx - stw_x;
+                stw_drag_oy = (float)my - stw_y;
+                return 0;
+            }
+            /* Content clicks — re-call draw with click=1 to let widgets handle */
+            int vp_w = (int)vk_sc_extent.width, vp_h = (int)vk_sc_extent.height;
+            stw_draw(vp_w, vp_h, mx, my, 1);
+            return 0;
+        }
+        /* MUDRadio panel click — AFTER all settings/child windows */
+        if (mr_mouse_down(mx, my)) return 0;
+        /* Icon bar click (includes pin button at -2) */
+        {
+            int bi = vib_hit_test(mx, my, vib_cur_bar_y);
+            if (bi >= 0 || bi == VIB_HIT_PIN) {
+                vib_pressed = bi;
+                vib_last_interact = GetTickCount();
+                return 0;
             }
         }
         /* Player Stats panel click */
@@ -9612,6 +10079,7 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         if (shd_dragging || shd_active_slider >= 0) { shd_mouse_up(); return 0; }
         if (snd_dragging || snd_active_slider >= 0) { snd_mouse_up(); return 0; }
         if (fnt_dragging || fnt_active_slider >= 0) { fnt_mouse_up(); return 0; }
+        if (stw_dragging) { stw_dragging = 0; return 0; }
         if (pst_dragging) { pst_dragging = 0; return 0; }
         if (bsp_dragging || bsp_resizing || bsp_selecting) { bsp_mouse_up(); return 0; }
         if (vrt_dragging) { vrt_dragging = 0; return 0; }
@@ -9638,6 +10106,7 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             if (si == VKM_VIS_THEME) { vkm_sub = VKM_SUB_THEME; vkm_sub_hover = -1; }
             else if (si == VKM_VIS_FONT) { fnt_toggle(); vkm_open = 0; vkm_sub = VKM_SUB_NONE; return 0; }
             else if (si == VKM_VIS_FX) { vkm_sub = VKM_SUB_FX; vkm_sub_hover = -1; }
+            else if (si == VKM_VIS_COLOR) { clr_open_window(); vkm_open = 0; vkm_sub = VKM_SUB_NONE; return 0; }
             return 0;
         }
         /* Widgets > submenu clicks — toggle widgets */
@@ -9669,8 +10138,8 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         }
         /* Recent > submenu clicks — goto that room */
         if (si >= 0 && vkm_sub == VKM_SUB_RECENT) {
-            if (si < vkm_goto_count && vkm_goto_nums[si] > 0) {
-                /* TODO: trigger goto via memory write */
+            if (si < vkm_goto_count && vkm_goto_names[si][0]) {
+                pl_do_goto(vkm_goto_names[si]);
             }
             vkm_open = 0;
             vkm_sub = VKM_SUB_NONE;
@@ -9840,7 +10309,12 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
 
         /* Check root click */
         int ri = vkm_hit_root(mx, my);
-        /* VKM_ITEM_CONSOLE is now a separator — console moved to Extras */
+        if (ri == VKM_ITEM_MEGASETTINGS) {
+            vkm_open = 0;
+            vkm_sub = VKM_SUB_NONE;
+            stw_toggle();
+            return 0;
+        }
         if (ri == VKM_ITEM_PATHS) {
             vkm_open = 0;
             vkm_sub = VKM_SUB_NONE;
@@ -10012,8 +10486,16 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         }
         return 0;
     }
+    case WM_SYSCOMMAND:
+        /* Alt+F4 generates SC_CLOSE — kill instantly */
+        if ((wParam & 0xFFF0) == SC_CLOSE) {
+            ExitProcess(0);
+            return 0;
+        }
+        break;
     case WM_CLOSE:
-        vkt_hide();
+        /* Alt+F4 fallback — kill instantly */
+        ExitProcess(0);
         return 0;
     case WM_DESTROY:
         vkt_visible = 0;
@@ -10052,6 +10534,7 @@ static DWORD WINAPI vkt_thread(LPVOID param)
     if (vkt_create_buffers() != 0) return 1;
     if (vkt_create_descriptors() != 0) return 1;
     vkt_init_ui_font();
+    vkt_init_vft_font(0);
     vib_init_icon_atlas();
 
     /* Register window class */
@@ -10313,6 +10796,7 @@ static struct {
     int     cr_spell;           /* spell hits this round */
     int     cr_bs;              /* backstabs this round */
     int     cr_miss;            /* misses this round */
+    int     cr_glance;          /* glancing blows this round (weapon ineffective) */
     int     cr_dodge;           /* enemy dodged player's attack this round */
     int     cr_dmg;             /* total damage this round (all sources incl BS) */
 
@@ -10380,7 +10864,7 @@ static void pst_emit_recap(void) {
     /* Only show recap if there was actual combat this round */
     int had_combat = pst_s.cr_hits || pst_s.cr_crits || pst_s.cr_extra ||
                      pst_s.cr_spell || pst_s.cr_bs || pst_s.cr_miss ||
-                     pst_s.cr_dodge;
+                     pst_s.cr_glance || pst_s.cr_dodge;
     int round_dmg = pst_s.cr_dmg;
 
     /* Always store recap data for MMUDPy access */
@@ -10392,12 +10876,13 @@ static void pst_emit_recap(void) {
         pst_recap_spell = pst_s.cr_spell;
         pst_recap_bs = pst_s.cr_bs;
         pst_recap_miss = pst_s.cr_miss;
+        pst_recap_glance = pst_s.cr_glance;
         pst_recap_dodge = pst_s.cr_dodge;
         pst_recap_seq++;
         _snprintf(pst_last_recap, sizeof(pst_last_recap),
-            "%d dmg, %d hit, %d crit, %d xtra, %d spell, %d bs, %d miss, %d dodge",
+            "%d dmg, %d hit, %d crit, %d xtra, %d spell, %d bs, %d miss, %d glance, %d dodge",
             round_dmg, pst_s.cr_hits, pst_s.cr_crits, pst_s.cr_extra,
-            pst_s.cr_spell, pst_s.cr_bs, pst_s.cr_miss, pst_s.cr_dodge);
+            pst_s.cr_spell, pst_s.cr_bs, pst_s.cr_miss, pst_s.cr_glance, pst_s.cr_dodge);
         pst_last_recap[sizeof(pst_last_recap) - 1] = 0;
     }
 
@@ -10406,23 +10891,29 @@ static void pst_emit_recap(void) {
         int pos = 0;
 
         pos += _snprintf(buf + pos, sizeof(buf) - pos,
-            "\x1b[44;1;37m %d Damage,",
+            "\x1b[44;1;37m %d Damage",
             round_dmg);
 
-        #define RECAP_ADD(cnt, label) \
-            if ((cnt) > 0) { \
-                pos += _snprintf(buf + pos, sizeof(buf) - pos, \
-                    " %d " label, (cnt)); \
-            }
-
-        RECAP_ADD(pst_s.cr_crits,  "Crit");
-        RECAP_ADD(pst_s.cr_hits,   "Hit");
-        RECAP_ADD(pst_s.cr_extra,  "Xtra");
-        RECAP_ADD(pst_s.cr_spell,  "Spell");
-        RECAP_ADD(pst_s.cr_bs,     "BS");
-        RECAP_ADD(pst_s.cr_miss,   "Miss");
-        RECAP_ADD(pst_s.cr_dodge,  "Dodge");
-        #undef RECAP_ADD
+        /* Build parenthetical: BS, Crits, Hits, Xtra, Spell, then misses/dodges */
+        {
+            int first = 1;
+            #define RECAP_ADD(cnt, label) \
+                if ((cnt) > 0) { \
+                    pos += _snprintf(buf + pos, sizeof(buf) - pos, \
+                        "%s%dx %s", first ? " (" : ", ", (cnt), label); \
+                    first = 0; \
+                }
+            RECAP_ADD(pst_s.cr_bs,     "BS");
+            RECAP_ADD(pst_s.cr_crits,  "Crits");
+            RECAP_ADD(pst_s.cr_hits,   "Hits");
+            RECAP_ADD(pst_s.cr_extra,  "Xtra");
+            RECAP_ADD(pst_s.cr_spell,  "Spell");
+            RECAP_ADD(pst_s.cr_miss,   "Misses");
+            RECAP_ADD(pst_s.cr_glance, "Glances");
+            RECAP_ADD(pst_s.cr_dodge,  "Dodges");
+            #undef RECAP_ADD
+            if (!first) pos += _snprintf(buf + pos, sizeof(buf) - pos, ")");
+        }
 
         pos += _snprintf(buf + pos, sizeof(buf) - pos, " \x1b[0m");
         buf[sizeof(buf) - 1] = 0;
@@ -10438,7 +10929,7 @@ static void pst_emit_recap(void) {
     /* Clear per-round breakdown counters */
     pst_s.cr_hits = 0; pst_s.cr_crits = 0; pst_s.cr_extra = 0;
     pst_s.cr_spell = 0; pst_s.cr_bs = 0; pst_s.cr_miss = 0;
-    pst_s.cr_dodge = 0; pst_s.cr_dmg = 0;
+    pst_s.cr_glance = 0; pst_s.cr_dodge = 0; pst_s.cr_dmg = 0;
 }
 
 /* Called from vrt_on_round — emit recap for the round that just ended.
@@ -10460,7 +10951,7 @@ static void pst_recap_poll(void) {
     if (elapsed < 1500) return;
     int has_data = pst_s.cr_hits || pst_s.cr_crits || pst_s.cr_extra ||
                    pst_s.cr_spell || pst_s.cr_bs || pst_s.cr_miss ||
-                   pst_s.cr_dodge;
+                   pst_s.cr_glance || pst_s.cr_dodge;
     if (has_data) {
         pst_flush_round();
         pst_emit_recap();
@@ -10484,6 +10975,13 @@ static void pst_check_round_gap(void) {
 
 static void pst_parse_line(const char *line)
 {
+    /* Strip HP/MA prompt prefix if glued on: "[HP=197/MA=159]:You slash..."
+     * MUD sometimes sends prompt + combat line in same packet with no newline */
+    if (line[0] == '[' && line[1] == 'H' && line[2] == 'P' && line[3] == '=') {
+        const char *colon = strchr(line, ':');
+        if (colon && colon[1]) line = colon + 1;
+    }
+
     /* --- Experience --- */
     {
         const char *yg = strstr(line, "You gain ");
@@ -10573,6 +11071,15 @@ static void pst_parse_line(const char *line)
             pst_s.cur_round_dmg += dmg;
             pst_s.cur_round_swings++;
         }
+        return;
+    }
+
+    /* --- Glancing Blow (weapon ineffective, "Your cut glances off ...") --- */
+    if (strncmp(line, "Your ", 5) == 0 && pst_contains(line, " glances off")) {
+        pst_s.miss++;          /* counts as a miss in stats */
+        pst_s.cr_glance++;     /* tracked separately for recap */
+        pst_check_round_gap();
+        pst_s.cur_round_swings++;
         return;
     }
 
@@ -10926,24 +11433,22 @@ static void pst_draw(int vp_w, int vp_h)
     ptext(col_avg, cy + 2, "Avg", dmr, dmg, dmb, vp_w, vp_h, cw, ch);
     cy += row_h;
 
-    /* Accuracy rows */
-    int total_atk = pst_s.miss + pst_s.hit.n + pst_s.crit.n + pst_s.extra.n + pst_s.backstab.n + pst_s.spell.n;
-    if (total_atk == 0) total_atk = 1;
+    /* Combat accuracy rows — BS separated from regular hit/miss */
+    int melee_swings = pst_s.miss + pst_s.hit.n + pst_s.crit.n + pst_s.extra.n + pst_s.spell.n;
+    if (melee_swings == 0) melee_swings = 1;
 
     struct { const char *name; int count; pst_atk_t *atk; float r, g, b; } arows[] = {
         {"Miss", pst_s.miss,       NULL,             1.0f, 0.35f, 0.35f},
         {"Hit",  pst_s.hit.n,      &pst_s.hit,       txr,  txg,   txb},
         {"Crit", pst_s.crit.n,     &pst_s.crit,      1.0f, 0.85f, 0.2f},
         {"Xtra", pst_s.extra.n,    &pst_s.extra,      0.3f, 0.9f,  1.0f},
-        {"BS",   pst_s.backstab.n, &pst_s.backstab,   1.0f, 0.6f,  0.1f},
         {"Spel", pst_s.spell.n,    &pst_s.spell,      0.85f, 0.4f, 1.0f},
     };
 
-    for (int i = 0; i < 6; i++) {
-        int pct = arows[i].count * 100 / total_atk;
+    for (int i = 0; i < 5; i++) {
+        int pct = arows[i].count * 100 / melee_swings;
         float rr = arows[i].r, rg = arows[i].g, rb = arows[i].b;
 
-        /* Subtle alternating row background */
         if (i & 1) {
             psolid(x0 + 3.0f, (float)cy, x1 - 3.0f, (float)(cy + row_h),
                    1.0f, 1.0f, 1.0f, 0.02f, vp_w, vp_h);
@@ -10978,29 +11483,420 @@ static void pst_draw(int vp_w, int vp_h)
     }
     cy += row_h + 4;
 
-    /* ==== Defense Section Header ==== */
-    sh_y0 = (float)cy; sh_y1 = (float)(cy + section_h);
-    psolid(x0 + 3.0f, sh_y0, x1 - 3.0f, sh_y1,
-           acr * 0.15f + bgr * 0.6f, acg * 0.15f + bgg * 0.6f, acb * 0.15f + bgb * 0.6f, 0.9f,
-           vp_w, vp_h);
-    psolid(x0 + 3.0f, sh_y0, x1 - 3.0f, sh_y0 + 1.0f,
-           1.0f, 1.0f, 1.0f, 0.08f, vp_w, vp_h);
-    psolid(x0 + 3.0f, sh_y1 - 1.0f, x1 - 3.0f, sh_y1,
-           0.0f, 0.0f, 0.0f, 0.15f, vp_w, vp_h);
+    /* ==== Backstab Section ==== */
+    if (pst_s.backstab.n > 0) {
+        sh_y0 = (float)cy; sh_y1 = (float)(cy + section_h);
+        psolid(x0 + 3.0f, sh_y0, x1 - 3.0f, sh_y1,
+               acr * 0.15f + bgr * 0.6f, acg * 0.15f + bgg * 0.6f, acb * 0.15f + bgb * 0.6f, 0.9f,
+               vp_w, vp_h);
+        psolid(x0 + 3.0f, sh_y0, x1 - 3.0f, sh_y0 + 1.0f,
+               1.0f, 1.0f, 1.0f, 0.08f, vp_w, vp_h);
+        psolid(x0 + 3.0f, sh_y1 - 1.0f, x1 - 3.0f, sh_y1,
+               0.0f, 0.0f, 0.0f, 0.15f, vp_w, vp_h);
+        sh_ty = cy + (section_h - ch) / 2;
+        ptext((int)x0 + pad, sh_ty, "\xC4\xC4 Backstab \xC4\xC4\xC4\xC4\xC4\xC4\xC4", acr, acg, acb, vp_w, vp_h, cw, ch);
+        cy += section_h;
 
-    sh_ty = cy + (section_h - ch) / 2;
-    ptext((int)x0 + pad, sh_ty, "\xC4\xC4 Defense \xC4\xC4\xC4\xC4\xC4\xC4\xC4\xC4", acr, acg, acb, vp_w, vp_h, cw, ch);
-    cy += section_h;
+        /* BS count */
+        _snprintf(buf, sizeof(buf), "%d", pst_s.backstab.n);
+        ptext((int)x0 + pad, cy + 2, "Landed:", 1.0f, 0.6f, 0.1f, vp_w, vp_h, cw, ch);
+        ptext(val_x, cy + 2, buf, txr, txg, txb, vp_w, vp_h, cw, ch);
+        cy += row_h;
 
-    /* Dodge count */
-    _snprintf(buf, sizeof(buf), "%d", pst_s.dodge);
-    ptext((int)x0 + pad, cy + 2, "Dodge:", 0.3f, 1.0f, 0.3f, vp_w, vp_h, cw, ch);
-    ptext(val_x, cy + 2, buf, txr, txg, txb, vp_w, vp_h, cw, ch);
-    cy += row_h;
+        /* BS damage range + avg */
+        {
+            int mn = pst_s.backstab.min < 0 ? 0 : pst_s.backstab.min;
+            int avg = (int)(pst_s.backstab.total / pst_s.backstab.n);
+            _snprintf(buf, sizeof(buf), "%d-%d", mn, pst_s.backstab.max);
+            ptext((int)x0 + pad, cy + 2, "Range:", dmr, dmg, dmb, vp_w, vp_h, cw, ch);
+            ptext(val_x, cy + 2, buf, dmr, dmg, dmb, vp_w, vp_h, cw, ch);
+            _snprintf(buf, sizeof(buf), "Avg: %d", avg);
+            ptext(val_x + 10 * cw, cy + 2, buf, txr, txg, txb, vp_w, vp_h, cw, ch);
+        }
+        cy += row_h;
+    }
 
     /* Auto-size panel height to content */
     pst_h = (float)(cy - (int)y0 + 6);
 }
+
+/* ---- MegaMUD Settings Window ---- */
+/* Full settings dialog rendered in Vulkan, themed, with tabs + widgets.
+ * Reads/writes MegaMUD struct offsets directly. */
+
+
+/* Tab system — two rows */
+#define STW_TAB_COUNT 16
+static int stw_tab = 0;  /* active tab index */
+
+static const char *stw_tab_names[STW_TAB_COUNT] = {
+    "General", "Display", "Toolbar", "BBS", "Events", "Spells", "Combat", "PvP",
+    "Party", "Cash", "Sounds", "Auto-roam", "Talk", "Statline", "Other", "MajorSLOP"
+};
+
+/* Scroll offset for scrollable sections */
+static int stw_manual_scroll = 0;
+static int stw_auto_scroll = 0;
+
+/* ---- Widget drawing primitives ---- */
+
+/* Draw a themed section header with label */
+static void stw_section(float x0, float x1, int *cy, const char *label,
+                        const ui_theme_t *t, int vp_w, int vp_h, int cw, int ch,
+                        void (*psolid)(float,float,float,float,float,float,float,float,int,int),
+                        void (*ptext)(int,int,const char*,float,float,float,int,int,int,int))
+{
+    float y = (float)*cy;
+    /* Label */
+    ptext((int)x0, (int)y + 2, label, t->accent[0], t->accent[1], t->accent[2], vp_w, vp_h, cw, ch);
+    /* Underline */
+    int lw = (int)strlen(label) * cw;
+    psolid(x0, y + ch + 3, x1, y + ch + 4,
+           t->accent[0] * 0.5f, t->accent[1] * 0.5f, t->accent[2] * 0.5f, 0.6f, vp_w, vp_h);
+    *cy += ch + 8;
+}
+
+/* Draw a checkbox. Returns 1 if clicked. */
+static int stw_checkbox(float x0, int *cy, const char *label, int checked,
+                        int mx, int my, int clicked,
+                        const ui_theme_t *t, int vp_w, int vp_h, int cw, int ch,
+                        void (*psolid)(float,float,float,float,float,float,float,float,int,int),
+                        void (*ptext)(int,int,const char*,float,float,float,int,int,int,int))
+{
+    int bx = (int)x0;
+    int by = *cy + 1;
+    int bs = ch;
+    int hit = 0;
+
+    /* Box background */
+    psolid((float)bx, (float)by, (float)(bx + bs), (float)(by + bs),
+           t->bg[0] + 0.08f, t->bg[1] + 0.08f, t->bg[2] + 0.08f, 1.0f, vp_w, vp_h);
+    /* Box border */
+    psolid((float)bx, (float)by, (float)(bx + bs), (float)(by + 1),
+           t->dim[0], t->dim[1], t->dim[2], 0.6f, vp_w, vp_h);
+    psolid((float)bx, (float)(by + bs - 1), (float)(bx + bs), (float)(by + bs),
+           t->dim[0], t->dim[1], t->dim[2], 0.6f, vp_w, vp_h);
+    psolid((float)bx, (float)by, (float)(bx + 1), (float)(by + bs),
+           t->dim[0], t->dim[1], t->dim[2], 0.6f, vp_w, vp_h);
+    psolid((float)(bx + bs - 1), (float)by, (float)(bx + bs), (float)(by + bs),
+           t->dim[0], t->dim[1], t->dim[2], 0.6f, vp_w, vp_h);
+
+    /* Check mark */
+    if (checked) {
+        int m = 3;
+        psolid((float)(bx + m), (float)(by + m), (float)(bx + bs - m), (float)(by + bs - m),
+               t->accent[0], t->accent[1], t->accent[2], 0.9f, vp_w, vp_h);
+    }
+
+    /* Label */
+    ptext(bx + bs + 6, *cy + 2, label, t->text[0], t->text[1], t->text[2], vp_w, vp_h, cw, ch);
+
+    /* Hit test */
+    int label_w = (int)strlen(label) * cw + bs + 6;
+    if (clicked && mx >= bx && mx < bx + label_w && my >= by && my < by + bs + 2)
+        hit = 1;
+
+    *cy += ch + 5;
+    return hit;
+}
+
+/* Draw a radio button. Returns 1 if clicked. */
+static int stw_radio(float x0, int *cy, const char *label, int selected,
+                     int mx, int my, int clicked,
+                     const ui_theme_t *t, int vp_w, int vp_h, int cw, int ch,
+                     void (*psolid)(float,float,float,float,float,float,float,float,int,int),
+                     void (*ptext)(int,int,const char*,float,float,float,int,int,int,int))
+{
+    int bx = (int)x0;
+    int by = *cy + 1;
+    int bs = ch;
+    int hit = 0;
+
+    /* Outer circle (approximated with filled square + smaller inner) */
+    psolid((float)bx, (float)by, (float)(bx + bs), (float)(by + bs),
+           t->bg[0] + 0.08f, t->bg[1] + 0.08f, t->bg[2] + 0.08f, 1.0f, vp_w, vp_h);
+    /* Border */
+    psolid((float)bx, (float)by, (float)(bx + bs), (float)(by + 1),
+           t->dim[0], t->dim[1], t->dim[2], 0.6f, vp_w, vp_h);
+    psolid((float)bx, (float)(by + bs - 1), (float)(bx + bs), (float)(by + bs),
+           t->dim[0], t->dim[1], t->dim[2], 0.6f, vp_w, vp_h);
+    psolid((float)bx, (float)by, (float)(bx + 1), (float)(by + bs),
+           t->dim[0], t->dim[1], t->dim[2], 0.6f, vp_w, vp_h);
+    psolid((float)(bx + bs - 1), (float)by, (float)(bx + bs), (float)(by + bs),
+           t->dim[0], t->dim[1], t->dim[2], 0.6f, vp_w, vp_h);
+
+    /* Filled dot if selected */
+    if (selected) {
+        int m = 3;
+        psolid((float)(bx + m), (float)(by + m), (float)(bx + bs - m), (float)(by + bs - m),
+               t->accent[0], t->accent[1], t->accent[2], 0.95f, vp_w, vp_h);
+    }
+
+    /* Label */
+    ptext(bx + bs + 6, *cy + 2, label, t->text[0], t->text[1], t->text[2], vp_w, vp_h, cw, ch);
+
+    /* Hit test */
+    int label_w = (int)strlen(label) * cw + bs + 6;
+    if (clicked && mx >= bx && mx < bx + label_w && my >= by && my < by + bs + 2)
+        hit = 1;
+
+    *cy += ch + 5;
+    return hit;
+}
+
+/* Draw a label: value pair */
+static void stw_label_val(float x0, int *cy, const char *label, const char *value,
+                          const ui_theme_t *t, int vp_w, int vp_h, int cw, int ch,
+                          void (*ptext)(int,int,const char*,float,float,float,int,int,int,int))
+{
+    ptext((int)x0, *cy + 2, label, t->dim[0], t->dim[1], t->dim[2], vp_w, vp_h, cw, ch);
+    int vx = (int)x0 + (int)strlen(label) * cw + cw;
+    ptext(vx, *cy + 2, value, t->text[0], t->text[1], t->text[2], vp_w, vp_h, cw, ch);
+    *cy += ch + 5;
+}
+
+/* ---- Settings toggle offsets — Manual and Auto mode defaults ---- */
+#define STW_TOGGLE_COUNT 11
+static const struct { const char *name; int off; } stw_toggles[STW_TOGGLE_COUNT] = {
+    { "Auto-Combat",    0x4D00 },
+    { "Auto-Nuke",      0x4D04 },
+    { "Auto-Heal/Rest", 0x4D08 },
+    { "Auto-Bless",     0x4D0C },
+    { "Auto-Light",     0x4D10 },
+    { "Auto-Cash",      0x4D14 },
+    { "Auto-Get",       0x4D18 },
+    { "Auto-Search",    0x4D1C },
+    { "Auto-Sneak",     0x4D20 },
+    { "Auto-Hide",      0x4D24 },
+    { "Auto-Track",     0x4D28 },
+};
+
+/* Manual defaults at 0x4D2C, Auto defaults at 0x4D58 (same 11 slots) */
+#define STW_DEF_MANUAL_BASE 0x4D2C
+#define STW_DEF_AUTO_BASE   0x4D58
+
+/* Other General tab offsets */
+#define STW_OFF_START_TASK   0x4D84
+#define STW_OFF_AUTO_CONNECT 0x8AA0
+#define STW_OFF_NO_MODE_DEFS 0x4D84  /* shares with START_TASK? need to verify */
+
+static void stw_toggle(void)
+{
+    stw_visible = !stw_visible;
+    if (stw_visible && !stw_scaled) {
+        stw_w = 620 * ui_scale;
+        stw_h = 480 * ui_scale;
+        int vp_w = (int)vk_sc_extent.width, vp_h = (int)vk_sc_extent.height;
+        stw_x = (float)(vp_w - (int)stw_w) / 2.0f;
+        stw_y = (float)(vp_h - (int)stw_h) / 2.0f;
+        stw_scaled = 1;
+    }
+}
+
+/* ---- Settings Window Draw ---- */
+
+static void stw_draw(int vp_w, int vp_h, int mx, int my, int clicked)
+{
+    if (!stw_visible) return;
+
+    const ui_theme_t *t = &ui_themes[current_theme];
+    void (*psolid)(float, float, float, float, float, float, float, float, int, int) =
+        ui_font_ready ? push_solid_ui : push_solid;
+    void (*ptext)(int, int, const char *, float, float, float, int, int, int, int) =
+        ui_font_ready ? push_text_ui : push_text;
+    int cw = (int)(VSB_CHAR_W * ui_scale), ch = (int)(VSB_CHAR_H * ui_scale);
+
+    float x0 = stw_x, y0 = stw_y;
+    float x1 = x0 + stw_w, y1 = y0 + stw_h;
+
+    float bgr = t->bg[0], bgg = t->bg[1], bgb = t->bg[2];
+    float txr = t->text[0], txg = t->text[1], txb = t->text[2];
+    float acr = t->accent[0], acg = t->accent[1], acb = t->accent[2];
+
+    int pad = (int)(10 * ui_scale);
+    int titlebar_h = ch + 10;
+    int tab_h = ch + 8;
+
+    /* ---- Panel background ---- */
+    psolid(x0, y0, x1, y1,
+           bgr + 0.04f, bgg + 0.04f, bgb + 0.04f, 0.97f, vp_w, vp_h);
+
+    /* ---- Outer bevel ---- */
+    psolid(x0, y0, x1, y0 + 1, bgr + 0.18f, bgg + 0.18f, bgb + 0.18f, 0.8f, vp_w, vp_h);
+    psolid(x0, y0, x0 + 1, y1, bgr + 0.14f, bgg + 0.14f, bgb + 0.14f, 0.7f, vp_w, vp_h);
+    psolid(x0, y1 - 1, x1, y1, bgr * 0.4f, bgg * 0.4f, bgb * 0.4f, 0.9f, vp_w, vp_h);
+    psolid(x1 - 1, y0, x1, y1, bgr * 0.5f, bgg * 0.5f, bgb * 0.5f, 0.85f, vp_w, vp_h);
+    /* Inner bevel */
+    psolid(x0 + 1, y0 + 1, x1 - 1, y0 + 2, bgr + 0.10f, bgg + 0.10f, bgb + 0.10f, 0.5f, vp_w, vp_h);
+    psolid(x0 + 1, y0 + 1, x0 + 2, y1 - 1, bgr + 0.08f, bgg + 0.08f, bgb + 0.08f, 0.4f, vp_w, vp_h);
+
+    /* ---- Title bar ---- */
+    float tb_y0 = y0 + 2, tb_y1 = y0 + titlebar_h;
+    psolid(x0 + 2, tb_y0, x1 - 2, tb_y1,
+           acr * 0.25f + bgr * 0.5f, acg * 0.25f + bgg * 0.5f, acb * 0.25f + bgb * 0.5f, 0.95f,
+           vp_w, vp_h);
+    psolid(x0 + 2, tb_y0, x1 - 2, tb_y0 + titlebar_h / 2,
+           1.0f, 1.0f, 1.0f, 0.06f, vp_w, vp_h);
+    psolid(x0 + 2, tb_y1 - 1, x1 - 2, tb_y1,
+           acr, acg, acb, 0.5f, vp_w, vp_h);
+
+    /* Title text */
+    int title_tx = (int)x0 + pad;
+    int title_ty = (int)tb_y0 + (titlebar_h - ch) / 2;
+    ptext(title_tx + 1, title_ty + 1, "MegaMUD Settings", 0.0f, 0.0f, 0.0f, vp_w, vp_h, cw, ch);
+    ptext(title_tx, title_ty, "MegaMUD Settings", txr, txg, txb, vp_w, vp_h, cw, ch);
+
+    /* Close [X] */
+    int close_tx = (int)x1 - pad - cw;
+    ptext(close_tx, title_ty, "X", 1.0f, 0.3f, 0.3f, vp_w, vp_h, cw, ch);
+
+    /* ---- Tab bars (two rows of 8) ---- */
+    int tabs_y = (int)tb_y1 + 2;
+    int tab_w = ((int)stw_w - 4) / 8;
+
+    for (int row = 0; row < 2; row++) {
+        int ry = tabs_y + row * tab_h;
+        for (int col = 0; col < 8; col++) {
+            int ti = row * 8 + col;
+            if (ti >= STW_TAB_COUNT) break;
+            int tx = (int)x0 + 2 + col * tab_w;
+            int tw = (col == 7) ? (int)x1 - 2 - tx : tab_w; /* last tab fills remainder */
+            int active = (ti == stw_tab);
+
+            /* Tab background */
+            if (active) {
+                psolid((float)tx, (float)ry, (float)(tx + tw), (float)(ry + tab_h),
+                       acr * 0.3f + bgr * 0.5f, acg * 0.3f + bgg * 0.5f, acb * 0.3f + bgb * 0.5f, 0.95f,
+                       vp_w, vp_h);
+                /* Active indicator line at bottom */
+                psolid((float)tx, (float)(ry + tab_h - 2), (float)(tx + tw), (float)(ry + tab_h),
+                       acr, acg, acb, 0.9f, vp_w, vp_h);
+            } else {
+                psolid((float)tx, (float)ry, (float)(tx + tw), (float)(ry + tab_h),
+                       bgr + 0.02f, bgg + 0.02f, bgb + 0.02f, 0.85f, vp_w, vp_h);
+            }
+
+            /* Tab border (right edge) */
+            psolid((float)(tx + tw - 1), (float)ry, (float)(tx + tw), (float)(ry + tab_h),
+                   bgr * 0.5f, bgg * 0.5f, bgb * 0.5f, 0.4f, vp_w, vp_h);
+
+            /* Tab label — centered */
+            int lbl_len = (int)strlen(stw_tab_names[ti]);
+            int lbl_x = tx + (tw - lbl_len * cw) / 2;
+            int lbl_y = ry + (tab_h - ch) / 2;
+            ptext(lbl_x, lbl_y, stw_tab_names[ti],
+                  active ? txr : t->dim[0], active ? txg : t->dim[1], active ? txb : t->dim[2],
+                  vp_w, vp_h, cw, ch);
+
+            /* Tab click */
+            if (clicked && mx >= tx && mx < tx + tw && my >= ry && my < ry + tab_h)
+                stw_tab = ti;
+        }
+    }
+
+    /* ---- Content area ---- */
+    int content_y = tabs_y + 2 * tab_h + 4;
+    int content_x = (int)x0 + pad;
+    int content_x1 = (int)x1 - pad;
+    int cy = content_y;
+
+    /* Get struct base for reading/writing */
+    unsigned int sbase = api ? api->get_struct_base() : 0;
+    unsigned char *base = sbase ? (unsigned char *)(uintptr_t)sbase : NULL;
+
+    if (stw_tab == 0) {
+        /* ==== General Tab ==== */
+
+        /* ---- Directories ---- */
+        stw_section((float)content_x, (float)content_x1, &cy, "Directories",
+                    t, vp_w, vp_h, cw, ch, psolid, ptext);
+
+        stw_label_val((float)content_x, &cy, "Data Files: ", "C:\\MegaMUD",
+                      t, vp_w, vp_h, cw, ch, ptext);
+        cy += 4;
+
+        /* ---- Initial ---- */
+        stw_section((float)content_x, (float)content_x1, &cy, "Initial",
+                    t, vp_w, vp_h, cw, ch, psolid, ptext);
+
+        if (base) {
+            int start_task = *(int *)(base + STW_OFF_START_TASK);
+            /* Radio: Do nothing (0), Begin looping (1), Begin auto-roaming (2) */
+            if (stw_radio((float)content_x, &cy, "Do nothing", start_task == 0,
+                          mx, my, clicked, t, vp_w, vp_h, cw, ch, psolid, ptext))
+                *(int *)(base + STW_OFF_START_TASK) = 0;
+            if (stw_radio((float)content_x, &cy, "Begin looping at...", start_task == 1,
+                          mx, my, clicked, t, vp_w, vp_h, cw, ch, psolid, ptext))
+                *(int *)(base + STW_OFF_START_TASK) = 1;
+            if (stw_radio((float)content_x, &cy, "Begin auto-roaming", start_task == 2,
+                          mx, my, clicked, t, vp_w, vp_h, cw, ch, psolid, ptext))
+                *(int *)(base + STW_OFF_START_TASK) = 2;
+
+            cy += 4;
+
+            int auto_conn = *(int *)(base + STW_OFF_AUTO_CONNECT);
+            if (stw_checkbox((float)content_x, &cy, "Auto-connect when INI loaded", auto_conn,
+                             mx, my, clicked, t, vp_w, vp_h, cw, ch, psolid, ptext))
+                *(int *)(base + STW_OFF_AUTO_CONNECT) = auto_conn ? 0 : 1;
+        }
+
+        cy += 8;
+
+        /* ---- Manual-Mode Defaults / Auto-Mode Defaults side by side ---- */
+        int half_w = ((int)stw_w - pad * 3) / 2;
+        int left_x = content_x;
+        int right_x = content_x + half_w + pad;
+
+        /* Section headers */
+        int sec_y = cy;
+        stw_section((float)left_x, (float)(left_x + half_w), &cy, "Manual-Mode Defaults",
+                    t, vp_w, vp_h, cw, ch, psolid, ptext);
+        int cy_right = sec_y;
+        stw_section((float)right_x, (float)(right_x + half_w), &cy_right, "Auto-Mode Defaults",
+                    t, vp_w, vp_h, cw, ch, psolid, ptext);
+
+        if (base) {
+            int cy_left = cy;
+            cy_right = cy;
+
+            for (int i = 0; i < STW_TOGGLE_COUNT; i++) {
+                /* Manual default (profile 1) */
+                int m_val = *(int *)(base + STW_DEF_MANUAL_BASE + i * 4);
+                if (stw_checkbox((float)left_x, &cy_left, stw_toggles[i].name, m_val,
+                                 mx, my, clicked, t, vp_w, vp_h, cw, ch, psolid, ptext))
+                    *(int *)(base + STW_DEF_MANUAL_BASE + i * 4) = m_val ? 0 : 1;
+
+                /* Auto default (profile 2) */
+                int a_val = *(int *)(base + STW_DEF_AUTO_BASE + i * 4);
+                if (stw_checkbox((float)right_x, &cy_right, stw_toggles[i].name, a_val,
+                                 mx, my, clicked, t, vp_w, vp_h, cw, ch, psolid, ptext))
+                    *(int *)(base + STW_DEF_AUTO_BASE + i * 4) = a_val ? 0 : 1;
+            }
+
+            cy = cy_left > cy_right ? cy_left : cy_right;
+        }
+    } else {
+        /* Placeholder for other tabs */
+        ptext(content_x, cy + 20, "(coming soon)",
+              t->dim[0], t->dim[1], t->dim[2], vp_w, vp_h, cw, ch);
+    }
+
+    /* Auto-size height */
+    float min_h = (float)(cy - (int)y0 + pad + 4);
+    if (min_h > stw_h) stw_h = min_h;
+}
+
+/* ---- Settings window hit test + interaction ---- */
+
+static int stw_hit_test(int mx, int my)
+{
+    if (!stw_visible) return 0;
+    return mx >= (int)stw_x && mx < (int)(stw_x + stw_w) &&
+           my >= (int)stw_y && my < (int)(stw_y + stw_h);
+}
+
+/* ---- Vulkan Floating Text (VFT) plugin ---- */
+#include "vft_text.c"
 
 /* ---- Backscroll Panel — glossy panel with 4 mode tabs + save ---- */
 
@@ -11372,6 +12268,31 @@ static void bsp_draw(int vp_w, int vp_h)
             /* Find last non-space */
             int last = CB_COLS - 1;
             while (last >= 0 && row[last].ch <= 0x20 && row[last].attr.bg == 0) last--;
+            /* Background color runs — render colored bg rects before text */
+            {
+                int bg_run_start = -1, prev_bg = 0;
+                for (int c = 0; c <= last; c++) {
+                    int bg_idx = row[c].attr.bg & 15;
+                    if (row[c].attr.reverse) bg_idx = row[c].attr.fg & 15;
+                    if (bg_idx != prev_bg || c == 0) {
+                        if (bg_run_start >= 0 && prev_bg != 0) {
+                            rgb_t bc = cpal[prev_bg];
+                            psolid((float)(lx + bg_run_start * cw), (float)ly,
+                                   (float)(lx + c * cw), (float)(ly + ch),
+                                   bc.r, bc.g, bc.b, 0.9f, vp_w, vp_h);
+                        }
+                        bg_run_start = c;
+                        prev_bg = bg_idx;
+                    }
+                }
+                /* Flush last bg run */
+                if (bg_run_start >= 0 && prev_bg != 0) {
+                    rgb_t bc = cpal[prev_bg];
+                    psolid((float)(lx + bg_run_start * cw), (float)ly,
+                           (float)(lx + (last + 1) * cw), (float)(ly + ch),
+                           bc.r, bc.g, bc.b, 0.9f, vp_w, vp_h);
+                }
+            }
             /* Batch by color runs */
             int run_start = 0;
             char run_buf[CB_COLS + 1];
@@ -11674,16 +12595,16 @@ static int bsp_mouse_down(int mx, int my)
         bsp_scroll = 0;
         return 1;
     }
-    /* Save button click */
-    if (ly >= (int)bsp_h - save_h) {
-        bsp_save();
-        return 1;
-    }
-    /* Resize grip */
+    /* Resize grip (check BEFORE save button — grip is in bottom-right corner) */
     if (mx >= (int)(bsp_x + bsp_w - 14) && my >= (int)(bsp_y + bsp_h - 14)) {
         bsp_resizing = 1;
         bsp_drag_ox = (float)mx - bsp_w;
         bsp_drag_oy = (float)my - bsp_h;
+        return 1;
+    }
+    /* Save button click */
+    if (ly >= (int)bsp_h - save_h) {
+        bsp_save();
         return 1;
     }
     /* Display area — start text selection */
@@ -13875,6 +14796,7 @@ __declspec(dllexport) int vkt_recap_extra(void) { return pst_recap_extra; }
 __declspec(dllexport) int vkt_recap_spell(void) { return pst_recap_spell; }
 __declspec(dllexport) int vkt_recap_bs(void) { return pst_recap_bs; }
 __declspec(dllexport) int vkt_recap_miss(void) { return pst_recap_miss; }
+__declspec(dllexport) int vkt_recap_glance(void) { return pst_recap_glance; }
 __declspec(dllexport) int vkt_recap_dodge(void) { return pst_recap_dodge; }
 __declspec(dllexport) void vkt_recap_set_show(int v) {
     pst_round_recap = v ? 1 : 0;
@@ -13968,6 +14890,7 @@ static slop_command_t vkt_commands[] = {
     { "recap.spell",   "vkt_recap_spell",    "", "i", "Get last round spell count" },
     { "recap.bs",      "vkt_recap_bs",       "", "i", "Get last round backstab count" },
     { "recap.miss",    "vkt_recap_miss",     "", "i", "Get last round miss count" },
+    { "recap.glance",  "vkt_recap_glance",   "", "i", "Get last round glancing blow count" },
     { "recap.dodge",   "vkt_recap_dodge",    "", "i", "Get last round enemy dodge count" },
     { "recap.show",    "vkt_recap_set_show", "i","v", "Set round recap display (0=off, 1=on)" },
     /* MUDRadio */
@@ -14000,12 +14923,157 @@ static slop_command_t vkt_commands[] = {
     { "radio.onset_strength", "mr_cmd_get_onset_strength", "", "f", "Get onset/kick strength (0.0-1.0)" },
     { "radio.onset",          "mr_cmd_get_onset",          "", "i", "Get beat onset (1=detected this frame)" },
     { "radio.beat_count",     "mr_cmd_get_beat_count",     "", "i", "Get monotonic beat counter" },
+    /* Floating Text (VFT) */
+    { "vft",                  "vft_command",               "s", "i", "Spawn floating text: \"text|x|y|param=val|...\"" },
+    { "vft_help",             "vft_help",                  "",  "v", "Show full VFT command reference" },
+    { "vft_fonts",            "vft_list_fonts",            "",  "v", "List available VFT display fonts" },
+    { "vft_set_font",         "vft_set_font",              "i", "i", "Set VFT font (0-4)" },
 };
 
 __declspec(dllexport) slop_command_t *slop_get_commands(int *count)
 {
     *count = sizeof(vkt_commands) / sizeof(vkt_commands[0]);
     return vkt_commands;
+}
+
+/* ---- SLOP Command Dispatcher for Console ---- */
+/* Dispatches "cmd.name(args)" typed in the VKW console directly to C exports,
+ * bypassing Python eval. This makes smoke.help(), bg.set_mode(1) etc. work. */
+static int vkt_try_slop_dispatch(const char *input)
+{
+    const char *paren = strchr(input, '(');
+    if (!paren) return 0;
+    const char *close = strrchr(input, ')');
+    if (!close || close < paren) return 0;
+
+    char cmd_name[128];
+    int cmd_len = (int)(paren - input);
+    if (cmd_len <= 0 || cmd_len >= (int)sizeof(cmd_name)) return 0;
+    memcpy(cmd_name, input, cmd_len);
+    cmd_name[cmd_len] = 0;
+
+    /* Look up in SLOP command table */
+    int count = sizeof(vkt_commands) / sizeof(vkt_commands[0]);
+    slop_command_t *match = NULL;
+    for (int i = 0; i < count; i++) {
+        if (strcmp(vkt_commands[i].py_name, cmd_name) == 0) {
+            match = &vkt_commands[i];
+            break;
+        }
+    }
+    if (!match) return 0;
+
+    /* Resolve the DLL export function */
+    static HMODULE self_mod = NULL;
+    if (!self_mod) self_mod = GetModuleHandleA("vk_terminal.dll");
+    if (!self_mod) return 0;
+    FARPROC fn = GetProcAddress(self_mod, match->c_func);
+    if (!fn) return 0;
+
+    /* Parse arguments from between parens */
+    char args_str[512];
+    int args_len = (int)(close - paren - 1);
+    if (args_len < 0) args_len = 0;
+    if (args_len >= (int)sizeof(args_str)) args_len = (int)sizeof(args_str) - 1;
+    memcpy(args_str, paren + 1, args_len);
+    args_str[args_len] = 0;
+
+    const char *atypes = match->arg_types;
+    int argc = (int)strlen(atypes);
+    int iargs[8] = {0};
+    float fargs[8] = {0};
+    char sarg_bufs[8][512];
+    const char *sargs[8] = {NULL};
+
+    if (argc > 0) {
+        char *tok = args_str;
+        for (int i = 0; i < argc && i < 8; i++) {
+            while (*tok == ' ') tok++;
+            char *comma = strchr(tok, ',');
+            if (comma && i < argc - 1) *comma = 0;
+            char *end = tok + strlen(tok) - 1;
+            while (end > tok && *end == ' ') *end-- = 0;
+
+            if (atypes[i] == 'i') {
+                iargs[i] = atoi(tok);
+            } else if (atypes[i] == 'f') {
+                fargs[i] = (float)atof(tok);
+            } else if (atypes[i] == 's') {
+                char *s = tok;
+                int slen = (int)strlen(s);
+                if (slen >= 2 && ((s[0] == '\'' && s[slen-1] == '\'') ||
+                                  (s[0] == '"' && s[slen-1] == '"'))) {
+                    s++; slen -= 2;
+                }
+                if (slen >= (int)sizeof(sarg_bufs[i])) slen = (int)sizeof(sarg_bufs[i]) - 1;
+                memcpy(sarg_bufs[i], s, slen);
+                sarg_bufs[i][slen] = 0;
+                sargs[i] = sarg_bufs[i];
+            }
+            if (comma && i < argc - 1) tok = comma + 1;
+        }
+    }
+
+    char result_buf[256] = "";
+    const char *rtype = match->ret_type;
+
+    /* All exports are __cdecl (mingw default), NOT __stdcall */
+    if (argc == 0) {
+        if (rtype[0] == 'v') ((void (__cdecl *)(void))fn)();
+        else if (rtype[0] == 'i') {
+            int r = ((int (__cdecl *)(void))fn)();
+            _snprintf(result_buf, sizeof(result_buf), "%d", r);
+        } else if (rtype[0] == 'f') {
+            float r = ((float (__cdecl *)(void))fn)();
+            _snprintf(result_buf, sizeof(result_buf), "%.4f", r);
+        } else if (rtype[0] == 's') {
+            const char *r = ((const char *(__cdecl *)(void))fn)();
+            _snprintf(result_buf, sizeof(result_buf), "%s", r ? r : "(null)");
+        }
+    } else if (argc == 1 && atypes[0] == 'i') {
+        if (rtype[0] == 'v') ((void (__cdecl *)(int))fn)(iargs[0]);
+        else if (rtype[0] == 'i') {
+            int r = ((int (__cdecl *)(int))fn)(iargs[0]);
+            _snprintf(result_buf, sizeof(result_buf), "%d", r);
+        }
+    } else if (argc == 1 && atypes[0] == 'f') {
+        if (rtype[0] == 'v') ((void (__cdecl *)(float))fn)(fargs[0]);
+        else if (rtype[0] == 'f') {
+            float r = ((float (__cdecl *)(float))fn)(fargs[0]);
+            _snprintf(result_buf, sizeof(result_buf), "%.4f", r);
+        }
+    } else if (argc == 1 && atypes[0] == 's') {
+        if (!sargs[0]) sargs[0] = "";
+        if (rtype[0] == 'v') {
+            ((void (__cdecl *)(const char *))fn)(sargs[0]);
+        } else if (rtype[0] == 'i') {
+            int r = ((int (__cdecl *)(const char *))fn)(sargs[0]);
+            _snprintf(result_buf, sizeof(result_buf), "%d", r);
+        } else if (rtype[0] == 'f') {
+            float r = ((float (__cdecl *)(const char *))fn)(sargs[0]);
+            _snprintf(result_buf, sizeof(result_buf), "%.4f", r);
+        } else if (rtype[0] == 's') {
+            const char *r = ((const char *(__cdecl *)(const char *))fn)(sargs[0]);
+            _snprintf(result_buf, sizeof(result_buf), "%s", r ? r : "(null)");
+        }
+    } else if (argc == 2 && atypes[0] == 'i' && atypes[1] == 's') {
+        if (rtype[0] == 'v') ((void (__cdecl *)(int, const char *))fn)(iargs[0], sargs[1]);
+    } else if (argc == 2 && atypes[0] == 'i' && atypes[1] == 'f') {
+        if (rtype[0] == 'v') ((void (__cdecl *)(int, float))fn)(iargs[0], fargs[1]);
+    } else if (argc == 6) {
+        if (rtype[0] == 'v') ((void (__cdecl *)(float,float,float,float,float,float))fn)(
+            fargs[0], fargs[1], fargs[2], fargs[3], fargs[4], fargs[5]);
+    } else if (argc == 7) {
+        if (rtype[0] == 'v') ((void (__cdecl *)(float,float,float,float,float,float,float))fn)(
+            fargs[0], fargs[1], fargs[2], fargs[3], fargs[4], fargs[5], fargs[6]);
+    } else {
+        return 0;
+    }
+
+    if (result_buf[0] && vkw_console_idx >= 0) {
+        vkw_print(vkw_console_idx, result_buf);
+    }
+    return 1;
 }
 
 /* ---- Plugin interface ---- */
@@ -14020,6 +15088,11 @@ static int vkt_on_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
     /* F11 from MegaMUD window opens the Vulkan terminal */
     if (msg == WM_KEYDOWN && wParam == VK_F11) {
         vkt_toggle();
+        return 1;
+    }
+    /* Alt+F4 from MegaMUD window — kill instantly, no dialogs */
+    if (msg == WM_SYSKEYDOWN && wParam == VK_F4) {
+        ExitProcess(0);
         return 1;
     }
     return 0;
@@ -14127,6 +15200,13 @@ static void vkt_save_settings(void)
     SAVE_INT("pst_x", (int)pst_x); SAVE_INT("pst_y", (int)pst_y);
     SAVE_INT("mr_x", (int)mr_x); SAVE_INT("mr_y", (int)mr_y);
     SAVE_INT("mr_w", (int)mr_w); SAVE_INT("mr_h", (int)mr_h);
+    /* Recent destinations */
+    SAVE_INT("recent_count", vkm_goto_count);
+    for (int i = 0; i < vkm_goto_count; i++) {
+        char key[32];
+        _snprintf(key, sizeof(key), "recent_%d", i);
+        WritePrivateProfileStringA(VKT_INI_SECTION, key, vkm_goto_names[i], ini);
+    }
 
     #undef SAVE_INT
     #undef SAVE_FLOAT
@@ -14163,10 +15243,10 @@ static void vkt_load_settings(void)
     if (fx_rain_mode && fx_waves_mode) fx_waves_mode = 0; /* enforce exclusivity */
     LOAD_INT("round_timer", vrt_visible, 0);
     LOAD_INT("vrt_orbits", vrt_orbits_visible, 1);
-    LOAD_INT("status_bar", vsb_visible, 0);
-    LOAD_INT("icon_bar", vib_visible, 0);
+    LOAD_INT("status_bar", vsb_visible, 1);
+    LOAD_INT("icon_bar", vib_visible, 1);
     LOAD_INT("icon_bar_pin", vib_pinned, 1);
-    LOAD_INT("exp_bar", vxb_visible, 0);
+    LOAD_INT("exp_bar", vxb_visible, 1);
     LOAD_INT("player_stats", pst_visible, 0);
     LOAD_INT("round_recap", pst_round_recap, 1);
     LOAD_INT("mudradio", mr_visible, 0);
@@ -14231,6 +15311,14 @@ static void vkt_load_settings(void)
     { int v; LOAD_INT("mr_y", v, (int)mr_y); mr_y = (float)v; }
     { int v; LOAD_INT("mr_w", v, (int)mr_w); mr_w = (float)v; }
     { int v; LOAD_INT("mr_h", v, (int)mr_h); mr_h = (float)v; }
+    /* Recent destinations */
+    LOAD_INT("recent_count", vkm_goto_count, 0);
+    if (vkm_goto_count > VKM_GOTO_MAX) vkm_goto_count = VKM_GOTO_MAX;
+    for (int i = 0; i < vkm_goto_count; i++) {
+        char key[32];
+        _snprintf(key, sizeof(key), "recent_%d", i);
+        GetPrivateProfileStringA(VKT_INI_SECTION, key, "", vkm_goto_names[i], 64, ini);
+    }
 
     #undef LOAD_INT
     #undef LOAD_FLOAT

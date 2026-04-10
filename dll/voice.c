@@ -92,9 +92,62 @@ static void voice_build_grammar(void);
 static void CALLBACK wave_in_callback(HWAVEIN hwi, UINT msg, DWORD_PTR inst,
                                        DWORD_PTR param1, DWORD_PTR param2);
 
-/* ---- Grammar ---- */
-#define MAX_GRAMMAR_SIZE  (256 * 1024)  /* 256KB max grammar string */
+/* ---- Grammar + Lookup Table ---- */
+#define MAX_GRAMMAR_SIZE  (512 * 1024)  /* 512KB max grammar string */
 static char *grammar_str = NULL;
+
+/* Lookup table: maps spoken grammar phrase → action */
+#define VLU_MAX     2048
+#define VLU_LOOP    1   /* action = loop <file> */
+#define VLU_GOTO    2   /* action = goto <room_name> */
+typedef struct {
+    char spoken[80];    /* lowercase grammar phrase (what PS recognizes) */
+    char target[80];    /* .mp filename (for loop) or room name (for goto) */
+    int  action;        /* VLU_LOOP or VLU_GOTO */
+} voice_lookup_t;
+static voice_lookup_t vlu[VLU_MAX];
+static int vlu_count = 0;
+
+/* Add to lookup table, dedup by spoken phrase (first wins) */
+static void vlu_add(const char *spoken, const char *target, int action)
+{
+    if (!spoken[0] || vlu_count >= VLU_MAX) return;
+    /* Check for duplicate spoken phrase */
+    for (int i = 0; i < vlu_count; i++)
+        if (_stricmp(vlu[i].spoken, spoken) == 0) return;
+    strncpy(vlu[vlu_count].spoken, spoken, 79);
+    vlu[vlu_count].spoken[79] = 0;
+    strncpy(vlu[vlu_count].target, target, 79);
+    vlu[vlu_count].target[79] = 0;
+    vlu[vlu_count].action = action;
+    vlu_count++;
+}
+
+/* Sanitize a name for JSGF: lowercase, letters/digits/spaces only */
+static int voice_sanitize(const char *src, char *dst, int maxlen)
+{
+    int len = 0;
+    for (const char *p = src; *p && len < maxlen - 1; p++) {
+        char c = *p;
+        if (c >= 'A' && c <= 'Z') c += 32;
+        if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == ' ') {
+            dst[len++] = c;
+        } else if (c == '-' || c == '_' || c == '\'' || c == ',' || c == '(' || c == ')') {
+            if (len > 0 && dst[len-1] != ' ') dst[len++] = ' ';
+        }
+    }
+    /* Trim trailing spaces */
+    while (len > 0 && dst[len-1] == ' ') len--;
+    dst[len] = '\0';
+    /* Collapse double spaces */
+    int w = 0;
+    for (int r = 0; r < len; r++) {
+        if (dst[r] == ' ' && w > 0 && dst[w-1] == ' ') continue;
+        dst[w++] = dst[r];
+    }
+    dst[w] = '\0';
+    return w;
+}
 
 /* Build path to model directory (next to the DLL) */
 static void find_model_dir(void)
@@ -169,16 +222,19 @@ static int voice_init_decoder(void)
 
 /* ---- Grammar builder ---- */
 
-/* Scan .mp files and extract loop names for grammar */
-static int scan_loop_names(char *buf, int maxlen)
+/* Scan .mp files: build lookup table entries and grammar alternatives.
+ * For each .mp file, adds:
+ *   1. Display name from [Name] header (e.g. "stone elementals tiny") → loop file
+ *   2. Filename without .mp (e.g. "stontiny") → loop file
+ * Chars/All overrides Default for same filename. */
+static void scan_loop_files(void)
 {
     char mp_dir[MAX_PATH];
     GetModuleFileNameA(NULL, mp_dir, MAX_PATH);
     char *slash = strrchr(mp_dir, '\\');
     if (slash) *(slash + 1) = '\0';
 
-    int pos = 0;
-    int count = 0;
+    /* Scan Default first, then Chars/All (later wins on dedup) */
     const char *subdirs[] = { "Default", "Chars\\All" };
 
     for (int d = 0; d < 2; d++) {
@@ -190,51 +246,45 @@ static int scan_loop_names(char *buf, int maxlen)
         if (hFind == INVALID_HANDLE_VALUE) continue;
 
         do {
-            /* Read first line to get loop name: [LoopName][Creator] */
             char full_path[MAX_PATH];
             sprintf(full_path, "%s%s\\%s", mp_dir, subdirs[d], fd.cFileName);
 
+            /* Get filename without extension for the spoken form */
+            char file_base[32];
+            strncpy(file_base, fd.cFileName, 31);
+            file_base[31] = 0;
+            char *dot = strrchr(file_base, '.');
+            if (dot) *dot = '\0';
+
+            /* Sanitize filename as spoken form */
+            char file_spoken[80];
+            voice_sanitize(file_base, file_spoken, sizeof(file_spoken));
+
+            /* The target is the filename (with .mp) */
+            char mp_file[32];
+            strncpy(mp_file, fd.cFileName, 31);
+            mp_file[31] = 0;
+
+            /* Add filename as spoken form → loop target */
+            if (file_spoken[0] && strlen(file_spoken) > 1)
+                vlu_add(file_spoken, mp_file, VLU_LOOP);
+
+            /* Read first line to get display name: [DisplayName][Creator] */
             FILE *f = fopen(full_path, "r");
             if (!f) continue;
 
             char line[256];
             if (fgets(line, sizeof(line), f)) {
-                /* Extract [LoopName] */
                 if (line[0] == '[') {
                     char *end = strchr(line + 1, ']');
                     if (end && (end - line - 1) > 0) {
                         *end = '\0';
                         const char *name = line + 1;
-
-                        /* Convert to lowercase for grammar */
-                        char lower[128];
-                        int len = 0;
-                        for (const char *p = name; *p && len < 126; p++) {
-                            char c = *p;
-                            if (c >= 'A' && c <= 'Z') c += 32;
-                            /* Only keep letters, digits, spaces */
-                            if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == ' ') {
-                                lower[len++] = c;
-                            } else if (c == '-' || c == '_' || c == '\'') {
-                                lower[len++] = ' '; /* normalize separators to spaces */
-                            }
-                        }
-                        lower[len] = '\0';
-
-                        /* Trim trailing spaces */
-                        while (len > 0 && lower[len-1] == ' ') lower[--len] = '\0';
-
-                        if (len > 1) {
-                            int wrote;
-                            if (count == 0) {
-                                wrote = snprintf(buf + pos, maxlen - pos, "%s", lower);
-                            } else {
-                                wrote = snprintf(buf + pos, maxlen - pos, " | %s", lower);
-                            }
-                            if (wrote > 0 && pos + wrote < maxlen) {
-                                pos += wrote;
-                                count++;
-                            }
+                        if (name[0]) {
+                            char display_spoken[80];
+                            int dlen = voice_sanitize(name, display_spoken, sizeof(display_spoken));
+                            if (dlen > 1)
+                                vlu_add(display_spoken, mp_file, VLU_LOOP);
                         }
                     }
                 }
@@ -244,9 +294,91 @@ static int scan_loop_names(char *buf, int maxlen)
 
         FindClose(hFind);
     }
+}
 
-    api->log("[voice] Scanned %d loop/path names for grammar\n", count);
-    return count;
+/* Scan Rooms.md: add room names and 4-letter codes as goto targets.
+ * Format: HASH:FLAGS:x:y:z:CODE:Category:Room Name */
+static void scan_room_names(void)
+{
+    char mp_dir[MAX_PATH];
+    GetModuleFileNameA(NULL, mp_dir, MAX_PATH);
+    char *slash = strrchr(mp_dir, '\\');
+    if (slash) *(slash + 1) = '\0';
+
+    const char *subdirs[] = { "Default", "Chars\\All" };
+
+    for (int d = 0; d < 2; d++) {
+        char rooms_path[MAX_PATH];
+        sprintf(rooms_path, "%s%s\\Rooms.md", mp_dir, subdirs[d]);
+
+        FILE *f = fopen(rooms_path, "r");
+        if (!f) continue;
+
+        char line[512];
+        while (fgets(line, sizeof(line), f)) {
+            /* Parse: HASH:FLAGS:x:y:z:CODE:Category:Room Name */
+            char *fields[8];
+            int nf = 0;
+            char *p = line;
+            while (nf < 8 && p) {
+                fields[nf++] = p;
+                p = strchr(p, ':');
+                if (p) *p++ = '\0';
+            }
+            if (nf < 8) continue;
+
+            const char *code = fields[5];      /* 4-letter code like STON */
+            const char *room_name = fields[7]; /* Full room name */
+
+            /* Trim trailing newline */
+            int rlen = (int)strlen(room_name);
+            while (rlen > 0 && (room_name[rlen-1] == '\n' || room_name[rlen-1] == '\r'))
+                ((char *)room_name)[--rlen] = '\0';
+
+            /* Add room name as goto target */
+            char spoken[80];
+            int slen = voice_sanitize(room_name, spoken, sizeof(spoken));
+            if (slen > 1)
+                vlu_add(spoken, room_name, VLU_GOTO);
+
+            /* Add 4-letter code as goto target */
+            char code_spoken[80];
+            int clen = voice_sanitize(code, code_spoken, sizeof(code_spoken));
+            if (clen >= 2)
+                vlu_add(code_spoken, room_name, VLU_GOTO);
+        }
+        fclose(f);
+    }
+}
+
+/* Dedup tracker for grammar alternatives */
+static char **gram_alts = NULL;
+static int    gram_alt_count = 0;
+static int    gram_alt_cap = 0;
+
+static int gram_alt_exists(const char *s)
+{
+    for (int i = 0; i < gram_alt_count; i++)
+        if (strcmp(gram_alts[i], s) == 0) return 1;
+    return 0;
+}
+
+static void gram_alt_add(const char *s)
+{
+    if (gram_alt_count >= gram_alt_cap) {
+        gram_alt_cap = gram_alt_cap ? gram_alt_cap * 2 : 512;
+        gram_alts = (char **)realloc(gram_alts, gram_alt_cap * sizeof(char *));
+    }
+    gram_alts[gram_alt_count++] = _strdup(s);
+}
+
+static void gram_alt_free(void)
+{
+    for (int i = 0; i < gram_alt_count; i++) free(gram_alts[i]);
+    free(gram_alts);
+    gram_alts = NULL;
+    gram_alt_count = 0;
+    gram_alt_cap = 0;
 }
 
 static void voice_build_grammar(void)
@@ -255,11 +387,47 @@ static void voice_build_grammar(void)
     grammar_str = (char *)malloc(MAX_GRAMMAR_SIZE);
     if (!grammar_str) return;
 
-    /* Build loop names list */
-    char *loop_names = (char *)malloc(128 * 1024);
-    if (!loop_names) { free(grammar_str); grammar_str = NULL; return; }
-    loop_names[0] = '\0';
-    int nloops = scan_loop_names(loop_names, 128 * 1024);
+    /* Reset lookup table and scan files */
+    vlu_count = 0;
+    scan_loop_files();
+    scan_room_names();
+
+    {
+        int nloops = 0, nrooms = 0;
+        for (int i = 0; i < vlu_count; i++) {
+            if (vlu[i].action == VLU_LOOP) nloops++;
+            else nrooms++;
+        }
+        api->log("[voice] Lookup table: %d entries (%d loops, %d rooms)\n",
+                 vlu_count, nloops, nrooms);
+    }
+
+    /* Build destination alternatives string (deduped) */
+    gram_alt_free();
+    char *dest_alts = (char *)malloc(256 * 1024);
+    if (!dest_alts) { free(grammar_str); grammar_str = NULL; return; }
+    int dpos = 0;
+    int dest_count = 0;
+
+    for (int i = 0; i < vlu_count; i++) {
+        if (gram_alt_exists(vlu[i].spoken)) continue;
+        gram_alt_add(vlu[i].spoken);
+        int wrote;
+        if (dest_count == 0)
+            wrote = snprintf(dest_alts + dpos, 256*1024 - dpos, "%s", vlu[i].spoken);
+        else
+            wrote = snprintf(dest_alts + dpos, 256*1024 - dpos, " | %s", vlu[i].spoken);
+        if (wrote > 0 && dpos + wrote < 256*1024) {
+            dpos += wrote;
+            dest_count++;
+        }
+    }
+    gram_alt_free();
+
+    if (dest_count == 0) {
+        strcpy(dest_alts, "placeholder");
+        dest_count = 1;
+    }
 
     /* Build the JSGF grammar */
     int pos = 0;
@@ -270,8 +438,7 @@ static void voice_build_grammar(void)
     /* Directions */
     pos += sprintf(grammar_str + pos,
         "<direction> = north | south | east | west | up | down "
-        "| northeast | northwest | southeast | southwest "
-        "| n | s | e | w | ne | nw | se | sw;\n\n");
+        "| northeast | northwest | southeast | southwest;\n\n");
 
     /* Combat */
     pos += sprintf(grammar_str + pos,
@@ -282,26 +449,20 @@ static void voice_build_grammar(void)
         "<utility> = rest | meditate | look | search | sneak | hide "
         "| pick lock | get all | drop all | inventory;\n\n");
 
-    /* Loop names */
-    if (nloops > 0) {
-        pos += sprintf(grammar_str + pos,
-            "<loop_name> = %s;\n\n", loop_names);
-    } else {
-        pos += sprintf(grammar_str + pos,
-            "<loop_name> = placeholder;\n\n");
-    }
+    /* Destination names (loops + rooms, deduped) */
+    pos += sprintf(grammar_str + pos, "<dest> = %s;\n\n", dest_alts);
 
-    /* Loop/path commands */
+    /* Navigation commands */
     pos += sprintf(grammar_str + pos,
-        "<loopcommand> = loop <loop_name> | go to <loop_name> "
-        "| walk me to <loop_name> | run me to <loop_name> "
+        "<navcommand> = loop <dest> | go to <dest> | goto <dest> "
+        "| walk to <dest> | run to <dest> "
         "| stop loop | stop;\n\n");
 
-    /* Spell casting (basic for now — will be expanded with MDB2 data) */
+    /* Spell casting */
     pos += sprintf(grammar_str + pos,
         "<castverb> = cast | sing | invoke;\n\n");
 
-    /* Info queries (for MMUDPy voice hooks) */
+    /* Info queries */
     pos += sprintf(grammar_str + pos,
         "<query> = check exp | check rate | check stats | check health "
         "| how much exp | what is my rate | exp check | status;\n\n");
@@ -309,18 +470,25 @@ static void voice_build_grammar(void)
     /* Top-level rule */
     pos += sprintf(grammar_str + pos,
         "public <command> = <direction> | <combat> | <utility> "
-        "| <loopcommand> | <castverb> | <query>;\n");
+        "| <navcommand> | <castverb> | <query>;\n");
 
-    free(loop_names);
+    free(dest_alts);
+
+    api->log("[voice] Grammar: %d bytes, %d destinations\n", pos, dest_count);
 
     /* Load grammar into decoder */
     if (decoder) {
         int rv = ps_add_jsgf_string(decoder, "mudcmds", grammar_str);
         if (rv < 0) {
             api->log("[voice] ERROR: Failed to load JSGF grammar\n");
+            /* Dump first 500 chars for debug */
+            char dbg[501];
+            strncpy(dbg, grammar_str, 500);
+            dbg[500] = 0;
+            api->log("[voice] Grammar start:\n%s\n", dbg);
         } else {
             ps_activate_search(decoder, "mudcmds");
-            api->log("[voice] Grammar loaded (%d bytes, %d loops)\n", pos, nloops);
+            api->log("[voice] Grammar loaded OK\n");
         }
     }
 }
@@ -411,6 +579,15 @@ static void voice_start_recording(void)
     api->log("[voice] Recording started (PTT held)\n");
 }
 
+/* Look up a spoken destination phrase in the lookup table.
+ * Returns index into vlu[] or -1 if not found. */
+static int vlu_find(const char *spoken)
+{
+    for (int i = 0; i < vlu_count; i++)
+        if (_stricmp(vlu[i].spoken, spoken) == 0) return i;
+    return -1;
+}
+
 /* Dispatch recognized speech to the right handler */
 static void voice_dispatch(const char *text)
 {
@@ -422,23 +599,41 @@ static void voice_dispatch(const char *text)
         return;
     }
 
-    /* "loop <name>" — "loop ancient crypt" */
-    if (_strnicmp(text, "loop ", 5) == 0) {
-        char cmd[128];
-        snprintf(cmd, sizeof(cmd), "loop %s", text + 5);
-        api->fake_remote(cmd);
-        return;
-    }
-
-    /* "go to <name>" / "walk me to <name>" / "run me to <name>" → goto */
+    /* Navigation commands: "loop X", "go to X", "goto X", "walk to X", "run to X" */
     const char *dest = NULL;
-    if (_strnicmp(text, "go to ", 6) == 0) dest = text + 6;
-    else if (_strnicmp(text, "walk me to ", 11) == 0) dest = text + 11;
-    else if (_strnicmp(text, "run me to ", 10) == 0) dest = text + 10;
+    int is_loop = 0;
+    if (_strnicmp(text, "loop ", 5) == 0) { dest = text + 5; is_loop = 1; }
+    else if (_strnicmp(text, "go to ", 6) == 0) dest = text + 6;
+    else if (_strnicmp(text, "goto ", 5) == 0) dest = text + 5;
+    else if (_strnicmp(text, "walk to ", 8) == 0) dest = text + 8;
+    else if (_strnicmp(text, "run to ", 7) == 0) dest = text + 7;
+
     if (dest) {
-        char cmd[128];
-        snprintf(cmd, sizeof(cmd), "goto %s", dest);
-        api->fake_remote(cmd);
+        int idx = vlu_find(dest);
+        if (idx >= 0) {
+            char cmd[128];
+            if (is_loop && vlu[idx].action == VLU_LOOP) {
+                /* Loop command with a known .mp file */
+                snprintf(cmd, sizeof(cmd), "loop %s", vlu[idx].target);
+                api->fake_remote(cmd);
+            } else if (is_loop && vlu[idx].action == VLU_GOTO) {
+                /* User said "loop X" but X is a room — just goto it */
+                snprintf(cmd, sizeof(cmd), "goto %s", vlu[idx].target);
+                api->fake_remote(cmd);
+            } else {
+                /* goto/walk/run → always goto */
+                snprintf(cmd, sizeof(cmd), "goto %s", vlu[idx].target);
+                api->fake_remote(cmd);
+            }
+            api->log("[voice] Nav: '%s' → %s %s\n", text,
+                     is_loop ? "loop" : "goto", vlu[idx].target);
+        } else {
+            /* Not in lookup table — try raw */
+            char cmd[128];
+            snprintf(cmd, sizeof(cmd), "%s %s", is_loop ? "loop" : "goto", dest);
+            api->fake_remote(cmd);
+            api->log("[voice] Nav (raw): '%s'\n", cmd);
+        }
         return;
     }
 
@@ -449,9 +644,6 @@ static void voice_dispatch(const char *text)
         {"up",        "u"},  {"down",      "d"},
         {"northeast", "ne"}, {"northwest", "nw"},
         {"southeast", "se"}, {"southwest", "sw"},
-        /* Short forms pass through directly */
-        {"n", "n"}, {"s", "s"}, {"e", "e"}, {"w", "w"},
-        {"ne", "ne"}, {"nw", "nw"}, {"se", "se"}, {"sw", "sw"},
         {NULL, NULL}
     };
     for (int i = 0; dirs[i].spoken; i++) {

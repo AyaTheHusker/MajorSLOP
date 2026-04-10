@@ -1559,6 +1559,10 @@ static void slop_update_menu_state(void)
 
 static LRESULT CALLBACK slop_mmansi_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
+    /* Alt+F4 — instant kill at every level, no dialogs */
+    if (msg == WM_SYSKEYDOWN && wParam == VK_F4) { ExitProcess(0); return 0; }
+    if (msg == WM_SYSCOMMAND && (wParam & 0xFFF0) == SC_CLOSE) { ExitProcess(0); return 0; }
+    if (msg == WM_CLOSE) { ExitProcess(0); return 0; }
     /* Forward WM_KEYDOWN to plugins for hotkeys (F11 etc.) */
     if (msg == WM_KEYDOWN) {
         if (plugins_on_wndproc(hwnd, msg, wParam, lParam))
@@ -1569,6 +1573,11 @@ static LRESULT CALLBACK slop_mmansi_proc(HWND hwnd, UINT msg, WPARAM wParam, LPA
 
 static LRESULT CALLBACK slop_mmmain_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
+    /* Alt+F4 — instant kill at every level, no dialogs */
+    if (msg == WM_SYSKEYDOWN && wParam == VK_F4) { ExitProcess(0); return 0; }
+    if (msg == WM_SYSCOMMAND && (wParam & 0xFFF0) == SC_CLOSE) { ExitProcess(0); return 0; }
+    if (msg == WM_CLOSE) { ExitProcess(0); return 0; }
+
     /* Track when menu loop is active — suppress MegaMUD's timers/focus stealing
        that would otherwise dismiss the dropdown after ~1 second */
     if (msg == WM_ENTERMENULOOP) {
@@ -2425,12 +2434,18 @@ static int fake_remote_impl(const char *cmd)
             int m2 = (cmp((char *)(entry + 1), nb) == 0);
 
             if (m1 || m2) {
+                /* VA-based goto with loop-resume prevention.
+                 * Layer 1: zero all known loop-resume fields before/after VA calls.
+                 * Layer 2: vk_terminal.c watchdog catches resume if this doesn't stick. */
                 ((fn_vi)VA_STOP_PATH)(sb);
-                /* Fully clear all loop/path state before goto */
+
+                /* Clear loop state before starting goto path */
                 *(int *)(sbp + OFF_FR_LOOPING) = 0;
-                *(int *)(sbp + OFF_FR_ON_ENTRY) = 0;  /* don't resume loop on arrival */
-                *(int *)(sbp + OFF_FR_PATHING) = 0;
-                *(int *)(sbp + OFF_FR_GO_FLAG) = 0;
+                *(int *)(sbp + OFF_FR_ON_ENTRY) = 0;
+                *(int *)(sbp + 0x5988) = 0;  /* loop resume trigger A */
+                *(int *)(sbp + 0x598C) = 0;  /* loop resume trigger B */
+                memset(sbp + 0x5834, 0, 76); /* PATH_FILE_NAME */
+
                 void *dest = *(void **)(entry + 0x44);
                 int rv = ((fn_iippi)VA_START_PATH)(sb, dest, 0);
                 if (rv == 0) {
@@ -2442,7 +2457,16 @@ static int fake_remote_impl(const char *cmd)
                     logmsg("[fake_remote] goto '%s' — verify failed\n", name);
                     return -1;
                 }
-                /* Kick movement if stopped/resting */
+
+                /* Re-assert after VA calls — they may restore loop state */
+                *(int *)(sbp + OFF_FR_LOOPING) = 0;
+                *(int *)(sbp + OFF_FR_ON_ENTRY) = 0;
+                *(int *)(sbp + OFF_FR_MODE) = 14;       /* walking, not looping */
+                *(int *)(sbp + 0x5988) = 0;
+                *(int *)(sbp + 0x598C) = 0;
+                memset(sbp + 0x5834, 0, 76);            /* PATH_FILE_NAME */
+
+                /* Kick movement — StopGo is a TOGGLE, only send if stopped */
                 if (*(int *)(sbp + OFF_FR_GO_FLAG) == 0) {
                     HWND mw = *(HWND *)(sbp + OFF_FR_MMMAIN_HWND);
                     if (mw) SendMessageA(mw, WM_COMMAND, MEGAMUD_CMD_STOPGO, 0);

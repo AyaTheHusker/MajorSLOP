@@ -388,8 +388,12 @@ void main() {
     /* ---- Color/Brightness Post-Process (before scanlines) ---- */
     /* Skip post-process for bg-highlighted text (recap) so it stays readable */
     if (outColor.a > 0.01 && !has_bg_text) {
-        /* Brightness: shift RGB */
-        outColor.rgb += pc.pp_brightness;
+        /* Brightness: multiplicative scale preserves dim/bright ratio.
+         * Map pp_brightness -1..+1 to multiplier 0.25..2.0 (0 = 1.0 = no change) */
+        float bri_mul = (pc.pp_brightness >= 0.0)
+            ? (1.0 + pc.pp_brightness)            /* 0→1.0, +1→2.0 */
+            : (1.0 + pc.pp_brightness * 0.75);    /* -1→0.25, 0→1.0 */
+        outColor.rgb *= bri_mul;
 
         /* Contrast: scale around 0.5 midpoint */
         outColor.rgb = (outColor.rgb - 0.5) * pc.pp_contrast + 0.5;
@@ -432,18 +436,11 @@ void main() {
 
     /* ---- CRT Scanlines (applied last) ---- */
     if (pc.fx_scanlines > 0.5 && outColor.a > 0.01) {
-        float scanline = mod(gl_FragCoord.y, 2.0);
-        float scan_intensity = (scanline < 1.0) ? 1.0 : 0.55;
-        outColor.rgb *= scan_intensity;
-
-        if (scanline < 1.0) {
-            float luminance = dot(outColor.rgb, vec3(0.299, 0.587, 0.114));
-            outColor.rgb += outColor.rgb * luminance * 0.15;
-        }
-
-        vec2 screenUV = gl_FragCoord.xy / vec2(textureSize(fontTex, 0));
-        vec2 vign = screenUV * (1.0 - screenUV);
-        float vignette = clamp(pow(vign.x * vign.y * 15.0, 0.25), 0.0, 1.0);
-        outColor.rgb *= mix(0.85, 1.0, vignette);
+        /* Scale scanline width with resolution: 1px at 1080p (~16px cells),
+         * wider at 4K (~32px cells) so they remain visible */
+        float scan_width = max(1.0, floor(pc.char_h_px / 16.0));
+        float scanline = mod(gl_FragCoord.y, scan_width + 1.0);
+        if (scanline < scan_width)
+            outColor.rgb = vec3(0.0);
     }
 }

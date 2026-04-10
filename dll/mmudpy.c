@@ -2608,6 +2608,32 @@ static int load_python(void)
                 int namelen = (int)(strchr(fd.cFileName, '.') ? strchr(fd.cFileName, '.') - fd.cFileName : strlen(fd.cFileName));
                 sprintf(dll_var, "_ext_%.*s", namelen, fd.cFileName);
 
+                /* Pre-scan: create SimpleNamespace objects for dotted prefixes
+                 * e.g. "radio.play" needs "mud.radio = types.SimpleNamespace()" */
+                {
+                    char seen_ns[32][64];
+                    int num_ns = 0;
+                    for (int ci2 = 0; ci2 < cmd_count; ci2++) {
+                        const char *dot = strchr(cmds[ci2].py_name, '.');
+                        if (!dot) continue;
+                        int plen = (int)(dot - cmds[ci2].py_name);
+                        if (plen <= 0 || plen >= 63) continue;
+                        char prefix[64];
+                        memcpy(prefix, cmds[ci2].py_name, plen);
+                        prefix[plen] = '\0';
+                        /* Check if already seen */
+                        int found = 0;
+                        for (int k = 0; k < num_ns; k++)
+                            if (strcmp(seen_ns[k], prefix) == 0) { found = 1; break; }
+                        if (!found && num_ns < 32) {
+                            strcpy(seen_ns[num_ns++], prefix);
+                            pos += sprintf(py_buf + pos,
+                                "if not hasattr(mud, '%s'): mud.%s = type('', (), {})()\n",
+                                prefix, prefix);
+                        }
+                    }
+                }
+
                 for (int ci = 0; ci < cmd_count; ci++) {
                     slop_command_t *c = &cmds[ci];
 

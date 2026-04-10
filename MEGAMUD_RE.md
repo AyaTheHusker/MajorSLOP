@@ -800,6 +800,29 @@ BBS Server → [ReadFile on ???] → Buffer at struct+0x863D
 | 0x58A4 | i32 | UNK_58A4 | Observed 0x0409 |
 | 0x58AC | ptr | UNK_58AC | Pointer (0x01B21778 observed) |
 
+### Loop Entry Buffer (0x5930, 0x84 bytes)
+
+Internal buffer used by VA_VERIFY_PATH for loop resume decisions.
+Populated by VA_LOAD_PATH (FUN_0045F860) when loading .mp path files.
+
+| Offset | Size | Name | Description |
+|---|---|---|---|
+| 0x5930 | 0x84 | LOOP_ENTRY_BUF | Loop entry buffer (param_1 + 0x164C in Ghidra decompile) |
+| 0x5988 | i32 | LOOP_RESUME_A | Loop resume trigger A. Arrival handler checks: if (A==0 \|\| A!=B) → idle; else → resume loop. |
+| 0x598C | i32 | LOOP_RESUME_B | Loop resume trigger B. Must equal LOOP_RESUME_A for loop to resume on arrival. |
+
+**Ghidra RE of VA_VERIFY_PATH (FUN_00428FA0) arrival handler (2026-04-10):**
+```c
+// At LAB_00429423 — path completed, dest_checksum became 0:
+if ((struct[0x5988] == 0) || (struct[0x5988] != struct[0x598C])) {
+    // GO IDLE: PATHING=0, MODE=11
+} else {
+    // RESUME LOOP: reload path from .mp, LOOPING=1, MODE=15
+}
+```
+These fields — NOT ON_ENTRY_ACTION (0x54B4) — are the actual loop resume triggers.
+To prevent loop resume during goto, zero both 0x5988 and 0x598C continuously.
+
 ### Session / Combat Statistics
 
 **CORRECTED (2026-04-03 via Ghidra/Rizin RE):** Combat stats ARE in the main struct at
@@ -1076,10 +1099,16 @@ then checks if pathing actually started.
 3. verify_path(struct, 0)                      — VA_VERIFY_PATH
 ```
 
-**Bug:** The real @goto handler does NOT clear the LOOPING flag (0x5668) before
-starting the goto. This causes MegaMUD to resume the old loop after reaching the
-goto destination. The fake_remote implementation fixes this by explicitly writing
-0x5668=0 before executing the goto sequence.
+**Bug:** The real @goto handler does NOT clear the loop resume triggers (0x5988/0x598C)
+or the LOOPING flag (0x5668) before starting the goto. This causes MegaMUD to resume
+the old loop after reaching the goto destination.
+
+**Fix (2026-04-10):** The fake_remote goto handler clears LOOPING (0x5668), ON_ENTRY
+(0x54B4), and loop resume triggers (0x5988/0x598C) before and after VA_START_PATH.
+Additionally, vk_terminal.c continuously zeros 0x5988/0x598C every poll tick while a
+goto is active, ensuring the arrival handler in VA_VERIFY_PATH always takes the idle
+branch. A backup watchdog detects LOOPING 0→1 transition and slams idle if the
+continuous zeroing misses.
 
 ### @loop \<name\>
 
@@ -1124,11 +1153,16 @@ from a ghost player. This works but has drawbacks:
 fake_remote calls the same VA functions that the @command handler uses, but from
 within the DLL's address space, giving direct control over the execution sequence.
 
-### Key advantage: @goto loop-clear fix
+### Key advantage: @goto loop-resume fix
 
-When fake_remote executes a @goto, it explicitly clears LOOPING (0x5668=0) before
-calling start_path. This prevents MegaMUD from resuming an old loop after reaching
-the goto destination — a bug present in the real @goto handler (FUN_0047CF70).
+When fake_remote executes a @goto, it zeroes the loop resume triggers (0x5988=0,
+0x598C=0), LOOPING (0x5668=0), and ON_ENTRY_ACTION (0x54B4=0) before and after
+VA_START_PATH. The vk_terminal.c polling loop also continuously zeroes these fields
+every tick while a goto is active, ensuring the VA_VERIFY_PATH arrival handler
+always takes the idle branch instead of resuming the old loop.
+
+**Note:** Simply clearing LOOPING alone is NOT sufficient — the actual resume decision
+in VA_VERIFY_PATH (FUN_00428FA0) checks 0x5988/0x598C, not LOOPING or ON_ENTRY_ACTION.
 
 ---
 
