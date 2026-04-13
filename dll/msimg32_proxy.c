@@ -3836,6 +3836,33 @@ static void show_plugins_dialog(HWND parent)
     MessageBoxA(parent, msg, "MegaMud+ Plugins", MB_OK | MB_ICONINFORMATION);
 }
 
+/* Case-insensitive substring search */
+static char *slop_stristr(const char *haystack, const char *needle)
+{
+    if (!haystack || !needle) return NULL;
+    size_t nlen = strlen(needle);
+    for (; *haystack; haystack++) {
+        if (_strnicmp(haystack, needle, nlen) == 0)
+            return (char *)haystack;
+    }
+    return NULL;
+}
+
+/* Hide MegaMUD window ASAP for --startvulkan */
+static DWORD WINAPI startvulkan_hide_thread(LPVOID param)
+{
+    (void)param;
+    for (int i = 0; i < 600; i++) { /* up to 30 seconds */
+        HWND mw = FindWindowA("MMMAIN", NULL);
+        if (mw) {
+            ShowWindow(mw, SW_HIDE);
+            break;
+        }
+        Sleep(50);
+    }
+    return 0;
+}
+
 /* ---- DllMain ---- */
 
 BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
@@ -3856,27 +3883,32 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
                 real_vSetDdrawflag = (vSetDdrawflag_t)GetProcAddress(real_msimg32, "vSetDdrawflag");
             }
         }
-        /* Parse custom flags, show help or save to env vars */
+        /* Parse custom flags, show help or save to env vars.
+         * Case-insensitive matching for all flags. */
         {
+            /* Case-insensitive strstr helper (local to this block) */
+            #define SLOP_STRISTR(hay, needle) slop_stristr(hay, needle)
+
             char *cmdline = GetCommandLineA();
             if (cmdline) {
                 /* Help — print usage and kill the process */
-                if (strstr(cmdline, "--help") || strstr(cmdline, "-help") ||
-                    strstr(cmdline, "--?")    || strstr(cmdline, "-?")) {
+                if (SLOP_STRISTR(cmdline, "--help") || SLOP_STRISTR(cmdline, "-help") ||
+                    strstr(cmdline, "--?")           || strstr(cmdline, "-?")) {
                     const char *help =
                         "\nMajorSLOP - MegaMUD Plugin Framework\n"
                         "=====================================\n\n"
                         "Usage: MegaMud.exe [options]\n\n"
                         "Options:\n"
-                        "  --startvulkan   Launch directly into Vulkan terminal mode\n"
-                        "                  (hides the original MegaMUD window)\n"
-                        "  --autoconnect   Automatically connect to the loaded BBS\n"
-                        "                  after startup\n"
+                        "  --startvulkan          Launch directly into Vulkan terminal\n"
+                        "                         (hides the original MegaMUD window)\n"
+                        "  --autoconnect          Auto-connect to BBS after startup\n"
+                        "  --loop \"name.mp\"        Start a loop after connecting\n"
+                        "                         (implies --autoconnect)\n"
                         "  --help, -help, --?, -?\n"
-                        "                  Show this help and exit\n\n"
+                        "                         Show this help and exit\n\n"
                         "Examples:\n"
-                        "  MegaMud.exe --startvulkan\n"
-                        "  MegaMud.exe --startvulkan --autoconnect\n\n";
+                        "  MegaMud.exe --startvulkan --autoconnect\n"
+                        "  MegaMud.exe --startvulkan --loop \"stontiny.mp\"\n\n";
                     DWORD written;
                     int printed = 0;
                     /* Attach to parent console (the terminal that launched wine) */
@@ -3900,25 +3932,77 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
                         MessageBoxA(NULL, help + 1, "MajorSLOP", MB_OK | MB_ICONINFORMATION);
                     ExitProcess(0);
                 }
-                if (strstr(cmdline, "--startvulkan"))
+                if (SLOP_STRISTR(cmdline, "--startvulkan")) {
                     SetEnvironmentVariableA("SLOP_STARTVULKAN", "1");
-                if (strstr(cmdline, "--autoconnect"))
+                    /* Start a thread that hides MMMAIN the instant it appears */
+                    CreateThread(NULL, 0, startvulkan_hide_thread, NULL, 0, NULL);
+                }
+                if (SLOP_STRISTR(cmdline, "--autoconnect") ||
+                    SLOP_STRISTR(cmdline, "--c") ||
+                    SLOP_STRISTR(cmdline, " -c"))
                     SetEnvironmentVariableA("SLOP_AUTOCONNECT", "1");
-                /* Strip flags from the PEB command line in-place */
-                static const char *strip_flags[] = {
-                    "--startvulkan", "--autoconnect", NULL
-                };
-                for (int i = 0; strip_flags[i]; i++) {
-                    char *pos;
-                    while ((pos = strstr(cmdline, strip_flags[i])) != NULL) {
-                        int flen = (int)strlen(strip_flags[i]);
-                        char *src = pos + flen;
-                        char *dst = pos;
+
+                /* --loop "name" or --loop 'name' — extract the loop name */
+                {
+                    char *lpos = SLOP_STRISTR(cmdline, "--loop");
+                    if (lpos) {
+                        /* --loop implies --autoconnect */
+                        SetEnvironmentVariableA("SLOP_AUTOCONNECT", "1");
+                        char *arg = lpos + 6; /* skip "--loop" */
+                        while (*arg == ' ') arg++;
+                        char loop_name[128] = {0};
+                        if (*arg == '"' || *arg == '\'') {
+                            char quote = *arg++;
+                            int k = 0;
+                            while (*arg && *arg != quote && k < 127)
+                                loop_name[k++] = *arg++;
+                        } else {
+                            /* Unquoted — take until space or end */
+                            int k = 0;
+                            while (*arg && *arg != ' ' && k < 127)
+                                loop_name[k++] = *arg++;
+                        }
+                        if (loop_name[0])
+                            SetEnvironmentVariableA("SLOP_LOOP", loop_name);
+                    }
+                }
+
+                /* Strip all custom flags from the PEB command line in-place.
+                 * --loop must be stripped with its argument. */
+                {
+                    char *lpos = SLOP_STRISTR(cmdline, "--loop");
+                    if (lpos) {
+                        char *end = lpos + 6;
+                        while (*end == ' ') end++;
+                        if (*end == '"' || *end == '\'') {
+                            char q = *end++;
+                            while (*end && *end != q) end++;
+                            if (*end == q) end++;
+                        } else {
+                            while (*end && *end != ' ') end++;
+                        }
+                        char *dst = lpos;
                         if (dst > cmdline && *(dst - 1) == ' ') dst--;
-                        memmove(dst, src, strlen(src) + 1);
+                        memmove(dst, end, strlen(end) + 1);
+                    }
+                }
+                {
+                    static const char *strip_flags[] = {
+                        "--startvulkan", "--autoconnect", "--c", "-c", NULL
+                    };
+                    for (int i = 0; strip_flags[i]; i++) {
+                        char *pos;
+                        while ((pos = SLOP_STRISTR(cmdline, strip_flags[i])) != NULL) {
+                            int flen = (int)strlen(strip_flags[i]);
+                            char *src = pos + flen;
+                            char *dst = pos;
+                            if (dst > cmdline && *(dst - 1) == ' ') dst--;
+                            memmove(dst, src, strlen(src) + 1);
+                        }
                     }
                 }
             }
+            #undef SLOP_STRISTR
         }
         CreateThread(NULL, 0, payload_main, NULL, 0, NULL);
         break;

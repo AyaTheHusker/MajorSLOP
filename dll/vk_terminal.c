@@ -153,6 +153,7 @@ static HANDLE vkt_thread_handle = NULL;
 static volatile int vkt_running = 0;
 static volatile int vkt_visible = 0;
 static int vkt_autoconnect = 0;  /* --autoconnect flag */
+static char vkt_loop_name[128] = {0}; /* --loop "name" */
 static volatile int vkt_screenshot_pending = 0;
 static uint32_t vkt_screenshot_img_idx = 0;
 
@@ -10509,6 +10510,37 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
     return DefWindowProcA(hwnd, msg, wParam, lParam);
 }
 
+/* Background thread for --autoconnect / --loop (non-blocking) */
+static DWORD WINAPI vkt_autoconnect_thread(LPVOID param)
+{
+    (void)param;
+    Sleep(2000);
+    HMODULE hMmudpy = GetModuleHandleA("mmudpy.dll");
+    if (!hMmudpy) hMmudpy = GetModuleHandleA("MMUDPy.dll");
+    if (hMmudpy) {
+        typedef int (*mmudpy_connect_fn)(void);
+        mmudpy_connect_fn pfn = (mmudpy_connect_fn)GetProcAddress(hMmudpy, "mmudpy_connect");
+        if (pfn) {
+            pfn();
+            if (api) api->log("[vk_terminal] --autoconnect: connecting\n");
+        }
+        if (vkt_loop_name[0]) {
+            Sleep(5000);
+            typedef int (*mmudpy_fake_remote_fn)(const char *cmd);
+            mmudpy_fake_remote_fn pRemote = (mmudpy_fake_remote_fn)GetProcAddress(hMmudpy, "mmudpy_fake_remote");
+            if (pRemote) {
+                char loop_cmd[160];
+                _snprintf(loop_cmd, sizeof(loop_cmd), "loop %s", vkt_loop_name);
+                pRemote(loop_cmd);
+                if (api) api->log("[vk_terminal] --loop: starting \"%s\"\n", vkt_loop_name);
+            }
+            vkt_loop_name[0] = '\0';
+        }
+    }
+    vkt_autoconnect = 0;
+    return 0;
+}
+
 /* ---- Thread ---- */
 
 static DWORD WINAPI vkt_thread(LPVOID param)
@@ -10518,13 +10550,27 @@ static DWORD WINAPI vkt_thread(LPVOID param)
     /* Wine DPI is set to 192 in DllMain so MegaMUD's Win32 UI scales properly.
      * With KDE "Apply scaling themselves", XWayland gives us full 4K. */
 
+    /* --startvulkan: hide MegaMUD ASAP, before waiting for MMANSI */
+    if (vkt_visible) {
+        for (int i = 0; i < 200 && !mmmain_hwnd; i++) {
+            HWND mw = FindWindowA("MMMAIN", NULL);
+            if (mw) {
+                mmmain_hwnd = mw;
+                ShowWindow(mw, SW_HIDE);
+                megamud_hidden = 1;
+            }
+            if (!mmmain_hwnd) Sleep(50);
+        }
+    }
+
     /* Wait for MMANSI */
     for (int i = 0; i < 100 && !mmansi_hwnd; i++) {
-        HWND mw = FindWindowA("MMMAIN", NULL);
-        if (mw) {
-            mmmain_hwnd = mw;
-            mmansi_hwnd = FindWindowExA(mw, NULL, "MMANSI", NULL);
+        if (!mmmain_hwnd) {
+            HWND mw = FindWindowA("MMMAIN", NULL);
+            if (mw) mmmain_hwnd = mw;
         }
+        if (mmmain_hwnd)
+            mmansi_hwnd = FindWindowExA(mmmain_hwnd, NULL, "MMANSI", NULL);
         if (!mmansi_hwnd) Sleep(100);
     }
     if (!mmansi_hwnd) { api->log("[vk_terminal] MMANSI not found\n"); return 1; }
@@ -10552,20 +10598,9 @@ static DWORD WINAPI vkt_thread(LPVOID param)
     vkt_running = 1;
     api->log("[vk_terminal] Ready (F11 to toggle fullscreen)\n");
 
-    /* --autoconnect: click the phone button after a short delay for MegaMUD to settle */
+    /* --autoconnect/--loop: run in background so Vulkan window opens immediately */
     if (vkt_autoconnect) {
-        Sleep(2000);
-        typedef int (*mmudpy_connect_fn)(void);
-        HMODULE hMmudpy = GetModuleHandleA("mmudpy.dll");
-        if (!hMmudpy) hMmudpy = GetModuleHandleA("MMUDPy.dll");
-        if (hMmudpy) {
-            mmudpy_connect_fn pfn = (mmudpy_connect_fn)GetProcAddress(hMmudpy, "mmudpy_connect");
-            if (pfn) {
-                pfn();
-                api->log("[vk_terminal] --autoconnect: connecting\n");
-            }
-        }
-        vkt_autoconnect = 0;
+        CreateThread(NULL, 0, vkt_autoconnect_thread, NULL, 0, NULL);
     }
 
     /* Main loop — wait for F11 toggle, then render */
@@ -15429,6 +15464,10 @@ static int vkt_init(const slop_api_t *a)
         if (GetEnvironmentVariableA("SLOP_AUTOCONNECT", buf, sizeof(buf)) > 0) {
             vkt_autoconnect = 1;
             api->log("[vk_terminal] --autoconnect: will connect after init\n");
+        }
+        if (GetEnvironmentVariableA("SLOP_LOOP", vkt_loop_name, sizeof(vkt_loop_name)) > 0) {
+            vkt_autoconnect = 1; /* --loop implies --autoconnect */
+            api->log("[vk_terminal] --loop: will start loop \"%s\" after connect\n", vkt_loop_name);
         }
     }
 
