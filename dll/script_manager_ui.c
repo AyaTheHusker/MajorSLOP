@@ -352,6 +352,17 @@ static void scm_save_file(void)
 
 static void scm_scan_scripts(void)
 {
+    /* Save which scripts were loaded before rescan */
+    char prev_loaded[SCM_MAX_SCRIPTS][64];
+    int  prev_count = 0;
+    for (int i = 0; i < scm_script_count; i++) {
+        if (scm_script_loaded[i]) {
+            strncpy(prev_loaded[prev_count], scm_script_names[i], 63);
+            prev_loaded[prev_count][63] = '\0';
+            prev_count++;
+        }
+    }
+
     char search[MAX_PATH];
     char base[MAX_PATH];
     GetModuleFileNameA(NULL, base, MAX_PATH);
@@ -368,7 +379,15 @@ static void scm_scan_scripts(void)
         strncpy(scm_script_names[scm_script_count], fd.cFileName, 63);
         char *dot = strstr(scm_script_names[scm_script_count], ".py");
         if (dot) *dot = '\0';
-        scm_script_loaded[scm_script_count] = 0; /* will query later */
+
+        /* Restore loaded state if this script was loaded before */
+        scm_script_loaded[scm_script_count] = 0;
+        for (int j = 0; j < prev_count; j++) {
+            if (strcmp(scm_script_names[scm_script_count], prev_loaded[j]) == 0) {
+                scm_script_loaded[scm_script_count] = 1;
+                break;
+            }
+        }
         scm_script_count++;
     } while (FindNextFileA(h, &fd));
     FindClose(h);
@@ -800,17 +819,18 @@ static void scm_draw(int vp_w, int vp_h)
             }
 
             /* Status indicator dot */
+            float dot_sz = 10.0f;
             float dot_x = x0 + (float)pad;
-            float dot_y = ry + (float)(row_h - 4) / 2;
+            float dot_y = ry + (float)(row_h - (int)dot_sz) / 2;
             if (scm_script_loaded[si]) {
-                psolid(dot_x, dot_y, dot_x + 4.0f, dot_y + 4.0f,
+                psolid(dot_x, dot_y, dot_x + dot_sz, dot_y + dot_sz,
                        0.3f, 1.0f, 0.3f, 0.9f, vp_w, vp_h); /* green = loaded */
             } else {
-                psolid(dot_x, dot_y, dot_x + 4.0f, dot_y + 4.0f,
+                psolid(dot_x, dot_y, dot_x + dot_sz, dot_y + dot_sz,
                        dmr, dmg, dmb, 0.5f, vp_w, vp_h); /* dim = unloaded */
             }
 
-            ptext((int)x0 + pad + 8, (int)ry + (row_h - ch) / 2,
+            ptext((int)x0 + pad + (int)dot_sz + 6, (int)ry + (row_h - ch) / 2,
                   scm_script_names[si], txr, txg, txb, vp_w, vp_h, cw, ch);
         }
 
@@ -1191,14 +1211,18 @@ static int scm_mouse_down(int mx, int my)
                     if (scm_list_sel < 0 || scm_list_sel >= scm_script_count) return 1;
                     char cmd[256];
                     const char *name = scm_script_names[scm_list_sel];
-                    if (bi == 0) { /* Load */
-                        _snprintf(cmd, sizeof(cmd), "mud.load('%s')", name);
-                        vkt_eval_python(cmd, 0);
-                        scm_script_loaded[scm_list_sel] = 1;
-                    } else if (bi == 1) { /* Unload */
-                        _snprintf(cmd, sizeof(cmd), "mud.stop('%s')", name);
-                        vkt_eval_python(cmd, 0);
-                        scm_script_loaded[scm_list_sel] = 0;
+                    if (bi == 0) { /* Load — skip if already loaded */
+                        if (!scm_script_loaded[scm_list_sel]) {
+                            _snprintf(cmd, sizeof(cmd), "mud.load('%s')", name);
+                            vkt_eval_python(cmd, 0);
+                            scm_script_loaded[scm_list_sel] = 1;
+                        }
+                    } else if (bi == 1) { /* Unload — skip if not loaded */
+                        if (scm_script_loaded[scm_list_sel]) {
+                            _snprintf(cmd, sizeof(cmd), "mud.stop('%s')", name);
+                            vkt_eval_python(cmd, 0);
+                            scm_script_loaded[scm_list_sel] = 0;
+                        }
                     } else if (bi == 2) { /* Edit */
                         scm_open_script_in_editor(name);
                     } else if (bi == 3) { /* Delete */

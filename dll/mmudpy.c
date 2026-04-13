@@ -1373,7 +1373,7 @@ __declspec(dllexport) void mmudpy_set_query_result(int val)
 /* Ask Python if a script is loaded - posts to console thread for safety */
 /* (WM_PYEXEC and WM_FLOAT defined near top of file) */
 
-static int is_script_loaded(const char *name)
+static int mmudpy_is_script_loaded(const char *name)
 {
     if (!py_ready || !con_hwnd) return 0;
     char cmd[256];
@@ -2262,6 +2262,14 @@ static const char *py_bootstrap =
     "        for name in sorted(_loaded_scripts.keys()):\n"
     "            print(f'  {name}')\n"
     "\n"
+    "    def list(self):\n"
+    "        '''Alias for running() — list loaded scripts.'''\n"
+    "        self.running()\n"
+    "\n"
+    "    def help(self, topic=None):\n"
+    "        '''Show help. Delegates to global help().'''\n"
+    "        help(topic)\n"
+    "\n"
     "    def scripts(self):\n"
     "        '''List all saved scripts.'''\n"
     "        if not os.path.exists(_scripts_dir):\n"
@@ -2344,6 +2352,13 @@ static const char *py_bootstrap =
     "        lines.append('    r2=R, g2=G, b2=B,                     gradient bottom color')\n"
     "        lines.append('    glow=3, glow_r=R, glow_g=G, glow_b=B, outer glow')\n"
     "        lines.append('    rise=1, fade_ms=30, duration=80)       animation')\n"
+    "        lines.append('')\n"
+    "        lines.append('--- Vulkan Floating Text (VFT) ---')\n"
+    "        lines.append('  vft(\"text|x|y|params...\")               GPU floating text')\n"
+    "        lines.append('  vft(\"clear\")                            Clear all VFT')\n"
+    "        lines.append('  vft_help()                              Full VFT reference')\n"
+    "        lines.append('  vft_fonts()                             List VFT fonts (0-4)')\n"
+    "        lines.append('  Type help(\"vft\") for full syntax + examples')\n"
     "        lines.append('')\n"
     "        lines.append('--- Scripts ---')\n"
     "        lines.append('  mud.scripts()              List saved scripts')\n"
@@ -2428,6 +2443,56 @@ static const char *py_bootstrap =
     "        'offsets': 'Type OFF to see all game struct offsets.\\nUse with mud.read_i32(OFF.X) / mud.write_i32(OFF.X, val).\\nAll offsets are read/write.',\n"
     "        'remote': 'mud.remote - direct MegaMUD @commands (no telepath):\\n  mud.remote.stop()              - stop movement\\n  mud.remote.rego()              - resume movement\\n  mud.remote.loop(\"name\")        - start loop\\n  mud.remote.goto(\"room\")        - go to room\\n  mud.remote.roam(True/False)    - auto-roam on/off\\n  mud.remote.reset()             - reset flags/stats\\n\\nType mud.remote to see the list.',\n"
     "        'toggles': 'Automation toggles - call with no arg to toggle, True/False to set:\\n  mud.autocombat()  mud.autonuke()   mud.autoheal()\\n  mud.autobless()   mud.autolight()  mud.autocash()\\n  mud.autoget()     mud.autosearch() mud.autosneak()\\n  mud.autohide()    mud.autotrack()  mud.autotrain()\\n\\nReturns the new state (True/False).\\nExample: mud.autocombat(False)  - turn off auto-combat',\n"
+    "        'vft': 'Vulkan Floating Text (VFT) - GPU-rendered floating text FX\\n\\n"
+    "SYNTAX: vft(\"text|x|y|param=val|...\")\\n\\n"
+    "POSITION:\\n"
+    "  x,y = 0.0-1.0 or: center, left, right, top, bottom\\n\\n"
+    "SIZE & COLOR:\\n"
+    "  size=N        Scale multiplier (default 2.0, try 1-8)\\n"
+    "  color=NAME    270+ named colors: red, gold, crimson, cyan,\\n"
+    "                emerald, cobalt, plasma, lava, frost, neonpink,\\n"
+    "                periwinkle, burntsienna, obsidian, mithril...\\n"
+    "  color=RRGGBB  Hex color: ff0000, 00ff00, etc.\\n"
+    "  alpha=N       Opacity 0.0-1.0\\n\\n"
+    "FONT (font=N, 0-4):\\n"
+    "  0=Black Ops  1=Teko  2=Russo  3=Orbitron  4=Rajdhani\\n\\n"
+    "INTRO EFFECTS (intro=name or intro=name:duration):\\n"
+    "  fade, zoom_in, zoom_out, slide_l, slide_r, slide_u,\\n"
+    "  slide_d, bounce, pop, typewriter, wave_in, spin\\n\\n"
+    "OUTRO EFFECTS (outro=name or outro=name:duration):\\n"
+    "  fade, zoom_out, shatter, explode, melt, dissolve,\\n"
+    "  evaporate, spin\\n\\n"
+    "TIMING:\\n"
+    "  hold=N        Hold seconds (default 2.0)\\n"
+    "  intro_dur=N   Intro seconds (default 0.3)\\n"
+    "  outro_dur=N   Outro seconds (default 0.5)\\n\\n"
+    "MODIFIERS (combine any):\\n"
+    "  glow=1         Outer glow       shadow=1    Drop shadow\\n"
+    "  outline=1      Text outline     shake=N     Shake intensity\\n"
+    "  wave=N         Wave motion      pulse=1     Pulsing scale\\n"
+    "  rainbow=1      Rainbow cycle    trail=1     Motion trail\\n"
+    "  sparks=1       Spark particles  helix=1     Helix particles\\n"
+    "  chromatic=1    Chromatic shift  fire=1      Fire effect\\n"
+    "  breathe=1      Breathing scale  orbit=1     Orbiting dots\\n\\n"
+    "COMMANDS:\\n"
+    "  vft(\"clear\")       Clear all floating text\\n"
+    "  vft(\"clear:ID\")    Clear specific text by ID\\n"
+    "  vft_help()         Full reference (in console)\\n"
+    "  vft_fonts()        List available fonts\\n\\n"
+    "EXAMPLES:\\n"
+    "  vft(\"CRITICAL HIT!|0.5|0.3|size=5|color=red\")\\n"
+    "  vft(\"CRITICAL HIT!|center|center|size=5|color=crimson\"\\n"
+    "      \"|intro=zoom_in|outro=shatter|glow=1\")\\n"
+    "  vft(\"LEVEL UP!|center|0.3|size=6|color=gold\"\\n"
+    "      \"|intro=bounce|outro=explode|rainbow=1|sparks=1\")\\n"
+    "  vft(\"+9999 HP|0.5|0.5|size=4|color=emerald\"\\n"
+    "      \"|intro=pop|outro=fade|pulse=1|glow=1\")\\n"
+    "  vft(\"BACKSTAB!|0.7|0.2|size=5|color=purple\"\\n"
+    "      \"|intro=slide_l|outro=dissolve|shadow=1|trail=1\")\\n"
+    "  vft(\"GODLIKE!|center|center|size=8|color=gold\"\\n"
+    "      \"|font=3|intro=spin|outro=explode|fire=1|chromatic=1\")\\n"
+    "  vft(\"Healing...|0.5|0.8|size=3|color=cyan\"\\n"
+    "      \"|intro=fade|outro=evaporate|breathe=1|glow=1\")',\n"
     "    }\n"
     "    # Plugins can register topics via: help.__wrapped_topics__['name'] = 'text'\n"
     "    if hasattr(help, '__wrapped_topics__'):\n"
@@ -2436,7 +2501,7 @@ static const char *py_bootstrap =
     "        print('=== MMUDPy Help ===')\n"
     "        print('Type help(\"topic\") for details on:')\n"
     "        # Show core topics first, then any plugin-registered ones\n"
-    "        core = ['hp', 'mana', 'combat', 'room', 'player', 'state', 'connection', 'commands', 'memory', 'scripts', 'offsets', 'toggles', 'remote']\n"
+    "        core = ['hp', 'mana', 'combat', 'room', 'player', 'state', 'connection', 'commands', 'memory', 'scripts', 'offsets', 'toggles', 'remote', 'vft']\n"
     "        plugin_topics = [k for k in sorted(topics.keys()) if k not in core]\n"
     "        print('  ' + ', '.join(core))\n"
     "        if plugin_topics:\n"
@@ -2726,6 +2791,16 @@ static int load_python(void)
             FindClose(hFind);
         }
     }
+
+    /* Top-level convenience aliases for VFT (matches help docs) */
+    pPyRun_SimpleString(
+        "if hasattr(mud, 'vft'):\n"
+        "    import builtins\n"
+        "    builtins.vft = mud.vft\n"
+        "    builtins.vft_help = mud.vft_help\n"
+        "    builtins.vft_fonts = mud.vft_fonts\n"
+        "    builtins.vft_set_font = mud.vft_set_font\n"
+    );
 
     py_ready = 1;
     return 0;
@@ -3028,7 +3103,7 @@ static void sm_rebuild_racks(void)
         strncpy(r->name, sm_script_names[i], 63);
 
         /* Query Python for actual loaded state */
-        r->active = is_script_loaded(r->name);
+        r->active = mmudpy_is_script_loaded(r->name);
 
         /* Single toggle button with script name on it */
         char label[128];
@@ -3108,7 +3183,7 @@ static LRESULT CALLBACK sm_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
                 py_exec_safe(cmd);
 
                 /* Query real state after the action */
-                int now_loaded = is_script_loaded(sm_racks[idx].name);
+                int now_loaded = mmudpy_is_script_loaded(sm_racks[idx].name);
                 sm_racks[idx].active = now_loaded;
                 char new_label[128];
                 sprintf(new_label, "%s: %s",

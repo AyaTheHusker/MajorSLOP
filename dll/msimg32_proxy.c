@@ -3856,6 +3856,70 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
                 real_vSetDdrawflag = (vSetDdrawflag_t)GetProcAddress(real_msimg32, "vSetDdrawflag");
             }
         }
+        /* Parse custom flags, show help or save to env vars */
+        {
+            char *cmdline = GetCommandLineA();
+            if (cmdline) {
+                /* Help — print usage and kill the process */
+                if (strstr(cmdline, "--help") || strstr(cmdline, "-help") ||
+                    strstr(cmdline, "--?")    || strstr(cmdline, "-?")) {
+                    const char *help =
+                        "\nMajorSLOP - MegaMUD Plugin Framework\n"
+                        "=====================================\n\n"
+                        "Usage: MegaMud.exe [options]\n\n"
+                        "Options:\n"
+                        "  --startvulkan   Launch directly into Vulkan terminal mode\n"
+                        "                  (hides the original MegaMUD window)\n"
+                        "  --autoconnect   Automatically connect to the loaded BBS\n"
+                        "                  after startup\n"
+                        "  --help, -help, --?, -?\n"
+                        "                  Show this help and exit\n\n"
+                        "Examples:\n"
+                        "  MegaMud.exe --startvulkan\n"
+                        "  MegaMud.exe --startvulkan --autoconnect\n\n";
+                    DWORD written;
+                    int printed = 0;
+                    /* Attach to parent console (the terminal that launched wine) */
+                    AttachConsole((DWORD)-1); /* ATTACH_PARENT_PROCESS */
+                    HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
+                    if (hOut && hOut != INVALID_HANDLE_VALUE) {
+                        WriteFile(hOut, help, (DWORD)strlen(help), &written, NULL);
+                        FlushFileBuffers(hOut);
+                        printed = 1;
+                    }
+                    if (!printed) {
+                        HANDLE hErr = GetStdHandle(STD_ERROR_HANDLE);
+                        if (hErr && hErr != INVALID_HANDLE_VALUE) {
+                            WriteFile(hErr, help, (DWORD)strlen(help), &written, NULL);
+                            FlushFileBuffers(hErr);
+                            printed = 1;
+                        }
+                    }
+                    /* Last resort: MessageBox */
+                    if (!printed)
+                        MessageBoxA(NULL, help + 1, "MajorSLOP", MB_OK | MB_ICONINFORMATION);
+                    ExitProcess(0);
+                }
+                if (strstr(cmdline, "--startvulkan"))
+                    SetEnvironmentVariableA("SLOP_STARTVULKAN", "1");
+                if (strstr(cmdline, "--autoconnect"))
+                    SetEnvironmentVariableA("SLOP_AUTOCONNECT", "1");
+                /* Strip flags from the PEB command line in-place */
+                static const char *strip_flags[] = {
+                    "--startvulkan", "--autoconnect", NULL
+                };
+                for (int i = 0; strip_flags[i]; i++) {
+                    char *pos;
+                    while ((pos = strstr(cmdline, strip_flags[i])) != NULL) {
+                        int flen = (int)strlen(strip_flags[i]);
+                        char *src = pos + flen;
+                        char *dst = pos;
+                        if (dst > cmdline && *(dst - 1) == ' ') dst--;
+                        memmove(dst, src, strlen(src) + 1);
+                    }
+                }
+            }
+        }
         CreateThread(NULL, 0, payload_main, NULL, 0, NULL);
         break;
 

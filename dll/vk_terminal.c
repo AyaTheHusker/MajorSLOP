@@ -152,6 +152,7 @@ static HWND vkt_hwnd = NULL;
 static HANDLE vkt_thread_handle = NULL;
 static volatile int vkt_running = 0;
 static volatile int vkt_visible = 0;
+static int vkt_autoconnect = 0;  /* --autoconnect flag */
 static volatile int vkt_screenshot_pending = 0;
 static uint32_t vkt_screenshot_img_idx = 0;
 
@@ -10551,6 +10552,22 @@ static DWORD WINAPI vkt_thread(LPVOID param)
     vkt_running = 1;
     api->log("[vk_terminal] Ready (F11 to toggle fullscreen)\n");
 
+    /* --autoconnect: click the phone button after a short delay for MegaMUD to settle */
+    if (vkt_autoconnect) {
+        Sleep(2000);
+        typedef int (*mmudpy_connect_fn)(void);
+        HMODULE hMmudpy = GetModuleHandleA("mmudpy.dll");
+        if (!hMmudpy) hMmudpy = GetModuleHandleA("MMUDPy.dll");
+        if (hMmudpy) {
+            mmudpy_connect_fn pfn = (mmudpy_connect_fn)GetProcAddress(hMmudpy, "mmudpy_connect");
+            if (pfn) {
+                pfn();
+                api->log("[vk_terminal] --autoconnect: connecting\n");
+            }
+        }
+        vkt_autoconnect = 0;
+    }
+
     /* Main loop — wait for F11 toggle, then render */
     while (vkt_running) {
         if (!vkt_visible) {
@@ -15401,6 +15418,19 @@ static int vkt_init(const slop_api_t *a)
     input_buf[0] = '\0';
 
     mr_init();
+
+    /* Check for launch flags (saved to env vars by msimg32 proxy) */
+    {
+        char buf[8];
+        if (GetEnvironmentVariableA("SLOP_STARTVULKAN", buf, sizeof(buf)) > 0) {
+            vkt_visible = 1;
+            api->log("[vk_terminal] --startvulkan: auto-launching Vulkan mode\n");
+        }
+        if (GetEnvironmentVariableA("SLOP_AUTOCONNECT", buf, sizeof(buf)) > 0) {
+            vkt_autoconnect = 1;
+            api->log("[vk_terminal] --autoconnect: will connect after init\n");
+        }
+    }
 
     HINSTANCE hInst = GetModuleHandleA(NULL);
     vkt_thread_handle = CreateThread(NULL, 0, vkt_thread, (LPVOID)hInst, 0, NULL);
