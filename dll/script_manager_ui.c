@@ -830,8 +830,13 @@ static void scm_draw(int vp_w, int vp_h)
                        dmr, dmg, dmb, 0.5f, vp_w, vp_h); /* dim = unloaded */
             }
 
-            ptext((int)x0 + pad + (int)dot_sz + 6, (int)ry + (row_h - ch) / 2,
-                  scm_script_names[si], txr, txg, txb, vp_w, vp_h, cw, ch);
+            if (scm_script_loaded[si]) {
+                ptext((int)x0 + pad + (int)dot_sz + 6, (int)ry + (row_h - ch) / 2,
+                      scm_script_names[si], 0.3f, 1.0f, 0.3f, vp_w, vp_h, cw, ch);
+            } else {
+                ptext((int)x0 + pad + (int)dot_sz + 6, (int)ry + (row_h - ch) / 2,
+                      scm_script_names[si], dmr, dmg, dmb, vp_w, vp_h, cw, ch);
+            }
         }
 
         /* Buttons at bottom — proper 3D raised */
@@ -1572,4 +1577,23 @@ static int scm_key_char(unsigned int ch)
         return 1;
     }
     return 0;
+}
+
+/* Update the status bar scripts string from loaded state */
+static void scm_update_vsb_scripts(void)
+{
+    int slen = 0, any = 0;
+    for (int si = 0; si < scm_script_count && slen < 240; si++) {
+        if (scm_script_loaded[si]) {
+            if (any) { vsb_scripts_str[slen++] = ','; vsb_scripts_str[slen++] = ' '; }
+            int nlen = (int)strlen(scm_script_names[si]);
+            if (slen + nlen < 240) {
+                memcpy(vsb_scripts_str + slen, scm_script_names[si], nlen);
+                slen += nlen;
+            }
+            any = 1;
+        }
+    }
+    if (any) vsb_scripts_str[slen] = '\0';
+    else     strcpy(vsb_scripts_str, "None");
 }

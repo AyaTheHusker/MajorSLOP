@@ -154,6 +154,7 @@ static volatile int vkt_running = 0;
 static volatile int vkt_visible = 0;
 static int vkt_autoconnect = 0;  /* --autoconnect flag */
 static char vkt_loop_name[128] = {0}; /* --loop "name" */
+static char vkt_loadscripts[512] = {0}; /* --loadscripts "a,b,c" */
 static volatile int vkt_screenshot_pending = 0;
 static uint32_t vkt_screenshot_img_idx = 0;
 
@@ -3426,6 +3427,10 @@ static int  vsb_quad_end = 0;
 /* Cached status data — updated periodically */
 static char vsb_path_name[128] = "";
 static int  vsb_cur_step = 0, vsb_total_steps = 0;
+static int  vsb_lap_count = 0;          /* loop lap counter */
+static int  vsb_prev_step = -1;         /* previous step for lap detection */
+static char vsb_char_name[64] = "";     /* loaded character INI name */
+static char vsb_scripts_str[256] = "None"; /* comma-separated loaded script names */
 static int  vsb_cur_hp = 0, vsb_max_hp = 0;
 static int  vsb_cur_mana = 0, vsb_max_mana = 0;
 static int  vsb_in_combat = 0;
@@ -5869,12 +5874,20 @@ static void vsb_read_status(void)
     vsb_is_medit = api->read_struct_i32(VSB_OFF_IS_MEDIT);
     vsb_cur_step = api->read_struct_i32(VSB_OFF_CUR_STEP);
     vsb_total_steps = api->read_struct_i32(VSB_OFF_TOTAL_STEPS);
+    /* Lap detection: step went from high back to 1 = new lap */
+    if (vsb_looping && vsb_prev_step > 1 && vsb_cur_step == 1)
+        vsb_lap_count++;
+    vsb_prev_step = vsb_cur_step;
     {
         int new_pathing = api->read_struct_i32(VSB_OFF_PATHING);
         int new_looping = api->read_struct_i32(VSB_OFF_LOOPING);
         /* Reset exp tracking when pathing or looping starts (0→1 transition) */
         if ((new_pathing && !vsb_prev_pathing) || (new_looping && !vsb_prev_looping)) {
             pst_reset_exp();
+            if (new_looping && !vsb_prev_looping) {
+                vsb_lap_count = 0;
+                vsb_prev_step = -1;
+            }
         }
         /* GOTO LOOP PREVENTION: While a goto is active, continuously
          * zero the loop resume triggers at 0x5988/0x598C every tick.
@@ -5913,6 +5926,20 @@ static void vsb_read_status(void)
     vsb_roaming = api->read_struct_i32(VSB_OFF_ROAMING);
     vsb_autocombat = api->read_struct_i32(VSB_OFF_AUTOCOMBAT);
 
+    /* Read character INI name from MMMAIN window title (updates if changed) */
+    if (mmmain_hwnd) {
+        char title[256];
+        if (GetWindowTextA(mmmain_hwnd, title, sizeof(title)) > 0) {
+            char new_name[64] = {0};
+            int k = 0;
+            for (int i = 0; title[i] && title[i] != ' ' && title[i] != '[' && k < 63; i++)
+                new_name[k++] = title[i];
+            new_name[k] = '\0';
+            if (strcmp(new_name, vsb_char_name) != 0)
+                strncpy(vsb_char_name, new_name, sizeof(vsb_char_name) - 1);
+        }
+    }
+
     /* Read combat target string from struct */
     {
         unsigned char *base = (unsigned char *)(uintptr_t)sbase;
@@ -5939,10 +5966,17 @@ static void vsb_read_status(void)
                 /* Strip any " | Map:" suffix we may have added */
                 char *pipe = strstr(buf, " | Map:");
                 if (pipe) *pipe = '\0';
-                strncpy(vsb_path_name, buf, sizeof(vsb_path_name) - 1);
-                vsb_path_name[sizeof(vsb_path_name) - 1] = '\0';
+                /* Only overwrite if statusbar returned something —
+                   don't blank out CLI-set path name */
+                if (buf[0]) {
+                    strncpy(vsb_path_name, buf, sizeof(vsb_path_name) - 1);
+                    vsb_path_name[sizeof(vsb_path_name) - 1] = '\0';
+                }
             }
         }
+        /* Clear path name when no longer pathing or looping */
+        if (!vsb_pathing && !vsb_looping)
+            vsb_path_name[0] = '\0';
     }
 
     /* Derive status text */
@@ -6020,11 +6054,18 @@ static void vsb_draw(int vp_w, int vp_h)
     /* Bright value color */
     float vr = t->text[0], vg = t->text[1], vb = t->text[2];
 
-    /* Section: Path */
+    /* Section: Path/Loop name (always shown as first cell) */
     if (vsb_path_name[0]) {
-        _snprintf(buf, sizeof(buf), "%s", vsb_path_name);
+        const char *plabel = vsb_looping ? "Loop: " : "Path: ";
+        if (vsb_looping && vsb_lap_count > 0) {
+            _snprintf(buf, sizeof(buf), "%s  Lap %d", vsb_path_name, vsb_lap_count);
+        } else {
+            _snprintf(buf, sizeof(buf), "%s", vsb_path_name);
+        }
         buf[sizeof(buf) - 1] = '\0';
-        VSB_SECTION("Path: ", buf, lr, lg, lb, vr, vg, vb);
+        VSB_SECTION(plabel, buf, lr, lg, lb, vr, vg, vb);
+    } else {
+        VSB_SECTION("Path: ", "No Path", lr, lg, lb, lr, lg, lb);
     }
 
     /* Section: Step */
@@ -6032,6 +6073,11 @@ static void vsb_draw(int vp_w, int vp_h)
         _snprintf(buf, sizeof(buf), "%d/%d", vsb_cur_step, vsb_total_steps);
         buf[sizeof(buf) - 1] = '\0';
         VSB_SECTION("Step: ", buf, lr, lg, lb, vr, vg, vb);
+    }
+
+    /* Section: Character (loaded INI) */
+    if (vsb_char_name[0]) {
+        VSB_SECTION("Char: ", vsb_char_name, lr, lg, lb, vr, vg, vb);
     }
 
     /* Section: HP */
@@ -6088,6 +6134,15 @@ static void vsb_draw(int vp_w, int vp_h)
         else if (vsb_looping)    { sr = 0.8f; sg = 0.6f; sb = 1.0f; }
         else if (vsb_pathing)    { sr = 0.6f; sg = 0.9f; sb = 1.0f; }
         VSB_SECTION("Status: ", vsb_status_text, lr, lg, lb, sr, sg, sb);
+    }
+
+    /* Section: Loaded Scripts */
+    {
+        int has_scripts = (vsb_scripts_str[0] && strcmp(vsb_scripts_str, "None") != 0);
+        if (has_scripts)
+            VSB_SECTION("Scripts: ", vsb_scripts_str, lr, lg, lb, 0.3f, 1.0f, 0.3f);
+        else
+            VSB_SECTION("Scripts: ", "None", lr, lg, lb, lr, lg, lb);
     }
 
     /* Section: Exp/hr from Player Stats tracker */
@@ -7074,8 +7129,8 @@ static void vkt_build_vertices(void)
                       1.0f, 1.0f, 1.0f, 1.0f);
         }
 
-        /* Blinking cursor */
-        if ((frame_count / 30) % 2 == 0) {
+        /* Blinking cursor in input bar (only in normal mode) */
+        if (!input_mode && (frame_count / 30) % 2 == 0) {
             float cx0 = x_offset + input_cursor * icw;
             float cy0 = bar_y0 + ibar_ch - 4.0f * ui_scale;
             float cx1 = cx0 + icw;
@@ -7083,6 +7138,39 @@ static void vkt_build_vertices(void)
             push_quad(PX2NDC_X(cx0), PX2NDC_Y(cy0), PX2NDC_X(cx1), PX2NDC_Y(cy1),
                       bg_u0, bg_v0, bg_u1, bg_v1,
                       0.7f, 0.7f, 0.7f, 1.0f);
+        }
+
+        /* Direct mode indicator — right side of input bar */
+        {
+            const char *mode_label = input_mode ? "[DIRECT]" : "[INPUT]";
+            float mr = input_mode ? 0.3f : 0.5f;
+            float mg = input_mode ? 1.0f : 0.5f;
+            float mb = input_mode ? 0.3f : 0.5f;
+            float ma = input_mode ? 1.0f : 0.4f;
+            int label_len = (int)strlen(mode_label);
+            float lx0 = (float)vp_w - label_len * icw - 8.0f;
+            for (int i = 0; mode_label[i]; i++) {
+                unsigned char mc = (unsigned char)mode_label[i];
+                if (mc <= 32) { continue; }
+                float mu0 = (mc % 16) * tex_cw + hp_u;
+                float mv0 = (mc / 16) * tex_ch + hp_v;
+                float mu1 = mu0 + tex_cw - 2*hp_u;
+                float mv1 = mv0 + tex_ch - 2*hp_v;
+                float mpx = lx0 + i * icw;
+                push_quad(PX2NDC_X(mpx), PX2NDC_Y(text_y), PX2NDC_X(mpx + icw), PX2NDC_Y(text_y + ich),
+                          mu0, mv0, mu1, mv1, mr, mg, mb, ma);
+            }
+        }
+
+        /* Direct mode: big blinking block cursor at terminal cursor position */
+        if (input_mode && (frame_count / 20) % 2 == 0) {
+            int crow = ansi_term.cy;
+            int ccol = ansi_term.cx;
+            float bcx = x_offset + ccol * cw;
+            float bcy = (float)top_pad + crow * ch;
+            push_quad(PX2NDC_X(bcx), PX2NDC_Y(bcy), PX2NDC_X(bcx + cw), PX2NDC_Y(bcy + ch),
+                      bg_u0, bg_v0, bg_u1, bg_v1,
+                      0.3f, 1.0f, 0.3f, 0.7f);
         }
     }
 
@@ -7226,6 +7314,7 @@ static void vkt_build_vertices(void)
 
     /* Draw UI-font elements (status bar + P&L window) — tracked separately */
     pl_quad_start = quad_count;
+    scm_update_vsb_scripts();
     vsb_draw(vp_w, vp_h);
     VIB_BAR_H = (int)(VIB_BAR_H_BASE * ui_scale);
     vib_cur_bar_y = vib_update_slide(vkm_mouse_y, vp_w);
@@ -7258,6 +7347,57 @@ static void vkt_build_vertices(void)
 }
 
 /* ---- Input handling ---- */
+
+/* Send a string directly to MMANSI (for numpad, direct mode, etc) */
+static void input_send_raw(const char *str)
+{
+    if (!mmansi_hwnd || !str) return;
+    for (int i = 0; str[i]; i++)
+        PostMessageA(mmansi_hwnd, WM_CHAR, (WPARAM)(unsigned char)str[i], 0);
+    PostMessageA(mmansi_hwnd, WM_CHAR, (WPARAM)'\r', 0);
+}
+
+/* Numpad direction handler — returns 1 if handled.
+ * NumLock must be on. Ctrl=pick, Alt=disarm trap, Shift=bash.
+ * Mixed modifiers = ignore. */
+static int numpad_handle(WPARAM vk, int ctrl, int alt, int shift)
+{
+    /* Check NumLock state */
+    if (!(GetKeyState(VK_NUMLOCK) & 1)) return 0;
+
+    const char *dir = NULL;
+    switch (vk) {
+    case VK_NUMPAD8: dir = "n"; break;
+    case VK_NUMPAD2: dir = "s"; break;
+    case VK_NUMPAD6: dir = "e"; break;
+    case VK_NUMPAD4: dir = "w"; break;
+    case VK_NUMPAD9: dir = "ne"; break;
+    case VK_NUMPAD7: dir = "nw"; break;
+    case VK_NUMPAD3: dir = "se"; break;
+    case VK_NUMPAD1: dir = "sw"; break;
+    case VK_NUMPAD0: case VK_INSERT: dir = "u"; break;
+    case VK_DECIMAL: case VK_DELETE:  dir = "d"; break;
+    default: return 0;
+    }
+
+    /* Reject mixed modifiers */
+    int mods = (ctrl ? 1 : 0) + (alt ? 1 : 0) + (shift ? 1 : 0);
+    if (mods > 1) return 1; /* consume but do nothing */
+
+    char cmd[64];
+    if (ctrl)
+        _snprintf(cmd, sizeof(cmd), "pick %s", dir);
+    else if (alt)
+        _snprintf(cmd, sizeof(cmd), "disarm trap %s", dir);
+    else if (shift)
+        _snprintf(cmd, sizeof(cmd), "bash %s", dir);
+    else
+        _snprintf(cmd, sizeof(cmd), "%s", dir);
+    cmd[sizeof(cmd) - 1] = '\0';
+
+    input_send_raw(cmd);
+    return 1;
+}
 
 static void input_send(void)
 {
@@ -9414,6 +9554,36 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
     case WM_KEYDOWN: {
         int ctrl = GetKeyState(VK_CONTROL) & 0x8000;
         int alt  = GetKeyState(VK_MENU) & 0x8000;
+        int shift = GetKeyState(VK_SHIFT) & 0x8000;
+
+        /* Ctrl+T = toggle direct terminal input mode */
+        if (ctrl && wParam == 'T' && !alt && !shift) {
+            input_mode = !input_mode;
+            return 0;
+        }
+
+        /* Numpad directions (NumLock must be on) */
+        if (numpad_handle(wParam, ctrl, alt, shift)) return 0;
+
+        /* Direct mode: send ANSI escape sequences for arrow/nav keys */
+        if (input_mode && mmansi_hwnd) {
+            const char *seq = NULL;
+            switch (wParam) {
+            case VK_UP:    seq = "\x1b[A"; break;
+            case VK_DOWN:  seq = "\x1b[B"; break;
+            case VK_RIGHT: seq = "\x1b[C"; break;
+            case VK_LEFT:  seq = "\x1b[D"; break;
+            case VK_HOME:  seq = "\x1b[H"; break;
+            case VK_END:   seq = "\x1b[F"; break;
+            case VK_PRIOR: seq = "\x1b[5~"; break; /* Page Up */
+            case VK_NEXT:  seq = "\x1b[6~"; break; /* Page Down */
+            }
+            if (seq) {
+                for (int i = 0; seq[i]; i++)
+                    PostMessageA(mmansi_hwnd, WM_CHAR, (WPARAM)(unsigned char)seq[i], 0);
+                return 0;
+            }
+        }
 
         /* F9 PTT press — call voice.dll directly */
         if (wParam == VK_F9) {
@@ -9565,6 +9735,12 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
     case WM_CHAR:
         /* Suppress Ctrl+chars (already handled in WM_KEYDOWN) */
         if (wParam < 32 && wParam != '\r' && wParam != '\b') return 0;
+        /* Direct terminal mode: forward all chars to MMANSI */
+        if (input_mode && mmansi_hwnd && !vrt_spell_input &&
+            !(pl_wnd_open && pl_focused) && !scm_focused) {
+            PostMessageA(mmansi_hwnd, WM_CHAR, wParam, lParam);
+            return 0;
+        }
         /* Route to spell input dialog if open */
         if (vrt_spell_input) {
             if (wParam == '\r') {
@@ -10511,31 +10687,128 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
 }
 
 /* Background thread for --autoconnect / --loop (non-blocking) */
+static int vkt_wait_for_ingame(int timeout_ms)
+{
+    /* Poll MegaMUD mode offset until character is in-game (mode >= 11).
+     * Mode 11=idle, 14=walking, 15=looping. Before login it's 0. */
+    if (!api) return 0;
+    for (int elapsed = 0; elapsed < timeout_ms; elapsed += 250) {
+        int mode = api->read_struct_i32(VSB_OFF_MODE);
+        if (mode >= 11) return 1;
+        Sleep(250);
+    }
+    return 0;
+}
+
+static void vkt_do_loadscripts(void)
+{
+    /* Load scripts from comma-separated list in vkt_loadscripts[] */
+    if (!vkt_loadscripts[0]) return;
+
+    /* Ensure script list is populated so we can mark loaded state */
+    scm_scan_scripts();
+
+    char buf[512];
+    strncpy(buf, vkt_loadscripts, sizeof(buf) - 1);
+    buf[sizeof(buf) - 1] = '\0';
+
+    char *p = buf;
+    while (*p) {
+        /* Skip whitespace and commas */
+        while (*p == ' ' || *p == ',' || *p == '\t') p++;
+        if (!*p) break;
+
+        /* Extract script name */
+        char *start = p;
+        while (*p && *p != ',' && *p != ' ' && *p != '\t') p++;
+        char saved = *p;
+        *p = '\0';
+
+        if (start[0]) {
+            /* Strip .py extension if the user included it */
+            int slen = (int)strlen(start);
+            if (slen > 3 && strcmp(start + slen - 3, ".py") == 0)
+                start[slen - 3] = '\0';
+
+            char cmd[256];
+            _snprintf(cmd, sizeof(cmd), "mud.load('%s')", start);
+            vkt_eval_python(cmd, 0);
+            if (api) api->log("[vk_terminal] --loadscripts: loaded \"%s\"\n", start);
+            /* Mark as loaded in script manager UI */
+            for (int si = 0; si < scm_script_count; si++) {
+                if (_stricmp(scm_script_names[si], start) == 0) {
+                    scm_script_loaded[si] = 1;
+                    break;
+                }
+            }
+            Sleep(500); /* let script initialize before loading next */
+        }
+
+        if (saved) p++;
+    }
+    vkt_loadscripts[0] = '\0';
+    /* Update status bar scripts display */
+    scm_update_vsb_scripts();
+}
+
 static DWORD WINAPI vkt_autoconnect_thread(LPVOID param)
 {
     (void)param;
-    Sleep(2000);
-    HMODULE hMmudpy = GetModuleHandleA("mmudpy.dll");
-    if (!hMmudpy) hMmudpy = GetModuleHandleA("MMUDPy.dll");
-    if (hMmudpy) {
-        typedef int (*mmudpy_connect_fn)(void);
-        mmudpy_connect_fn pfn = (mmudpy_connect_fn)GetProcAddress(hMmudpy, "mmudpy_connect");
-        if (pfn) {
-            pfn();
-            if (api) api->log("[vk_terminal] --autoconnect: connecting\n");
-        }
-        if (vkt_loop_name[0]) {
-            Sleep(5000);
-            typedef int (*mmudpy_fake_remote_fn)(const char *cmd);
-            mmudpy_fake_remote_fn pRemote = (mmudpy_fake_remote_fn)GetProcAddress(hMmudpy, "mmudpy_fake_remote");
-            if (pRemote) {
-                char loop_cmd[160];
-                _snprintf(loop_cmd, sizeof(loop_cmd), "loop %s", vkt_loop_name);
-                pRemote(loop_cmd);
-                if (api) api->log("[vk_terminal] --loop: starting \"%s\"\n", vkt_loop_name);
+    int scripts_only = (vkt_autoconnect == 2);
+
+    if (!scripts_only) {
+        /* Auto-connect to BBS */
+        Sleep(2000);
+        HMODULE hMmudpy = GetModuleHandleA("mmudpy.dll");
+        if (!hMmudpy) hMmudpy = GetModuleHandleA("MMUDPy.dll");
+        if (hMmudpy) {
+            typedef int (*mmudpy_connect_fn)(void);
+            mmudpy_connect_fn pfn = (mmudpy_connect_fn)GetProcAddress(hMmudpy, "mmudpy_connect");
+            if (pfn) {
+                pfn();
+                if (api) api->log("[vk_terminal] --autoconnect: connecting\n");
             }
+        }
+    }
+
+    /* Wait for character to be in-game (mode >= 11) before loading scripts/loops */
+    if (api) api->log("[vk_terminal] Waiting for in-game state...\n");
+    if (vkt_wait_for_ingame(60000)) {
+        if (api) api->log("[vk_terminal] Character is in-game\n");
+        Sleep(5000); /* let MegaMUD fully load paths, scripts, etc */
+
+        /* Load scripts first */
+        vkt_do_loadscripts();
+
+        /* Reset player stats exp tracking after scripts are loaded */
+        pst_reset_exp();
+
+        /* Then start loop if requested */
+        if (vkt_loop_name[0]) {
+            HMODULE hMmudpy = GetModuleHandleA("mmudpy.dll");
+            if (!hMmudpy) hMmudpy = GetModuleHandleA("MMUDPy.dll");
+            if (hMmudpy) {
+                typedef int (*mmudpy_fake_remote_fn)(const char *cmd);
+                mmudpy_fake_remote_fn pRemote = (mmudpy_fake_remote_fn)GetProcAddress(hMmudpy, "mmudpy_fake_remote");
+                if (pRemote) {
+                    /* Stop any auto-resumed path from previous session first */
+                    pRemote("stop");
+                    if (api) api->log("[vk_terminal] --loop: stopped auto-resumed path\n");
+                    Sleep(1000); /* let MegaMUD fully clear old path state */
+
+                    char loop_cmd[160];
+                    _snprintf(loop_cmd, sizeof(loop_cmd), "loop %s", vkt_loop_name);
+                    pRemote(loop_cmd);
+                    if (api) api->log("[vk_terminal] --loop: starting \"%s\"\n", vkt_loop_name);
+                }
+            }
+            /* Preserve loop name for status bar display */
+            strncpy(vsb_path_name, vkt_loop_name, sizeof(vsb_path_name) - 1);
+            vsb_path_name[sizeof(vsb_path_name) - 1] = '\0';
             vkt_loop_name[0] = '\0';
         }
+    } else {
+        if (api) api->log("[vk_terminal] Timed out waiting for in-game state\n");
     }
     vkt_autoconnect = 0;
     return 0;
@@ -10563,6 +10836,14 @@ static DWORD WINAPI vkt_thread(LPVOID param)
         }
     }
 
+    /* Splash progress helper */
+    #define SPLASH_PROGRESS(pct, msg) do { \
+        SetEnvironmentVariableA("SLOP_LOAD_PROGRESS", #pct); \
+        SetEnvironmentVariableA("SLOP_LOAD_STATUS", msg); \
+    } while(0)
+
+    SPLASH_PROGRESS(5, "Waiting for MegaMUD...");
+
     /* Wait for MMANSI */
     for (int i = 0; i < 100 && !mmansi_hwnd; i++) {
         if (!mmmain_hwnd) {
@@ -10575,14 +10856,28 @@ static DWORD WINAPI vkt_thread(LPVOID param)
     }
     if (!mmansi_hwnd) { api->log("[vk_terminal] MMANSI not found\n"); return 1; }
 
+    SPLASH_PROGRESS(15, "Creating Vulkan instance...");
+
     /* Init Vulkan (instance, device, etc.) */
     if (vkt_init_vulkan() != 0) return 1;
+
+    SPLASH_PROGRESS(40, "Loading font textures...");
     if (vkt_create_font_texture() != 0) return 1;
+
+    SPLASH_PROGRESS(55, "Creating buffers...");
     if (vkt_create_buffers() != 0) return 1;
+
+    SPLASH_PROGRESS(65, "Creating descriptors...");
     if (vkt_create_descriptors() != 0) return 1;
+
+    SPLASH_PROGRESS(75, "Initializing fonts...");
     vkt_init_ui_font();
     vkt_init_vft_font(0);
+
+    SPLASH_PROGRESS(85, "Loading icon atlas...");
     vib_init_icon_atlas();
+
+    SPLASH_PROGRESS(95, "Starting terminal...");
 
     /* Register window class */
     WNDCLASSA wc = {0};
@@ -10596,6 +10891,7 @@ static DWORD WINAPI vkt_thread(LPVOID param)
 
     apply_theme_palette(current_theme);
     vkt_running = 1;
+    SPLASH_PROGRESS(100, "Ready!");
     api->log("[vk_terminal] Ready (F11 to toggle fullscreen)\n");
 
     /* --autoconnect/--loop: run in background so Vulkan window opens immediately */
@@ -11276,7 +11572,7 @@ static int pst_scaled = 0;
 static void pst_draw(int vp_w, int vp_h)
 {
     if (!pst_visible) return;
-    if (!pst_scaled) { pst_w = 340*ui_scale; pst_h = 390*ui_scale; pst_x = 100*ui_scale; pst_y = 60*ui_scale; pst_scaled = 1; }
+    if (!pst_scaled) { pst_w = 340*ui_scale; pst_h = 390*ui_scale; pst_scaled = 1; }
 
     const ui_theme_t *t = &ui_themes[current_theme];
     void (*psolid)(float, float, float, float, float, float, float, float, int, int) =
@@ -15190,6 +15486,8 @@ static void vkt_save_settings(void)
     SAVE_FLOAT("rain_freq", rain_freq);
     SAVE_FLOAT("rain_warp", rain_warp);
     SAVE_INT("round_timer", vrt_visible);
+    SAVE_INT("vrt_x", (int)vrt_x); SAVE_INT("vrt_y", (int)vrt_y);
+    SAVE_FLOAT("vrt_size", vrt_size);
     SAVE_INT("vrt_orbits", vrt_orbits_visible);
     SAVE_INT("status_bar", vsb_visible);
     SAVE_INT("icon_bar", vib_visible);
@@ -15294,6 +15592,9 @@ static void vkt_load_settings(void)
     LOAD_FLOAT("rain_warp", rain_warp, 0.02);
     if (fx_rain_mode && fx_waves_mode) fx_waves_mode = 0; /* enforce exclusivity */
     LOAD_INT("round_timer", vrt_visible, 0);
+    { int v; LOAD_INT("vrt_x", v, (int)vrt_x); vrt_x = (float)v; }
+    { int v; LOAD_INT("vrt_y", v, (int)vrt_y); vrt_y = (float)v; }
+    LOAD_FLOAT("vrt_size", vrt_size, VRT_DEFAULT_SIZE);
     LOAD_INT("vrt_orbits", vrt_orbits_visible, 1);
     LOAD_INT("status_bar", vsb_visible, 1);
     LOAD_INT("icon_bar", vib_visible, 1);
@@ -15467,7 +15768,13 @@ static int vkt_init(const slop_api_t *a)
         }
         if (GetEnvironmentVariableA("SLOP_LOOP", vkt_loop_name, sizeof(vkt_loop_name)) > 0) {
             vkt_autoconnect = 1; /* --loop implies --autoconnect */
-            api->log("[vk_terminal] --loop: will start loop \"%s\" after connect\n", vkt_loop_name);
+            api->log("[vk_terminal] --loop: will start loop \"%s\" after in-game\n", vkt_loop_name);
+        }
+        if (GetEnvironmentVariableA("SLOP_LOADSCRIPTS", vkt_loadscripts, sizeof(vkt_loadscripts)) > 0) {
+            api->log("[vk_terminal] --loadscripts: will load \"%s\" after in-game\n", vkt_loadscripts);
+            /* If no autoconnect, we still need a thread to wait for in-game */
+            if (!vkt_autoconnect)
+                vkt_autoconnect = 2; /* 2 = scripts-only, don't auto-connect */
         }
     }
 

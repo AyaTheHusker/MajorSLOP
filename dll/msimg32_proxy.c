@@ -3848,17 +3848,173 @@ static char *slop_stristr(const char *haystack, const char *needle)
     return NULL;
 }
 
-/* Hide MegaMUD window ASAP for --startvulkan */
+/* ---- Splash loading screen for --startvulkan ---- */
+
+static volatile int splash_progress = 0;
+static const char *splash_status = "Initializing...";
+
+static LRESULT CALLBACK splash_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+{
+    switch (msg) {
+    case WM_PAINT: {
+        PAINTSTRUCT ps;
+        HDC hdc = BeginPaint(hwnd, &ps);
+        RECT rc;
+        GetClientRect(hwnd, &rc);
+        int w = rc.right, h = rc.bottom;
+
+        /* Dark background */
+        HBRUSH bgBrush = CreateSolidBrush(RGB(18, 18, 24));
+        FillRect(hdc, &rc, bgBrush);
+        DeleteObject(bgBrush);
+
+        /* Scale factor based on window height */
+        float sc = (float)h / 160.0f;
+        if (sc < 1.0f) sc = 1.0f;
+        int title_sz = (int)(28 * sc);
+        int status_sz = (int)(16 * sc);
+        int pct_sz = (int)(14 * sc);
+
+        /* Title text */
+        SetBkMode(hdc, TRANSPARENT);
+        SetTextColor(hdc, RGB(200, 200, 220));
+        HFONT titleFont = CreateFontA(title_sz, 0, 0, 0, FW_BOLD, 0, 0, 0,
+            DEFAULT_CHARSET, 0, 0, ANTIALIASED_QUALITY, 0, "Segoe UI");
+        HFONT oldFont = (HFONT)SelectObject(hdc, titleFont);
+        RECT titleRc = {0, (int)(h * 0.12f), w, (int)(h * 0.40f)};
+        DrawTextA(hdc, "MajorSLOP", -1, &titleRc, DT_CENTER | DT_SINGLELINE);
+        SelectObject(hdc, oldFont);
+        DeleteObject(titleFont);
+
+        /* Progress bar */
+        int bar_margin = (int)(40 * sc);
+        int bar_w = w - bar_margin * 2;
+        int bar_h = (int)(18 * sc);
+        int bar_x = bar_margin;
+        int bar_y = (int)(h * 0.50f);
+        int pen_w = (int)(2 * sc);
+        if (pen_w < 1) pen_w = 1;
+
+        /* Bar outline */
+        HPEN borderPen = CreatePen(PS_SOLID, pen_w, RGB(80, 80, 120));
+        HPEN oldPen = (HPEN)SelectObject(hdc, borderPen);
+        HBRUSH nullBrush = (HBRUSH)GetStockObject(NULL_BRUSH);
+        HBRUSH oldBr = (HBRUSH)SelectObject(hdc, nullBrush);
+        Rectangle(hdc, bar_x, bar_y, bar_x + bar_w, bar_y + bar_h);
+        SelectObject(hdc, oldBr);
+        SelectObject(hdc, oldPen);
+        DeleteObject(borderPen);
+
+        /* Filled portion */
+        int pct = splash_progress;
+        if (pct < 0) pct = 0;
+        if (pct > 100) pct = 100;
+        int fill_w = (bar_w - pen_w * 2) * pct / 100;
+        if (fill_w > 0) {
+            RECT fillRc = {bar_x + pen_w, bar_y + pen_w,
+                           bar_x + pen_w + fill_w, bar_y + bar_h - pen_w};
+            HBRUSH fillBr = CreateSolidBrush(RGB(60, 120, 220));
+            FillRect(hdc, &fillRc, fillBr);
+            DeleteObject(fillBr);
+        }
+
+        /* Percentage text */
+        char pct_str[16];
+        _snprintf(pct_str, sizeof(pct_str), "%d%%", pct);
+        SetTextColor(hdc, RGB(160, 160, 200));
+        HFONT pctFont = CreateFontA(pct_sz, 0, 0, 0, FW_NORMAL, 0, 0, 0,
+            DEFAULT_CHARSET, 0, 0, ANTIALIASED_QUALITY, 0, "Segoe UI");
+        oldFont = (HFONT)SelectObject(hdc, pctFont);
+        RECT pctRc = {0, bar_y + bar_h + (int)(4 * sc), w, bar_y + bar_h + (int)(24 * sc)};
+        DrawTextA(hdc, pct_str, -1, &pctRc, DT_CENTER | DT_SINGLELINE);
+        SelectObject(hdc, oldFont);
+        DeleteObject(pctFont);
+
+        /* Status text */
+        SetTextColor(hdc, RGB(130, 130, 170));
+        HFONT statusFont = CreateFontA(status_sz, 0, 0, 0, FW_NORMAL, 0, 0, 0,
+            DEFAULT_CHARSET, 0, 0, ANTIALIASED_QUALITY, 0, "Segoe UI");
+        oldFont = (HFONT)SelectObject(hdc, statusFont);
+        RECT statusRc = {0, (int)(h * 0.75f), w, h};
+        DrawTextA(hdc, splash_status, -1, &statusRc, DT_CENTER | DT_SINGLELINE);
+        SelectObject(hdc, oldFont);
+        DeleteObject(statusFont);
+
+        EndPaint(hwnd, &ps);
+        return 0;
+    }
+    case WM_TIMER: {
+        /* Poll env vars for progress updates from vk_terminal */
+        char buf[64];
+        if (GetEnvironmentVariableA("SLOP_LOAD_PROGRESS", buf, sizeof(buf)) > 0)
+            splash_progress = atoi(buf);
+        static char status_buf[128];
+        if (GetEnvironmentVariableA("SLOP_LOAD_STATUS", status_buf, sizeof(status_buf)) > 0)
+            splash_status = status_buf;
+        InvalidateRect(lParam ? (HWND)lParam : wParam ? NULL : NULL, NULL, FALSE);
+        InvalidateRect(FindWindowA("SLOP_SPLASH", NULL), NULL, FALSE);
+        /* Auto-close when done */
+        if (splash_progress >= 100) {
+            DestroyWindow(FindWindowA("SLOP_SPLASH", NULL));
+            return 0;
+        }
+        return 0;
+    }
+    case WM_DESTROY:
+        KillTimer(hwnd, 1);
+        return 0;
+    }
+    return DefWindowProcA(hwnd, msg, wParam, lParam);
+}
+
+/* Hide MegaMUD window ASAP for --startvulkan, show splash */
 static DWORD WINAPI startvulkan_hide_thread(LPVOID param)
 {
     (void)param;
-    for (int i = 0; i < 600; i++) { /* up to 30 seconds */
+
+    /* Hide MegaMUD window */
+    for (int i = 0; i < 600; i++) {
         HWND mw = FindWindowA("MMMAIN", NULL);
         if (mw) {
             ShowWindow(mw, SW_HIDE);
             break;
         }
         Sleep(50);
+    }
+
+    /* Create splash window */
+    WNDCLASSA wc = {0};
+    wc.lpfnWndProc = splash_wndproc;
+    wc.hInstance = GetModuleHandle(NULL);
+    wc.lpszClassName = "SLOP_SPLASH";
+    wc.hCursor = LoadCursorA(NULL, IDC_ARROW);
+    RegisterClassA(&wc);
+
+    /* Size: 480x160 base, scaled for DPI */
+    int sw = GetSystemMetrics(SM_CXSCREEN);
+    int sh = GetSystemMetrics(SM_CYSCREEN);
+    int splash_w = sw / 3;  if (splash_w < 480) splash_w = 480;
+    int splash_h = splash_w * 160 / 480;
+    int splash_x = (sw - splash_w) / 2;
+    int splash_y = (sh - splash_h) / 2;
+
+    HWND splash = CreateWindowExA(
+        WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+        "SLOP_SPLASH", "Loading...",
+        WS_POPUP | WS_VISIBLE,
+        splash_x, splash_y, splash_w, splash_h,
+        NULL, NULL, GetModuleHandle(NULL), NULL);
+
+    if (splash) {
+        SetTimer(splash, 1, 100, NULL);
+        /* Message loop for splash */
+        MSG msg;
+        while (GetMessageA(&msg, NULL, 0, 0)) {
+            TranslateMessage(&msg);
+            DispatchMessageA(&msg);
+            /* Exit if splash was destroyed */
+            if (!IsWindow(splash)) break;
+        }
     }
     return 0;
 }
@@ -3967,8 +4123,42 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
                     }
                 }
 
+                /* --loadscripts name,name — extract comma-separated script list */
+                {
+                    char *lpos = SLOP_STRISTR(cmdline, "--loadscript");
+                    if (lpos) {
+                        char *arg = lpos + 12; /* skip "--loadscript" */
+                        if (*arg == 's' || *arg == 'S') arg++; /* skip optional 's' */
+                        /* Skip optional opening paren/quote/space */
+                        while (*arg == ' ' || *arg == '(') arg++;
+                        char scripts[512] = {0};
+                        if (*arg == '"' || *arg == '\'') {
+                            char quote = *arg++;
+                            int k = 0;
+                            while (*arg && *arg != quote && k < 511)
+                                scripts[k++] = *arg++;
+                        } else {
+                            /* Unquoted — take until space, closing paren, or end */
+                            int k = 0;
+                            while (*arg && *arg != ' ' && *arg != ')' && k < 511)
+                                scripts[k++] = *arg++;
+                        }
+                        /* Strip internal quotes from script names */
+                        {
+                            char clean[512] = {0};
+                            int j = 0;
+                            for (int i = 0; scripts[i] && j < 511; i++)
+                                if (scripts[i] != '\'' && scripts[i] != '"')
+                                    clean[j++] = scripts[i];
+                            memcpy(scripts, clean, 512);
+                        }
+                        if (scripts[0])
+                            SetEnvironmentVariableA("SLOP_LOADSCRIPTS", scripts);
+                    }
+                }
+
                 /* Strip all custom flags from the PEB command line in-place.
-                 * --loop must be stripped with its argument. */
+                 * --loop and --loadscripts must be stripped with their arguments. */
                 {
                     char *lpos = SLOP_STRISTR(cmdline, "--loop");
                     if (lpos) {
@@ -3980,6 +4170,32 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
                             if (*end == q) end++;
                         } else {
                             while (*end && *end != ' ') end++;
+                        }
+                        char *dst = lpos;
+                        if (dst > cmdline && *(dst - 1) == ' ') dst--;
+                        memmove(dst, end, strlen(end) + 1);
+                    }
+                }
+                /* Strip --loadscripts and its argument (handles parens, quotes, bare) */
+                {
+                    char *lpos = SLOP_STRISTR(cmdline, "--loadscript");
+                    if (lpos) {
+                        char *end = lpos + 12;
+                        if (*end == 's' || *end == 'S') end++;
+                        /* Skip optional paren/space */
+                        if (*end == '(') {
+                            end++;
+                            while (*end && *end != ')') end++;
+                            if (*end == ')') end++;
+                        } else {
+                            while (*end == ' ') end++;
+                            if (*end == '"' || *end == '\'') {
+                                char q = *end++;
+                                while (*end && *end != q) end++;
+                                if (*end == q) end++;
+                            } else {
+                                while (*end && *end != ' ') end++;
+                            }
                         }
                         char *dst = lpos;
                         if (dst > cmdline && *(dst - 1) == ' ') dst--;
