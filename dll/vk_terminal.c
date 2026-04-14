@@ -756,8 +756,9 @@ static int ttf_loaded[MAX_TTF_FONTS] = {0};
 #define VKM_FX_SMOKY     5
 #define VKM_FX_SHADOW    6
 #define VKM_FX_RAIN      7
-#define VKM_FX_WOBBLE    8
-#define VKM_FX_COUNT     9   /* wobble only shown when vk_experimental=True */
+#define VKM_FX_CRAWL     8
+#define VKM_FX_WOBBLE    9
+#define VKM_FX_COUNT     10  /* wobble only shown when vk_experimental=True */
 
 /* Settings submenu items */
 #define VKM_SUB_EXTRAS   7
@@ -790,9 +791,11 @@ static int ttf_loaded[MAX_TTF_FONTS] = {0};
 #define VKM_VIZ_COUNT    4
 
 /* Backgrounds 3rd-level submenu */
-#define VKM_SUB_BG       10
-#define VKM_BG_PLASMA    0
-#define VKM_BG_COUNT     1
+#define VKM_SUB_BG         10
+#define VKM_BG_SETTINGS    0  /* First item: opens unified Background Settings dialog */
+#define VKM_BG_PLASMA      1
+#define VKM_BG_STARFIELD   2
+#define VKM_BG_COUNT       3
 
 static int megamud_hidden = 0; /* 1 = MegaMUD windows hidden, VK-only mode */
 
@@ -3045,6 +3048,7 @@ static int fx_sobel_mode = 0;     /* 0 = off, 1 = sobel/sharp/plastic */
 static int fx_scanline_mode = 0;  /* 0 = off, 1 = CRT scanlines */
 static int fx_smoky_mode = 0;       /* 0 = off, 1 = smoky letters */
 static int fx_rain_mode = 0;        /* 0 = off, 1 = raindrop ripple warp */
+static int fx_crawl_mode = 0;       /* 0 = off, 1 = SpaceWarZ perspective crawl */
 static float rain_size = 0.06f;     /* drop radius in NDC */
 static float rain_speed = 1.0f;     /* animation speed multiplier */
 static float rain_freq = 3.0f;      /* drop density */
@@ -3068,8 +3072,9 @@ static float shadow_blur     = 1.0f;    /* 0..4 blur radius */
 static float shadow_r = 0.0f, shadow_g = 0.0f, shadow_b = 0.0f; /* shadow color */
 
 /* ---- Animated Background System ---- */
-#define BG_NONE     0
-#define BG_PLASMA   1
+#define BG_NONE      0
+#define BG_PLASMA    1
+#define BG_STARFIELD 2
 static int bg_mode = BG_NONE;
 static int bg_quad_end = 0;
 
@@ -3109,15 +3114,29 @@ static int bg_plasma_beat_mid    = 0;
 static int bg_plasma_beat_treble = 0;
 static int bg_plasma_beat_rms    = 0;
 
-/* Background settings panel state */
+/* Unified Background Settings dialog state
+ * Single tabbed dialog: one tab per registered background plugin.
+ * Plasma tab owns the static plasma sliders/dropdowns above; Starfield
+ * tab is populated later with starfield sliders. */
+#define BGP_TAB_PLASMA    0
+#define BGP_TAB_STARFIELD 1
+#define BGP_TAB_COUNT     2
+static const char *bgp_tab_names[BGP_TAB_COUNT] = { "Fractal Plasma", "Parallax Starfield" };
+static int   bgp_tab = BGP_TAB_PLASMA;     /* active tab index */
+static int   bgp_tab_scroll[BGP_TAB_COUNT] = {0, 0}; /* per-tab scroll position */
+
 static int   bgp_visible = 0;
 static float bgp_x = 140.0f, bgp_y = 100.0f;
-static float bgp_w = 420.0f, bgp_h = 640.0f;
+static float bgp_w = 680.0f, bgp_h = 720.0f;
 static int   bgp_dragging = 0;
+static int   bgp_resizing = 0;
 static float bgp_drag_ox, bgp_drag_oy;
 static int   bgp_active_slider = -1;
 static int   bgp_scroll = 0;
 static int   bgp_scroll_dragging = 0;
+#define BGP_MIN_W 420.0f
+#define BGP_MIN_H 260.0f
+#define BGP_RESIZE_ZONE 14
 static void  bgp_draw(int vp_w, int vp_h);
 static int   bgp_mouse_down(int mx, int my);
 static void  bgp_mouse_move(int mx, int my);
@@ -5491,6 +5510,7 @@ static void vkm_draw(int vp_w, int vp_h)
                 else if (i == VKM_FX_SMOKY) { label = "Smoky Letters"; is_active = fx_smoky_mode; }
                 else if (i == VKM_FX_SHADOW) { label = "Drop Shadow"; is_active = fx_shadow_mode; }
                 else if (i == VKM_FX_RAIN) { label = "Rain Drops"; is_active = fx_rain_mode; }
+                else if (i == VKM_FX_CRAWL) { label = "SpaceWarZ Crawl"; is_active = fx_crawl_mode; }
                 else if (i == VKM_FX_WOBBLE && vk_experimental) { label = "Wobbly Widgets \x1b[33m[EXP]"; is_active = fx_wobble_mode; }
             } else if (vkm_sub == VKM_SUB_EXTRAS) {
                 if (i == VKM_EXT_SOUND) {
@@ -5529,9 +5549,14 @@ static void vkm_draw(int vp_w, int vp_h)
                     label = "Backgrounds  \x10"; has_arrow = 1;
                 }
             } else if (vkm_sub == VKM_SUB_BG) {
-                if (i == VKM_BG_PLASMA) {
+                if (i == VKM_BG_SETTINGS) {
+                    label = "Background Settings...";
+                } else if (i == VKM_BG_PLASMA) {
                     label = "Fractal Plasma";
                     is_active = (bg_mode == BG_PLASMA);
+                } else if (i == VKM_BG_STARFIELD) {
+                    label = "Parallax Starfield";
+                    is_active = (bg_mode == BG_STARFIELD);
                 }
             } else if (vkm_sub == VKM_SUB_VIZ) {
                 if (i == VKM_VIZ_BLADES) {
@@ -6346,11 +6371,11 @@ static int vib_update_slide(int mouse_y, int vp_w)
     if (vib_pinned) {
         want_show = 1;
     } else {
-        /* Auto-hide: stay visible while any toggle/phone is active, or recent interaction */
-        int any_on = vib_states[VIB_BTN_PHONE];
-        for (int i = 0; !any_on && i < (int)VIB_BTN_COUNT; i++)
-            if (vib_buttons[i].is_toggle && vib_states[i]) { any_on = 1; break; }
-        want_show = any_on || (now - vib_last_interact < VIB_SHOW_MS) || in_trigger || in_tab || vib_pressed >= 0;
+        /* Auto-hide: show only on hover near the top edge / over the bar / recent click.
+         * Intentionally does NOT sticky-show on active toggles — that defeats auto-hide
+         * since Combat/Heal/etc are almost always on. */
+        want_show = in_trigger || in_tab || vib_pressed >= 0 ||
+                    (vib_last_interact != 0 && (now - vib_last_interact) < VIB_SHOW_MS);
     }
     float target = want_show ? 1.0f : 0.0f;
     float speed = VIB_SLIDE_SPEED * dt;
@@ -6524,28 +6549,64 @@ static void vib_draw(int vp_w, int vp_h, int bar_y)
         bx += bs + gap;
     }
 
-    /* Pin/unpin button — small toggle on the right edge */
+    /* Pin/unpin button — small pushpin icon drawn with quads.
+     * Pinned  = black pushpin upright (stuck in).
+     * Unpinned (auto-hide) = dim gray pushpin laying on its side / dimmed. */
     {
         int ps = vib_pin_size();
         int px = bx + gap;
         int py = bar_y + VIB_BAR_H / 2 - ps / 2;
-        float pr, pg, pb, pa;
-        if (vib_pinned) {
-            pr = 0.15f; pg = 0.5f; pb = 0.15f; pa = 0.85f;
-        } else if (vib_pin_hover) {
-            pr = t->bg[0] + 0.15f; pg = t->bg[1] + 0.15f; pb = t->bg[2] + 0.15f; pa = 0.8f;
-        } else {
-            pr = t->bg[0] + 0.06f; pg = t->bg[1] + 0.06f; pb = t->bg[2] + 0.06f; pa = 0.6f;
+        /* Subtle background only on hover */
+        if (vib_pin_hover) {
+            psolid((float)px, (float)py, (float)(px + ps), (float)(py + ps),
+                   t->bg[0] + 0.15f, t->bg[1] + 0.15f, t->bg[2] + 0.15f,
+                   0.6f * alpha, vp_w, vp_h);
         }
-        pa *= alpha;
-        psolid((float)px, (float)py, (float)(px + ps), (float)(py + ps),
-               pr, pg, pb, pa, vp_w, vp_h);
-        /* Draw a tiny pin icon using UI font: filled dot if pinned, hollow if not */
-        int pcw = (int)(VSB_CHAR_W * ui_scale * 0.7f);
-        int pch = (int)(VSB_CHAR_H * ui_scale * 0.7f);
-        const char *pin_ch = vib_pinned ? "\x04" : "\x09"; /* diamond=pinned, circle=auto */
-        ptext(px + ps / 2 - pcw / 2, py + ps / 2 - pch / 2,
-              pin_ch, 0.7f, 1.0f, 0.7f, vp_w, vp_h, pcw, pch);
+        /* Pushpin colors */
+        float cr, cg, cb, ca;
+        if (vib_pinned) {
+            cr = 0.02f; cg = 0.02f; cb = 0.02f; ca = 0.95f; /* black = stuck in */
+        } else {
+            cr = 0.55f; cg = 0.55f; cb = 0.55f; ca = 0.75f; /* gray = unpinned */
+        }
+        ca *= alpha;
+        /* Draw pushpin shape centered in button:
+         *   [head] — round-ish top cap
+         *   [shaft] — vertical body
+         *   [tip]   — pointy bottom
+         * Scaled to fit inside ps x ps. */
+        float cx = (float)(px + ps / 2);
+        float cy = (float)(py + ps / 2);
+        float s  = (float)ps * 0.5f;         /* half-size */
+        float head_w = s * 0.95f;
+        float head_h = s * 0.35f;
+        float shaft_w = s * 0.18f;
+        float shaft_h = s * 0.55f;
+        float tip_w = s * 0.22f;
+        float tip_h = s * 0.20f;
+        float top = cy - s * 0.85f;
+        /* Head cap (top) */
+        psolid(cx - head_w, top,
+               cx + head_w, top + head_h,
+               cr, cg, cb, ca, vp_w, vp_h);
+        /* Head highlight when pinned (tiny sheen) */
+        if (vib_pinned) {
+            psolid(cx - head_w * 0.6f, top + head_h * 0.15f,
+                   cx - head_w * 0.1f, top + head_h * 0.45f,
+                   0.9f, 0.9f, 0.9f, 0.35f * alpha, vp_w, vp_h);
+        }
+        /* Shaft */
+        psolid(cx - shaft_w, top + head_h,
+               cx + shaft_w, top + head_h + shaft_h,
+               cr, cg, cb, ca, vp_w, vp_h);
+        /* Tip (narrowing) — two side rects approximate a triangle */
+        float ty = top + head_h + shaft_h;
+        psolid(cx - tip_w * 0.7f, ty,
+               cx + tip_w * 0.7f, ty + tip_h * 0.5f,
+               cr, cg, cb, ca, vp_w, vp_h);
+        psolid(cx - tip_w * 0.35f, ty + tip_h * 0.5f,
+               cx + tip_w * 0.35f, ty + tip_h,
+               cr, cg, cb, ca, vp_w, vp_h);
         /* Tooltip */
         if (vib_pin_hover && vib_slide > 0.8f) {
             const char *tip = vib_pinned ? "Auto-hide" : "Pin bar";
@@ -9282,7 +9343,7 @@ static void vkt_render_frame(void)
     vkCmdBeginRenderPass(vk_cmd_buf, &rpbi, VK_SUBPASS_CONTENTS_INLINE);
 
     int pp_active = (pp_brightness != 0.0f || pp_contrast != 1.0f || pp_hue != 0.0f || pp_saturation != 1.0f);
-    int fx_active = (fx_liquid_mode || fx_waves_mode || fx_scanline_mode || fx_fbm_mode || fx_sobel_mode || fx_smoky_mode || fx_shadow_mode || fx_rain_mode || pp_active) && vk_liquid_pipeline;
+    int fx_active = (fx_liquid_mode || fx_waves_mode || fx_scanline_mode || fx_fbm_mode || fx_sobel_mode || fx_smoky_mode || fx_shadow_mode || fx_rain_mode || fx_crawl_mode || pp_active) && vk_liquid_pipeline;
     /* Bitmap-style fonts use the liquid pipeline but the shader guards
      * neighbor-sampling passes (shadow blur, liquid letters, dark outline,
      * sobel) via the is_pixel_font push constant to prevent artifact lines. */
@@ -9338,7 +9399,7 @@ static void vkt_render_frame(void)
         vkCmdBindPipeline(vk_cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS, vk_liquid_pipeline);
         vkCmdBindDescriptorSets(vk_cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                 vk_liquid_pipe_layout, 0, 1, &vk_desc_set, 0, NULL);
-        float pc_data[27] = { fx_time,
+        float pc_data[28] = { fx_time,
                               fx_liquid_mode ? 1.0f : 0.0f,
                               fx_waves_mode ? 1.0f : 0.0f,
                               fx_scanline_mode ? 1.0f : 0.0f,
@@ -9353,7 +9414,8 @@ static void vkt_render_frame(void)
                               shadow_blur,
                               is_pixel_font(current_font) ? 1.0f : 0.0f,
                               fx_rain_mode ? 1.0f : 0.0f,
-                              rain_size, rain_speed, rain_freq, rain_warp };
+                              rain_size, rain_speed, rain_freq, rain_warp,
+                              fx_crawl_mode ? 1.0f : 0.0f };
         vkCmdPushConstants(vk_cmd_buf, vk_liquid_pipe_layout,
                            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                            0, sizeof(pc_data), pc_data);
@@ -9420,7 +9482,7 @@ static void vkt_render_frame(void)
             vkCmdBindPipeline(vk_cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS, vk_liquid_pipeline);
             vkCmdBindDescriptorSets(vk_cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                     vk_liquid_pipe_layout, 0, 1, &vk_desc_set, 0, NULL);
-            float pc_data[27] = { fx_time,
+            float pc_data[28] = { fx_time,
                                   fx_liquid_mode ? 1.0f : 0.0f,
                                   fx_waves_mode ? 1.0f : 0.0f,
                                   fx_scanline_mode ? 1.0f : 0.0f,
@@ -9435,7 +9497,8 @@ static void vkt_render_frame(void)
                                   shadow_blur,
                                   is_pixel_font(current_font) ? 1.0f : 0.0f,
                                   fx_rain_mode ? 1.0f : 0.0f,
-                                  rain_size, rain_speed, rain_freq, rain_warp };
+                                  rain_size, rain_speed, rain_freq, rain_warp,
+                                  fx_crawl_mode ? 1.0f : 0.0f };
             vkCmdPushConstants(vk_cmd_buf, vk_liquid_pipe_layout,
                                VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                                0, sizeof(pc_data), pc_data);
@@ -9820,8 +9883,8 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             clr_mouse_move(mx2, my2);
             return 0;
         }
-        /* Background settings panel drag/slider */
-        if (bgp_dragging || bgp_active_slider >= 0) {
+        /* Background settings panel drag/slider/resize */
+        if (bgp_dragging || bgp_resizing || bgp_active_slider >= 0) {
             bgp_mouse_move(mx2, my2);
             return 0;
         }
@@ -10251,7 +10314,7 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         if (scm_dragging || scm_resizing) { scm_mouse_up(); return 0; }
         if (mr_dragging || mr_resizing || mr_vol_dragging) { mr_mouse_up(); return 0; }
         if (clr_dragging || clr_active_slider >= 0) { clr_mouse_up(); return 0; }
-        if (bgp_dragging || bgp_active_slider >= 0) { bgp_mouse_up(); return 0; }
+        if (bgp_dragging || bgp_resizing || bgp_active_slider >= 0) { bgp_mouse_up(); return 0; }
         if (smk_dragging || smk_active_slider >= 0) { smk_mouse_up(); return 0; }
         if (rn_dragging || rn_active_slider >= 0) { rn_mouse_up(); return 0; }
         if (shd_dragging || shd_active_slider >= 0) { shd_mouse_up(); return 0; }
@@ -10377,6 +10440,10 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 if (!fx_rain_mode) rn_visible = 0;
                 if (api) api->log("[vk_terminal] Rain Drops: %s\n",
                                   fx_rain_mode ? "ON" : "OFF");
+            } else if (si == VKM_FX_CRAWL) {
+                fx_crawl_mode = !fx_crawl_mode;
+                if (api) api->log("[vk_terminal] SpaceWarZ Crawl: %s\n",
+                                  fx_crawl_mode ? "ON" : "OFF");
             } else if (si == VKM_FX_SHADOW) {
                 fx_shadow_mode = !fx_shadow_mode;
                 if (fx_shadow_mode && !shd_visible) { shd_visible = 1; sp_focus = 3; }
@@ -10449,16 +10516,20 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
 
         /* Backgrounds submenu click */
         if (si >= 0 && vkm_sub == VKM_SUB_BG) {
-            if (si == VKM_BG_PLASMA) {
-                if (bg_mode == BG_PLASMA) {
-                    bg_mode = BG_NONE;
-                    bgp_visible = 0;
-                } else {
-                    bg_mode = BG_PLASMA;
-                    bgp_visible = 1;
-                }
+            if (si == VKM_BG_SETTINGS) {
+                /* First item opens the unified Background Settings dialog.
+                 * Dialog is tabbed; users pick which bg plugin to configure there. */
+                bgp_visible = 1;
+            } else if (si == VKM_BG_PLASMA) {
+                /* Plain toggle — mutually exclusive with other backgrounds.
+                 * Does NOT auto-open settings; use "Background Settings..." for that. */
+                bg_mode = (bg_mode == BG_PLASMA) ? BG_NONE : BG_PLASMA;
                 if (api) api->log("[vk_terminal] Fractal Plasma: %s\n",
                                   bg_mode == BG_PLASMA ? "ON" : "OFF");
+            } else if (si == VKM_BG_STARFIELD) {
+                bg_mode = (bg_mode == BG_STARFIELD) ? BG_NONE : BG_STARFIELD;
+                if (api) api->log("[vk_terminal] Parallax Starfield: %s\n",
+                                  bg_mode == BG_STARFIELD ? "ON" : "OFF");
             }
             vkm_open = 0;
             vkm_sub = VKM_SUB_NONE;
@@ -14047,19 +14118,37 @@ static const char *bgp_tonemap_names[BGP_TONEMAP_COUNT] = {
     "None", "ACES Filmic", "Reinhard", "Hable", "AgX"
 };
 
-/* Total virtual rows = sliders + section labels + dropdown rows */
-#define BGP_TOTAL_ROWS (BGP_SLIDER_COUNT + 11)  /* 12 sliders + 1 material dd + 1 sep + 4 beat dds + 2 section labels + 1 tonemap dd + 1 exposure slider */
+/* Total virtual rows = sliders + section labels + dropdown rows + defaults block */
+#define BGP_TOTAL_ROWS (BGP_SLIDER_COUNT + 13)  /* 12 sliders + 1 material dd + 1 sep + 4 beat dds + 2 section labels + 1 tonemap dd + 1 exposure slider + 1 defaults header + 1 defaults button */
+
+/* Forward decl for starfield tab rendering (populated in step 4) */
+static void bgp_draw_starfield_tab(float x0, float content_top, float content_bot,
+                                   float pw, float sb_w, int vp_w, int vp_h,
+                                   const ui_theme_t *t, int cw, int ch);
+static int  bgp_starfield_total_rows(void);
 
 static int bgp_scaled = 0;
 static void bgp_draw(int vp_w, int vp_h) {
     if (!bgp_visible) return;
-    if (!bgp_scaled) { bgp_w = 420*ui_scale; bgp_h = 640*ui_scale; bgp_x = 100*ui_scale; bgp_y = 60*ui_scale; bgp_scaled = 1; }
+    if (!bgp_scaled) { bgp_w = 680*ui_scale; bgp_h = 720*ui_scale; bgp_x = 100*ui_scale; bgp_y = 60*ui_scale; bgp_scaled = 1; }
+    if (bgp_w < BGP_MIN_W) bgp_w = BGP_MIN_W;
+    if (bgp_h < BGP_MIN_H) bgp_h = BGP_MIN_H;
     const ui_theme_t *t = &ui_themes[current_theme];
     int cw = (int)(VKM_CHAR_W * ui_scale), ch = (int)(VKM_CHAR_H * ui_scale);
     float x0 = bgp_x, y0 = bgp_y;
     float pw = bgp_w;
-    int titlebar_h = ch + 8;
-    float sb_w = 8.0f;
+    float x1 = x0 + pw, y1 = y0 + bgp_h;
+    int titlebar_h = ch + 10;
+    int tab_bar_h = ch + 10;
+    float sb_w = 10.0f;
+    float bgr = t->bg[0], bgg = t->bg[1], bgb = t->bg[2];
+    float acr = t->accent[0], acg = t->accent[1], acb = t->accent[2];
+    float txr = t->text[0], txg = t->text[1], txb = t->text[2];
+
+    /* Clamp tab index */
+    if (bgp_tab < 0 || bgp_tab >= BGP_TAB_COUNT) bgp_tab = 0;
+    /* Pull per-tab scroll position into the shared var used by hit tests */
+    bgp_scroll = bgp_tab_scroll[bgp_tab];
 
     bgp_slider_ptr[0] = &bg_plasma_speed;
     bgp_slider_ptr[1] = &bg_plasma_turbulence;
@@ -14074,48 +14163,123 @@ static void bgp_draw(int vp_w, int vp_h) {
     bgp_slider_ptr[10] = &bg_plasma_sharpen;
     bgp_slider_ptr[11] = &bg_plasma_mat_str;
 
-    /* Panel background and border */
-    push_solid((int)x0, (int)y0, (int)(x0 + pw), (int)(y0 + bgp_h),
-               t->bg[0], t->bg[1], t->bg[2], 0.92f, vp_w, vp_h);
-    push_solid((int)x0, (int)y0, (int)(x0 + pw), (int)(y0 + 1),
-               t->accent[0], t->accent[1], t->accent[2], 0.6f, vp_w, vp_h);
-    push_solid((int)x0, (int)(y0 + bgp_h - 1), (int)(x0 + pw), (int)(y0 + bgp_h),
-               t->accent[0], t->accent[1], t->accent[2], 0.6f, vp_w, vp_h);
-    push_solid((int)x0, (int)y0, (int)(x0 + 1), (int)(y0 + bgp_h),
-               t->accent[0], t->accent[1], t->accent[2], 0.6f, vp_w, vp_h);
-    push_solid((int)(x0 + pw - 1), (int)y0, (int)(x0 + pw), (int)(y0 + bgp_h),
-               t->accent[0], t->accent[1], t->accent[2], 0.6f, vp_w, vp_h);
+    /* ---- Panel body (slightly lifted from pure bg) ---- */
+    push_solid((int)x0, (int)y0, (int)x1, (int)y1,
+               bgr + 0.04f, bgg + 0.04f, bgb + 0.04f, 0.96f, vp_w, vp_h);
 
-    /* Titlebar */
+    /* Outer bevel: light top/left, dark bottom/right */
+    push_solid((int)x0, (int)y0, (int)x1, (int)y0 + 1,
+               bgr + 0.18f, bgg + 0.18f, bgb + 0.18f, 0.8f, vp_w, vp_h);
+    push_solid((int)x0, (int)y0, (int)x0 + 1, (int)y1,
+               bgr + 0.14f, bgg + 0.14f, bgb + 0.14f, 0.7f, vp_w, vp_h);
+    push_solid((int)x0, (int)y1 - 1, (int)x1, (int)y1,
+               bgr * 0.4f, bgg * 0.4f, bgb * 0.4f, 0.9f, vp_w, vp_h);
+    push_solid((int)x1 - 1, (int)y0, (int)x1, (int)y1,
+               bgr * 0.5f, bgg * 0.5f, bgb * 0.5f, 0.85f, vp_w, vp_h);
+    /* Inner bevel for depth */
+    push_solid((int)x0 + 1, (int)y0 + 1, (int)x1 - 1, (int)y0 + 2,
+               bgr + 0.10f, bgg + 0.10f, bgb + 0.10f, 0.5f, vp_w, vp_h);
+    push_solid((int)x0 + 1, (int)y0 + 1, (int)x0 + 2, (int)y1 - 1,
+               bgr + 0.08f, bgg + 0.08f, bgb + 0.08f, 0.4f, vp_w, vp_h);
+
+    /* ---- Decorated titlebar (matches Player Stats) ---- */
     {
-        float acr = t->accent[0], acg = t->accent[1], acb = t->accent[2];
-        float tbr = acr * 0.25f + t->bg[0] * 0.5f;
-        float tbg = acg * 0.25f + t->bg[1] * 0.5f;
-        float tbb = acb * 0.25f + t->bg[2] * 0.5f;
-        int ty0 = (int)y0 + 2, ty1 = (int)y0 + titlebar_h;
-        push_solid((int)x0 + 2, ty0, (int)(x0 + pw) - 2, ty1,
-                   tbr, tbg, tbb, 0.95f, vp_w, vp_h);
-        push_solid((int)x0 + 2, ty0, (int)(x0 + pw) - 2, ty0 + titlebar_h / 2,
+        float tb_y0 = y0 + 2.0f, tb_y1 = y0 + (float)titlebar_h;
+        /* Accent-tinted bg */
+        push_solid((int)x0 + 2, (int)tb_y0, (int)x1 - 2, (int)tb_y1,
+                   acr * 0.25f + bgr * 0.5f, acg * 0.25f + bgg * 0.5f, acb * 0.25f + bgb * 0.5f,
+                   0.95f, vp_w, vp_h);
+        /* Gloss highlight on top half */
+        push_solid((int)x0 + 2, (int)tb_y0, (int)x1 - 2, (int)tb_y0 + titlebar_h / 2,
                    1.0f, 1.0f, 1.0f, 0.06f, vp_w, vp_h);
-        push_solid((int)x0 + 2, ty1 - 1, (int)(x0 + pw) - 2, ty1,
+        /* Bottom accent edge */
+        push_solid((int)x0 + 2, (int)tb_y1 - 1, (int)x1 - 2, (int)tb_y1,
                    acr, acg, acb, 0.5f, vp_w, vp_h);
+        int title_ty = (int)tb_y0 + (titlebar_h - ch) / 2;
+        int pad_x = 14;
+        push_text((int)x0 + pad_x + 1, title_ty + 1, "Background Settings",
+                  0.0f, 0.0f, 0.0f, vp_w, vp_h, cw, ch);
+        push_text((int)x0 + pad_x, title_ty, "Background Settings",
+                  txr, txg, txb, vp_w, vp_h, cw, ch);
+        /* Close [X] — red-tinted, inset from right edge to keep margin */
+        push_text((int)x1 - pad_x - cw, title_ty, "X",
+                  1.0f, 0.3f, 0.3f, vp_w, vp_h, cw, ch);
     }
-    push_text((int)(x0 + 6) + 1, (int)(y0 + 4) + 1, "Fractal Plasma",
-              0.0f, 0.0f, 0.0f, vp_w, vp_h, cw, ch);
-    push_text((int)(x0 + 6), (int)(y0 + 4), "Fractal Plasma",
-              t->text[0], t->text[1], t->text[2], vp_w, vp_h, cw, ch);
-    push_text((int)(x0 + pw - 16), (int)(y0 + 4), "X",
-              t->text[0] * 0.6f, t->text[1] * 0.6f, t->text[2] * 0.6f, vp_w, vp_h, cw, ch);
-    push_text((int)(x0 + pw - 55), (int)(y0 + 4), "Reset",
-              t->text[0] * 0.5f, t->text[1] * 0.5f, t->text[2] * 0.5f, vp_w, vp_h, cw, ch);
+
+    /* --- Tab bar --- */
+    {
+        float tab_y0 = y0 + titlebar_h;
+        float tab_y1 = tab_y0 + tab_bar_h;
+        /* Tab bar strip background (slightly darker than panel) */
+        push_solid((int)(x0 + 1), (int)tab_y0, (int)(x0 + pw - 1), (int)tab_y1,
+                   t->bg[0] * 0.85f, t->bg[1] * 0.85f, t->bg[2] * 0.85f,
+                   0.95f, vp_w, vp_h);
+        /* Draw each tab button */
+        float tx = x0 + 4;
+        for (int i = 0; i < BGP_TAB_COUNT; i++) {
+            int tlen = (int)strlen(bgp_tab_names[i]);
+            float tw = (float)(tlen * cw) + 16.0f;
+            int is_active = (i == bgp_tab);
+            float br, bg, bb, ba;
+            if (is_active) {
+                br = t->bg[0]; bg = t->bg[1]; bb = t->bg[2]; ba = 0.95f;
+            } else {
+                br = t->bg[0] * 0.6f; bg = t->bg[1] * 0.6f; bb = t->bg[2] * 0.6f; ba = 0.7f;
+            }
+            push_solid((int)tx, (int)(tab_y0 + 2), (int)(tx + tw), (int)tab_y1,
+                       br, bg, bb, ba, vp_w, vp_h);
+            if (is_active) {
+                /* Underline in accent color to indicate active tab */
+                push_solid((int)tx, (int)(tab_y1 - 2), (int)(tx + tw), (int)tab_y1,
+                           t->accent[0], t->accent[1], t->accent[2], 0.9f, vp_w, vp_h);
+            }
+            float tr = is_active ? t->text[0] : t->text[0] * 0.6f;
+            float tg = is_active ? t->text[1] : t->text[1] * 0.6f;
+            float tb = is_active ? t->text[2] : t->text[2] * 0.6f;
+            push_text((int)(tx + 8), (int)(tab_y0 + 5),
+                      bgp_tab_names[i], tr, tg, tb, vp_w, vp_h, cw, ch);
+            tx += tw + 2;
+        }
+        /* Bottom border of tab bar */
+        push_solid((int)(x0 + 1), (int)tab_y1, (int)(x0 + pw - 1), (int)(tab_y1 + 1),
+                   t->accent[0], t->accent[1], t->accent[2], 0.4f, vp_w, vp_h);
+    }
+
+    /* --- Resize grip (bottom-right corner, diagonal hatch) --- */
+    {
+        int gx1 = (int)x1 - 2, gy1 = (int)y1 - 2;
+        int gz = BGP_RESIZE_ZONE;
+        for (int i = 2; i <= gz; i += 3) {
+            push_solid(gx1 - i, gy1 - 1, gx1, gy1,
+                       acr * 0.8f + 0.1f, acg * 0.8f + 0.1f, acb * 0.8f + 0.1f,
+                       0.6f, vp_w, vp_h);
+            push_solid(gx1 - 1, gy1 - i, gx1, gy1,
+                       acr * 0.8f + 0.1f, acg * 0.8f + 0.1f, acb * 0.8f + 0.1f,
+                       0.6f, vp_w, vp_h);
+            /* Diagonal hatch */
+            for (int j = 0; j < i; j++) {
+                push_solid(gx1 - j - 1, gy1 - (i - j) - 1,
+                           gx1 - j, gy1 - (i - j),
+                           1.0f, 1.0f, 1.0f, 0.22f, vp_w, vp_h);
+            }
+        }
+    }
 
     /* Content area with scrolling */
-    float content_top = y0 + titlebar_h + 4;
+    float content_top = y0 + titlebar_h + tab_bar_h + 4;
     float content_bot = y0 + bgp_h - 4;
     float content_h = content_bot - content_top;
     float row_h = ch + 14;
-    float slider_w = pw - 16 - sb_w;
+    float slider_w = pw - 40 - sb_w;
     char vbuf[32];
+
+    /* If Starfield tab is active, delegate and return early (its own scrolling). */
+    if (bgp_tab == BGP_TAB_STARFIELD) {
+        bgp_draw_starfield_tab(x0, content_top, content_bot, pw, sb_w,
+                               vp_w, vp_h, t, cw, ch);
+        bgp_tab_scroll[bgp_tab] = bgp_scroll;
+        return;
+    }
 
     /* Virtual row index (for scroll) — each slider is a row, plus section headers and dropdowns */
     int vrow = 0;
@@ -14144,7 +14308,7 @@ static void bgp_draw(int vp_w, int vp_h) {
             else
                 _snprintf(vbuf, sizeof(vbuf), "%.2f", val);
 
-            clr_draw_slider(x0 + 8, cy, slider_w, row_h, val,
+            clr_draw_slider(x0 + 20, cy, slider_w, row_h, val,
                             bgp_slider_min[i], bgp_slider_max[i],
                             bgp_labels[i], vbuf, vp_w, vp_h, t);
         }
@@ -14153,9 +14317,9 @@ static void bgp_draw(int vp_w, int vp_h) {
 
     /* --- Material dropdown --- */
     if (BGP_ROW_VISIBLE) {
-        push_text((int)(x0 + 10), (int)(cy + 2), "Material:",
+        push_text((int)(x0 + 20), (int)(cy + 2), "Material:",
                   t->text[0], t->text[1], t->text[2], vp_w, vp_h, cw, ch);
-        int dd_x = (int)(x0 + 10 + 11 * cw);
+        int dd_x = (int)(x0 + 20 + 11 * cw);
         int dd_w = (int)(slider_w - 11 * cw - 2);
         int dd_y = (int)cy;
         int dd_h = ch + 4;
@@ -14176,10 +14340,10 @@ static void bgp_draw(int vp_w, int vp_h) {
 
     /* --- Beat Response section header --- */
     if (BGP_ROW_VISIBLE) {
-        push_solid((int)(x0 + 8), (int)(cy + row_h * 0.3f),
-                   (int)(x0 + pw - sb_w - 8), (int)(cy + row_h * 0.35f),
+        push_solid((int)(x0 + 20), (int)(cy + row_h * 0.3f),
+                   (int)(x0 + pw - sb_w - 20), (int)(cy + row_h * 0.35f),
                    t->accent[0], t->accent[1], t->accent[2], 0.3f, vp_w, vp_h);
-        push_text((int)(x0 + 8), (int)(cy + 2), "Beat Response",
+        push_text((int)(x0 + 20), (int)(cy + 2), "Beat Response",
                   t->accent[0], t->accent[1], t->accent[2], vp_w, vp_h, cw, ch);
     }
     BGP_NEXT_ROW;
@@ -14194,10 +14358,10 @@ static void bgp_draw(int vp_w, int vp_h) {
         };
         for (int b = 0; b < 4; b++) {
             if (BGP_ROW_VISIBLE) {
-                push_text((int)(x0 + 10), (int)(cy + 2), beats[b].label,
+                push_text((int)(x0 + 20), (int)(cy + 2), beats[b].label,
                           t->text[0], t->text[1], t->text[2], vp_w, vp_h, cw, ch);
                 /* Dropdown button */
-                int dd_x = (int)(x0 + 10 + 11 * cw);
+                int dd_x = (int)(x0 + 20 + 11 * cw);
                 int dd_w = (int)(slider_w - 11 * cw - 2);
                 int dd_y = (int)cy;
                 int dd_h = ch + 4;
@@ -14225,19 +14389,19 @@ static void bgp_draw(int vp_w, int vp_h) {
 
     /* --- Tonemapping section header --- */
     if (BGP_ROW_VISIBLE) {
-        push_solid((int)(x0 + 8), (int)(cy + row_h * 0.3f),
-                   (int)(x0 + pw - sb_w - 8), (int)(cy + row_h * 0.35f),
+        push_solid((int)(x0 + 20), (int)(cy + row_h * 0.3f),
+                   (int)(x0 + pw - sb_w - 20), (int)(cy + row_h * 0.35f),
                    t->accent[0], t->accent[1], t->accent[2], 0.3f, vp_w, vp_h);
-        push_text((int)(x0 + 8), (int)(cy + 2), "Tonemapping",
+        push_text((int)(x0 + 20), (int)(cy + 2), "Tonemapping",
                   t->accent[0], t->accent[1], t->accent[2], vp_w, vp_h, cw, ch);
     }
     BGP_NEXT_ROW;
 
     /* Tonemap mode dropdown */
     if (BGP_ROW_VISIBLE) {
-        push_text((int)(x0 + 10), (int)(cy + 2), "Mode:",
+        push_text((int)(x0 + 20), (int)(cy + 2), "Mode:",
                   t->text[0], t->text[1], t->text[2], vp_w, vp_h, cw, ch);
-        int dd_x = (int)(x0 + 10 + 11 * cw);
+        int dd_x = (int)(x0 + 20 + 11 * cw);
         int dd_w = (int)(slider_w - 11 * cw - 2);
         int dd_y = (int)cy;
         int dd_h = ch + 4;
@@ -14259,8 +14423,43 @@ static void bgp_draw(int vp_w, int vp_h) {
     /* Exposure slider */
     if (BGP_ROW_VISIBLE) {
         _snprintf(vbuf, sizeof(vbuf), "%.1f", bg_tonemap_exposure);
-        clr_draw_slider(x0 + 8, cy, slider_w, row_h, bg_tonemap_exposure,
+        clr_draw_slider(x0 + 20, cy, slider_w, row_h, bg_tonemap_exposure,
                         0.2f, 4.0f, "Exposure", vbuf, vp_w, vp_h, t);
+    }
+    BGP_NEXT_ROW;
+
+    /* --- Defaults section header --- */
+    if (BGP_ROW_VISIBLE) {
+        push_solid((int)(x0 + 20), (int)(cy + row_h * 0.3f),
+                   (int)(x0 + pw - sb_w - 20), (int)(cy + row_h * 0.35f),
+                   t->accent[0], t->accent[1], t->accent[2], 0.3f, vp_w, vp_h);
+        push_text((int)(x0 + 20), (int)(cy + 2), "Defaults",
+                  t->accent[0], t->accent[1], t->accent[2], vp_w, vp_h, cw, ch);
+    }
+    BGP_NEXT_ROW;
+
+    /* --- Reset to Defaults button --- */
+    if (BGP_ROW_VISIBLE) {
+        const char *btn = "[ Reset to Defaults ]";
+        int blen = (int)strlen(btn);
+        int bw = blen * cw + 16;
+        int bx = (int)(x0 + (pw - sb_w - bw) * 0.5f);
+        int by = (int)cy;
+        int bh = ch + 6;
+        /* Button bg */
+        push_solid(bx, by, bx + bw, by + bh,
+                   t->bg[0] + 0.08f, t->bg[1] + 0.08f, t->bg[2] + 0.08f, 0.9f, vp_w, vp_h);
+        /* Top highlight */
+        push_solid(bx, by, bx + bw, by + 1, 1.0f, 1.0f, 1.0f, 0.15f, vp_w, vp_h);
+        /* Bottom shadow */
+        push_solid(bx, by + bh - 1, bx + bw, by + bh, 0.0f, 0.0f, 0.0f, 0.25f, vp_w, vp_h);
+        /* Accent border */
+        push_solid(bx, by, bx + 1, by + bh,
+                   t->accent[0], t->accent[1], t->accent[2], 0.5f, vp_w, vp_h);
+        push_solid(bx + bw - 1, by, bx + bw, by + bh,
+                   t->accent[0], t->accent[1], t->accent[2], 0.5f, vp_w, vp_h);
+        push_text(bx + 8, by + 3, btn,
+                  t->text[0], t->text[1], t->text[2], vp_w, vp_h, cw, ch);
     }
     BGP_NEXT_ROW;
 
@@ -14291,17 +14490,45 @@ static void bgp_draw(int vp_w, int vp_h) {
                        1.0f, 1.0f, 1.0f, 0.1f, vp_w, vp_h);
         }
     }
+
+    /* Save this tab's scroll position so switching tabs preserves each one's view */
+    bgp_tab_scroll[bgp_tab] = bgp_scroll;
+}
+
+/* ---- Starfield tab ----
+ * Real content (sliders for speed, size, brightness, layers, comets, etc.)
+ * is populated after the starfield pipeline lands. Until then, show a
+ * placeholder message so the tab isn't blank. */
+static int bgp_starfield_total_rows(void) { return 1; }
+static void bgp_draw_starfield_tab(float x0, float content_top, float content_bot,
+                                   float pw, float sb_w, int vp_w, int vp_h,
+                                   const ui_theme_t *t, int cw, int ch)
+{
+    (void)content_bot; (void)sb_w;
+    const char *line1 = "Parallax Starfield";
+    const char *line2 = "(pipeline + controls coming online)";
+    int l1 = (int)strlen(line1), l2 = (int)strlen(line2);
+    int tx1 = (int)(x0 + (pw - l1 * cw) * 0.5f);
+    int tx2 = (int)(x0 + (pw - l2 * cw) * 0.5f);
+    int ty  = (int)(content_top + 20);
+    push_text(tx1, ty, line1,
+              t->accent[0], t->accent[1], t->accent[2], vp_w, vp_h, cw, ch);
+    push_text(tx2, ty + ch + 4, line2,
+              t->text[0] * 0.6f, t->text[1] * 0.6f, t->text[2] * 0.6f,
+              vp_w, vp_h, cw, ch);
 }
 
 static int bgp_hit_slider(int mx, int my, float *out_pct) {
+    if (bgp_tab != BGP_TAB_PLASMA) return -1;
     int cw = (int)(VKM_CHAR_W * ui_scale), ch = (int)(VKM_CHAR_H * ui_scale);
-    int titlebar_h = ch + 8;
+    int titlebar_h = ch + 10;
+    int tab_bar_h = ch + 10;
     float row_h = ch + 14;
-    float sb_w = 8.0f;
-    float slider_w = bgp_w - 16 - sb_w;
-    float sx0 = bgp_x + 8 + (float)(12 * cw);
-    float sx1 = bgp_x + 8 + slider_w - (float)(7 * cw) + 8;
-    float content_top = bgp_y + titlebar_h + 4;
+    float sb_w = 10.0f;
+    float slider_w = bgp_w - 40 - sb_w;
+    float sx0 = bgp_x + 20 + (float)(12 * cw);
+    float sx1 = bgp_x + 20 + slider_w - (float)(7 * cw) + 8;
+    float content_top = bgp_y + titlebar_h + tab_bar_h + 4;
     for (int i = 0; i < BGP_SLIDER_COUNT; i++) {
         int vrow = i - bgp_scroll;
         if (vrow < 0) continue;
@@ -14344,13 +14571,15 @@ static void bgp_set_from_pct(int slider, float pct) {
 
 /* Returns dropdown index: -1=none, 0=material, 1-4=beat bands */
 static int bgp_hit_dropdown(int mx, int my) {
+    if (bgp_tab != BGP_TAB_PLASMA) return -1;
     int cw = (int)(VKM_CHAR_W * ui_scale), ch = (int)(VKM_CHAR_H * ui_scale);
-    int titlebar_h = ch + 8;
+    int titlebar_h = ch + 10;
+    int tab_bar_h = ch + 10;
     float row_h = ch + 14;
-    float sb_w = 8.0f;
-    float slider_w = bgp_w - 16 - sb_w;
-    float content_top = bgp_y + titlebar_h + 4;
-    int dd_x = (int)(bgp_x + 10 + 11 * cw);
+    float sb_w = 10.0f;
+    float slider_w = bgp_w - 40 - sb_w;
+    float content_top = bgp_y + titlebar_h + tab_bar_h + 4;
+    int dd_x = (int)(bgp_x + 20 + 11 * cw);
     int dd_w = (int)(slider_w - 11 * cw - 2);
     if (mx < dd_x || mx >= dd_x + dd_w) return -1;
     /* Material dropdown at virtual row BGP_SLIDER_COUNT */
@@ -14379,18 +14608,30 @@ static int bgp_hit_dropdown(int mx, int my) {
     return -1;
 }
 
-static int bgp_mouse_down(int mx, int my) {
-    if (!bgp_visible) return 0;
-    if (mx < (int)bgp_x || mx >= (int)(bgp_x + bgp_w) ||
-        my < (int)bgp_y || my >= (int)(bgp_y + bgp_h)) return 0;
-    int ch = (int)(VKM_CHAR_H * ui_scale);
-    int titlebar_h = ch + 8;
-    int ly = my - (int)bgp_y;
-    if (ly < titlebar_h && mx >= (int)(bgp_x + bgp_w - 20)) {
-        bgp_visible = 0;
-        return 1;
-    }
-    if (ly < titlebar_h && mx >= (int)(bgp_x + bgp_w - 60) && mx < (int)(bgp_x + bgp_w - 20)) {
+/* Returns 1 if mouse is over the Reset-to-Defaults button in the plasma tab */
+static int bgp_hit_defaults_button(int mx, int my) {
+    if (bgp_tab != BGP_TAB_PLASMA) return 0;
+    int cw = (int)(VKM_CHAR_W * ui_scale), ch = (int)(VKM_CHAR_H * ui_scale);
+    int titlebar_h = ch + 10;
+    int tab_bar_h = ch + 10;
+    float row_h = ch + 14;
+    float sb_w = 10.0f;
+    float content_top = bgp_y + titlebar_h + tab_bar_h + 4;
+    /* Defaults button is at virtual row BGP_SLIDER_COUNT + 10 */
+    int vrow = BGP_SLIDER_COUNT + 10 - bgp_scroll;
+    if (vrow < 0) return 0;
+    float ry = content_top + 4 + vrow * row_h;
+    const char *btn = "[ Reset to Defaults ]";
+    int blen = (int)strlen(btn);
+    int bw = blen * cw + 16;
+    int bx = (int)(bgp_x + (bgp_w - sb_w - bw) * 0.5f);
+    int bh = ch + 6;
+    return (mx >= bx && mx < bx + bw && my >= (int)ry && my < (int)ry + bh);
+}
+
+/* Reset only the currently active tab's settings to defaults. */
+static void bgp_reset_current_tab_defaults(void) {
+    if (bgp_tab == BGP_TAB_PLASMA) {
         bg_plasma_speed = 1.0f; bg_plasma_turbulence = 0.5f;
         bg_plasma_complexity = 4.0f; bg_plasma_hue = 0.0f;
         bg_plasma_saturation = 0.8f; bg_plasma_brightness = 0.7f;
@@ -14401,12 +14642,62 @@ static int bgp_mouse_down(int mx, int my) {
         bg_plasma_beat_bass = 0; bg_plasma_beat_mid = 0;
         bg_plasma_beat_treble = 0; bg_plasma_beat_rms = 0;
         bg_tonemap_mode = 0; bg_tonemap_exposure = 1.0f;
+    }
+    /* Starfield defaults will be wired when its controls land. */
+}
+
+static int bgp_mouse_down(int mx, int my) {
+    if (!bgp_visible) return 0;
+    if (mx < (int)bgp_x || mx >= (int)(bgp_x + bgp_w) ||
+        my < (int)bgp_y || my >= (int)(bgp_y + bgp_h)) return 0;
+    int cw = (int)(VKM_CHAR_W * ui_scale);
+    int ch = (int)(VKM_CHAR_H * ui_scale);
+    int titlebar_h = ch + 10;
+    int tab_bar_h = ch + 10;
+    int ly = my - (int)bgp_y;
+
+    /* Resize grip: bottom-right corner. Catch BEFORE other hit tests. */
+    if (mx >= (int)(bgp_x + bgp_w - BGP_RESIZE_ZONE) &&
+        my >= (int)(bgp_y + bgp_h - BGP_RESIZE_ZONE)) {
+        bgp_resizing = 1;
+        bgp_drag_ox = (float)mx - (bgp_x + bgp_w);  /* offset from right edge */
+        bgp_drag_oy = (float)my - (bgp_y + bgp_h);  /* offset from bottom edge */
+        return 1;
+    }
+
+    /* Close X: titlebar right side, with padding margin */
+    if (ly < titlebar_h && mx >= (int)(bgp_x + bgp_w - 14 - cw - 4) &&
+        mx < (int)(bgp_x + bgp_w - 4)) {
+        bgp_visible = 0;
         return 1;
     }
     if (ly < titlebar_h) {
         bgp_dragging = 1;
         bgp_drag_ox = (float)mx - bgp_x;
         bgp_drag_oy = (float)my - bgp_y;
+        return 1;
+    }
+    /* Tab bar click — switch active tab */
+    if (ly >= titlebar_h && ly < titlebar_h + tab_bar_h) {
+        float tx = bgp_x + 4;
+        for (int i = 0; i < BGP_TAB_COUNT; i++) {
+            int tlen = (int)strlen(bgp_tab_names[i]);
+            float tw = (float)(tlen * cw) + 16.0f;
+            if (mx >= (int)tx && mx < (int)(tx + tw)) {
+                if (bgp_tab != i) {
+                    bgp_tab = i;
+                    bgp_active_slider = -1;
+                    bgp_scroll = bgp_tab_scroll[i];
+                }
+                return 1;
+            }
+            tx += tw + 2;
+        }
+        return 1;
+    }
+    /* Reset-to-Defaults button (must precede slider/dropdown hits) */
+    if (bgp_hit_defaults_button(mx, my)) {
+        bgp_reset_current_tab_defaults();
         return 1;
     }
     /* Slider click */
@@ -14446,12 +14737,22 @@ static void bgp_mouse_move(int mx, int my) {
         bgp_y = (float)my - bgp_drag_oy;
         return;
     }
+    if (bgp_resizing) {
+        /* drag_ox/oy are offsets from the right/bottom edges at click time */
+        float new_w = (float)mx - bgp_x - bgp_drag_ox;
+        float new_h = (float)my - bgp_y - bgp_drag_oy;
+        if (new_w < BGP_MIN_W) new_w = BGP_MIN_W;
+        if (new_h < BGP_MIN_H) new_h = BGP_MIN_H;
+        bgp_w = new_w;
+        bgp_h = new_h;
+        return;
+    }
     if (bgp_active_slider >= 0) {
         int cw = (int)(VKM_CHAR_W * ui_scale);
-        float sb_w = 8.0f;
-        float slider_w = bgp_w - 16 - sb_w;
-        float sx0 = bgp_x + 8 + (float)(12 * cw);
-        float sx1 = bgp_x + 8 + slider_w - (float)(7 * cw) + 8;
+        float sb_w = 10.0f;
+        float slider_w = bgp_w - 40 - sb_w;
+        float sx0 = bgp_x + 20 + (float)(12 * cw);
+        float sx1 = bgp_x + 20 + slider_w - (float)(7 * cw) + 8;
         float pct = ((float)mx - sx0) / (sx1 - sx0);
         if (pct < 0) pct = 0; if (pct > 1) pct = 1;
         bgp_set_from_pct(bgp_active_slider, pct);
@@ -14460,6 +14761,7 @@ static void bgp_mouse_move(int mx, int my) {
 
 static void bgp_mouse_up(void) {
     bgp_dragging = 0;
+    bgp_resizing = 0;
     bgp_active_slider = -1;
     bgp_scroll_dragging = 0;
 }
@@ -14947,9 +15249,9 @@ static void shd_mouse_up(void) {
 
 __declspec(dllexport) void vkt_bg_set_mode(int mode)
 {
+    /* No auto-open of settings dialog — users open it explicitly via the
+     * "Background Settings..." menu item or bg.settings.open() command. */
     bg_mode = mode;
-    if (bg_mode == BG_PLASMA && !bgp_visible) bgp_visible = 1;
-    if (bg_mode == BG_NONE) bgp_visible = 0;
     if (api) api->log("[vk_terminal] bg_mode=%d\n", bg_mode);
 }
 
@@ -15012,7 +15314,7 @@ __declspec(dllexport) void vkt_bg_plasma_set_all(float speed, float turbulence, 
     bg_plasma_alpha = alpha;
 }
 
-__declspec(dllexport) void vkt_bg_show_settings(void) { if (bg_mode != BG_NONE) bgp_visible = 1; }
+__declspec(dllexport) void vkt_bg_show_settings(void) { bgp_visible = 1; }
 __declspec(dllexport) void vkt_bg_hide_settings(void) { bgp_visible = 0; }
 
 __declspec(dllexport) void vkt_bg_help(void)
@@ -15481,6 +15783,7 @@ static void vkt_save_settings(void)
     SAVE_INT("fx_shadow", fx_shadow_mode);
     SAVE_INT("fx_wobble", fx_wobble_mode);
     SAVE_INT("fx_rain", fx_rain_mode);
+    SAVE_INT("fx_crawl", fx_crawl_mode);
     SAVE_FLOAT("rain_size", rain_size);
     SAVE_FLOAT("rain_speed", rain_speed);
     SAVE_FLOAT("rain_freq", rain_freq);
@@ -15523,6 +15826,10 @@ static void vkt_save_settings(void)
     SAVE_INT("bg_beat_mid", bg_plasma_beat_mid);
     SAVE_INT("bg_beat_treble", bg_plasma_beat_treble);
     SAVE_INT("bg_beat_rms", bg_plasma_beat_rms);
+    /* Background Settings dialog */
+    SAVE_INT("bgp_tab", bgp_tab);
+    SAVE_INT("bgp_x", (int)bgp_x); SAVE_INT("bgp_y", (int)bgp_y);
+    SAVE_INT("bgp_w", (int)bgp_w); SAVE_INT("bgp_h", (int)bgp_h);
     /* Display / HDR */
     SAVE_INT("hdr_enabled", hdr_enabled);
     SAVE_INT("vk_vsync", vk_vsync);
@@ -15586,6 +15893,7 @@ static void vkt_load_settings(void)
     LOAD_INT("fx_smoky", fx_smoky_mode, 0);
     LOAD_INT("fx_wobble", fx_wobble_mode, 0);
     LOAD_INT("fx_rain", fx_rain_mode, 0);
+    LOAD_INT("fx_crawl", fx_crawl_mode, 0);
     LOAD_FLOAT("rain_size", rain_size, 0.06);
     LOAD_FLOAT("rain_speed", rain_speed, 1.0);
     LOAD_FLOAT("rain_freq", rain_freq, 3.0);
@@ -15630,6 +15938,15 @@ static void vkt_load_settings(void)
     LOAD_INT("bg_beat_mid", bg_plasma_beat_mid, 0);
     LOAD_INT("bg_beat_treble", bg_plasma_beat_treble, 0);
     LOAD_INT("bg_beat_rms", bg_plasma_beat_rms, 0);
+    /* Background Settings dialog */
+    LOAD_INT("bgp_tab", bgp_tab, 0);
+    { int v; LOAD_INT("bgp_x", v, (int)bgp_x); bgp_x = (float)v; }
+    { int v; LOAD_INT("bgp_y", v, (int)bgp_y); bgp_y = (float)v; }
+    { int v; LOAD_INT("bgp_w", v, (int)bgp_w); bgp_w = (float)v; bgp_scaled = 1; }
+    { int v; LOAD_INT("bgp_h", v, (int)bgp_h); bgp_h = (float)v; }
+    if (bgp_tab < 0 || bgp_tab >= BGP_TAB_COUNT) bgp_tab = 0;
+    if (bgp_w < BGP_MIN_W) bgp_w = BGP_MIN_W;
+    if (bgp_h < BGP_MIN_H) bgp_h = BGP_MIN_H;
     /* Display / HDR */
     LOAD_INT("hdr_enabled", hdr_enabled, 0);
     LOAD_INT("vk_vsync", vk_vsync, 1);

@@ -158,30 +158,43 @@ _RE_ANSI = re.compile(r'\x1b\[[0-9;]*[A-Za-z]')
 _RE_CRIT = re.compile(r'^You critically \w+ .+ for (\d+) damage!')
 
 # ============================================================================
-# Motion and Exit Mode Names
+# VFT Intro/Outro Effect Names
 # ============================================================================
-# These indices must match the C defines in mmudpy.c:
-# FLOAT_MOTION_RISE=0, SLIDE_L=1, SLIDE_R=2, ARC_L=3, ARC_R=4,
-# SHAKE=5, WAVE=6, ZOOM=7, BOUNCE=8, SCATTER=9
+# These map to VFT effect names in vft_text.c
 MOTION_NAMES = [
-    "Rise Up",      # 0: Float straight up (classic)
-    "Slide Left",   # 1: Slide in from left side
-    "Slide Right",  # 2: Slide in from right side
-    "Arc Left",     # 3: Parabolic arc curving left
-    "Arc Right",    # 4: Parabolic arc curving right
-    "Shake",        # 5: Jitter side-to-side while rising
-    "Wave",         # 6: Sine wave while rising
-    "Zoom",         # 7: Scale up from tiny to full size
-    "Bounce",       # 8: Drop and bounce with gravity
-    "Scatter",      # 9: Random direction outward
+    "Fade",         # 0: fade in
+    "Zoom In",      # 1: scale big -> normal
+    "Zoom Out",     # 2: scale small -> normal
+    "Slide Left",   # 3: slide from left
+    "Slide Right",  # 4: slide from right
+    "Slide Up",     # 5: slide from top
+    "Slide Down",   # 6: slide from bottom
+    "Bounce",       # 7: drop + bounce
+    "Pop",          # 8: quick scale overshoot
+    "Typewriter",   # 9: chars appear one by one
+    "Wave In",      # 10: wave sweep across chars
+    "Spin",         # 11: rotate + scale in
+]
+# VFT intro effect IDs matching the names above
+_INTRO_FX = [
+    "fade", "zoom_in", "zoom_out", "slide_l", "slide_r",
+    "slide_u", "slide_d", "bounce", "pop", "typewriter",
+    "wave_in", "spin",
 ]
 
-# FLOAT_EXIT_FADE=0, SHATTER=1, SPIN_SHRINK=2, SPIN_ZOOM=3
 EXIT_NAMES = [
-    "Fade",         # 0: Standard alpha fade out
-    "Shatter",      # 1: Explode into bouncing pixel particles
-    "Spin Shrink",  # 2: Spin and shrink to nothing
-    "Spin Zoom",    # 3: Spin, zoom big, pixelate, fade out
+    "Fade",         # 0: alpha fade out
+    "Shatter",      # 1: per-char physics explosion
+    "Explode",      # 2: radial burst outward
+    "Melt",         # 3: chars drip down
+    "Dissolve",     # 4: random chars vanish
+    "Evaporate",    # 5: float up + fade
+    "Spin",         # 6: rotate + scale out
+]
+# VFT outro effect IDs matching the names above
+_OUTRO_FX = [
+    "fade", "shatter", "explode", "melt", "dissolve",
+    "evaporate", "spin",
 ]
 
 # ============================================================================
@@ -198,46 +211,30 @@ _cfg = {
 }
 
 # ============================================================================
-# Escalating Visual Styles
+# Escalating Visual Styles (VFT)
 # ============================================================================
-# Each crit count (1-5) has its own look. Colors are RGB 0-255.
-# r,g,b = top color of gradient. r2,g2,b2 = bottom color.
-# glow = outer glow radius in pixels. shadow = drop shadow on/off.
+# Each crit count (1-5) has its own look. Uses VFT hex colors and params.
+# color = hex RRGGBB, glow_color = hex for glow, size = VFT scale multiplier.
 _STYLES = {
     1: {  # Single crit — red with orange glow
-        'size': 48, 'bold': 1,
-        'r': 255, 'g': 60, 'b': 30,
-        'r2': 200, 'g2': 30, 'b2': 0,
-        'shadow': 1, 'glow': 3,
-        'glow_r': 255, 'glow_g': 140, 'glow_b': 0,
+        'size': 3, 'color': 'FF3C1E', 'glow_color': 'FF8C00',
+        'shadow': 1, 'glow': 1, 'mods': '',
     },
     2: {  # Double crit — bright orange-yellow
-        'size': 60, 'bold': 1,
-        'r': 255, 'g': 220, 'b': 0,
-        'r2': 255, 'g2': 140, 'b2': 0,
-        'shadow': 1, 'glow': 4,
-        'glow_r': 255, 'glow_g': 100, 'glow_b': 0,
+        'size': 4, 'color': 'FFDC00', 'glow_color': 'FF6400',
+        'shadow': 1, 'glow': 1, 'mods': '',
     },
-    3: {  # Triple crit — hot white-to-orange
-        'size': 72, 'bold': 1,
-        'r': 255, 'g': 255, 'b': 255,
-        'r2': 255, 'g2': 160, 'b2': 0,
-        'shadow': 1, 'glow': 5,
-        'glow_r': 255, 'glow_g': 80, 'glow_b': 0,
+    3: {  # Triple crit — hot white with fire
+        'size': 5, 'color': 'FFFFFF', 'glow_color': 'FF5000',
+        'shadow': 1, 'glow': 1, 'mods': 'fire=1',
     },
     4: {  # Quad crit — magenta fire
-        'size': 84, 'bold': 1,
-        'r': 255, 'g': 50, 'b': 200,
-        'r2': 255, 'g2': 0, 'b2': 80,
-        'shadow': 1, 'glow': 6,
-        'glow_r': 255, 'glow_g': 0, 'glow_b': 150,
+        'size': 6, 'color': 'FF32C8', 'glow_color': 'FF0096',
+        'shadow': 1, 'glow': 1, 'mods': 'fire=1|sparks=1',
     },
-    5: {  # 5+ crits — electric purple-white
-        'size': 96, 'bold': 1,
-        'r': 220, 'g': 180, 'b': 255,
-        'r2': 140, 'g2': 0, 'b2': 255,
-        'shadow': 1, 'glow': 8,
-        'glow_r': 180, 'glow_g': 0, 'glow_b': 255,
+    5: {  # 5+ crits — electric purple with everything
+        'size': 7, 'color': 'DCB4FF', 'glow_color': 'B400FF',
+        'shadow': 1, 'glow': 1, 'mods': 'fire=1|sparks=1|chromatic=1',
     },
 }
 
@@ -526,6 +523,23 @@ def _update_stats():
     user32.SetWindowTextA(hw, text.encode('ascii'))
 
 
+def _build_vft(text, style, intro_fx, outro_fx):
+    """Build a VFT command string from style dict and effect names."""
+    parts = [text, "center", "center",
+             "size=%s" % style['size'],
+             "color=%s" % style['color'],
+             "intro=%s" % intro_fx,
+             "outro=%s" % outro_fx,
+             "hold=2"]
+    if style.get('shadow'):
+        parts.append("shadow=1")
+    if style.get('glow'):
+        parts.append("glow=%s" % style['glow_color'])
+    if style.get('mods'):
+        parts.append(style['mods'])
+    return "|".join(parts)
+
+
 def _fire_test():
     """Fire a test float text using current settings (called from Test button)."""
     motion = _cfg['motion']
@@ -537,12 +551,9 @@ def _fire_test():
     s = _STYLES[level]
     dmg = random.randint(30, 150)
     text = "%s  %d dmg" % (_LABELS[level], dmg)
-    mud.float_text(text, s['r'], s['g'], s['b'],
-                   duration=100, size=s['size'], bold=s['bold'],
-                   r2=s['r2'], g2=s['g2'], b2=s['b2'],
-                   shadow=s['shadow'], glow=s['glow'],
-                   glow_r=s['glow_r'], glow_g=s['glow_g'], glow_b=s['glow_b'],
-                   rise=1, motion=motion, exit=exit_m)
+    intro = _INTRO_FX[motion] if motion < len(_INTRO_FX) else "fade"
+    outro = _OUTRO_FX[exit_m] if exit_m < len(_OUTRO_FX) else "fade"
+    mud.vft(_build_vft(text, s, intro, outro))
 
 
 def _panel_thread_fn():
@@ -671,12 +682,9 @@ def _announce(count, total_dmg):
         motion = random.randint(0, len(MOTION_NAMES) - 1)
         exit_m = random.randint(0, len(EXIT_NAMES) - 1)
 
-    mud.float_text(text, s['r'], s['g'], s['b'],
-                   duration=100, size=s['size'], bold=s['bold'],
-                   r2=s['r2'], g2=s['g2'], b2=s['b2'],
-                   shadow=s['shadow'], glow=s['glow'],
-                   glow_r=s['glow_r'], glow_g=s['glow_g'], glow_b=s['glow_b'],
-                   rise=1, motion=motion, exit=exit_m)
+    intro = _INTRO_FX[motion] if motion < len(_INTRO_FX) else "fade"
+    outro = _OUTRO_FX[exit_m] if exit_m < len(_OUTRO_FX) else "fade"
+    mud.vft(_build_vft(text, s, intro, outro))
 
 
 # ============================================================================
@@ -763,7 +771,7 @@ def start():
     _thread.start()
 
     print("Crit tracker started.")
-    mud.float_text("CRIT TRACKER ON", 0, 255, 0, duration=60, size=36)
+    mud.vft("CRIT TRACKER ON|center|center|size=3|color=00FF00|intro=pop|outro=fade|hold=2")
 
     # Auto-open the settings panel
     settings()

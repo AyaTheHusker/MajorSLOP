@@ -36,6 +36,7 @@ layout(push_constant) uniform PushConstants {
     float rain_speed;     /* animation speed multiplier (0.5 - 3.0) */
     float rain_freq;      /* drop density (1.0 - 8.0) */
     float rain_warp;      /* displacement strength (0.005 - 0.05) */
+    float fx_crawl;       /* 0 = off, 1 = SpaceWarZ perspective crawl */
 } pc;
 
 /* ---- FBM Noise (hash-based, no texture needed) ---- */
@@ -199,6 +200,31 @@ void main() {
 
         pos.x += warp_x;
         pos.y += warp_y;
+    }
+
+    /* ---- SpaceWarZ Crawl: gradual perspective bend ---- */
+    /* Unified tilt for both X and Y so aspect ratio stays natural.
+     * NO alpha fade — the fragment shader treats alpha values in
+     * [0.59, 0.71] as shadow signals, so fading text alpha makes
+     * it get misinterpreted as shadow quads and vanish when drop
+     * shadow is off. Perspective shrink alone sells the distance. */
+    if (pc.fx_crawl > 0.5) {
+        /* Vulkan NDC: y=-1 top, y=+1 bottom.
+         * Normalize to [0,1] with 0=bottom, 1=top. */
+        float u = clamp((1.0 - pos.y) * 0.5, 0.0, 1.0);
+
+        /* Smooth easing — lower rows barely move, upper rows bend hard */
+        float tilt = pow(u, 2.2);
+
+        float depth    = 4.5;
+        float vanish_y = -0.98;
+        float w = 1.0 / (1.0 + tilt * depth);
+
+        /* Shrink X toward vanishing point at screen center */
+        pos.x = pos.x * w;
+
+        /* Pull Y toward horizon at the same rate — preserves aspect ratio */
+        pos.y = mix(pos.y, vanish_y, 1.0 - w);
     }
 
     gl_Position = pos;

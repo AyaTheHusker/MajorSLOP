@@ -1,5 +1,5 @@
 """
-Stats Display — Shows current player stats as floating text.
+Stats Display — Shows current player stats as floating text (VFT).
 
 Usage:
     mud.load('stats_display')
@@ -43,40 +43,40 @@ intellect = mud.intellect()
 health = mud.health()
 charm = mud.charm()
 
-# Display as staggered floating texts
-y = 120
+# Display as staggered VFT floating texts
+# VFT uses 0-1 normalized coords; ~0.35 x, stepping y down
+y = 0.15
+step = 0.06
 delay = 0.3
+base = "intro=fade:0.2|hold=4|outro=fade:0.3"
 
-mud.float_text(f"{name}", 255, 220, 80, duration=120, size=42, x=400, y=y)
+mud.vft(f"{name}|0.35|{y}|size=4|color=FFDC50|{base}|shadow=1")
 time.sleep(delay)
-y += 40
+y += step
 
-mud.float_text(f"Level {level} {race} {cls}", 180, 220, 255, duration=110, size=32, x=400, y=y)
+mud.vft(f"Level {level} {race} {cls}|0.35|{y}|size=3|color=B4DCFF|{base}|shadow=1")
 time.sleep(delay)
-y += 35
+y += step
 
 hp_pct = (cur_hp * 100 // max_hp) if max_hp > 0 else 0
-hp_r = 255 if hp_pct < 50 else 80
-hp_g = 255 if hp_pct >= 50 else 80
-mud.float_text(f"HP: {cur_hp}/{max_hp}", hp_r, hp_g, 80, duration=100, size=30, x=400, y=y)
+hp_color = "FF3C50" if hp_pct < 50 else "50FF50"
+mud.vft(f"HP: {cur_hp}/{max_hp}|0.35|{y}|size=2.5|color={hp_color}|{base}|shadow=1")
 time.sleep(delay)
-y += 30
+y += step
 
 mp_pct = (cur_mp * 100 // max_mp) if max_mp > 0 else 0
-mp_b = 255
-mp_r = 200 if mp_pct < 50 else 100
-mud.float_text(f"Mana: {cur_mp}/{max_mp}", mp_r, 140, mp_b, duration=100, size=30, x=400, y=y)
+mp_color = "C88CFF" if mp_pct < 50 else "648CFF"
+mud.vft(f"Mana: {cur_mp}/{max_mp}|0.35|{y}|size=2.5|color={mp_color}|{base}|shadow=1")
 time.sleep(delay)
-y += 35
+y += step
 
 if exp_need > 0:
-    mud.float_text(f"EXP: {exp:,}  Need: {exp_need:,}", 200, 200, 200, duration=100, size=26, x=400, y=y)
+    mud.vft(f"EXP: {exp:,}  Need: {exp_need:,}|0.35|{y}|size=2|color=C8C8C8|{base}|shadow=1")
 else:
-    mud.float_text(f"EXP: {exp:,}", 200, 200, 200, duration=100, size=26, x=400, y=y)
+    mud.vft(f"EXP: {exp:,}|0.35|{y}|size=2|color=C8C8C8|{base}|shadow=1")
 time.sleep(delay)
-y += 35
+y += step
 
-mud.float_text(f"STR {strength}  AGI {agility}  INT {intellect}  HP {health}  CHR {charm}",
-               160, 180, 160, duration=100, size=22, x=400, y=y)
+mud.vft(f"STR {strength}  AGI {agility}  INT {intellect}  HP {health}  CHR {charm}|0.35|{y}|size=1.8|color=A0B4A0|{base}|shadow=1")
 
 print(f"Stats displayed for {name}")

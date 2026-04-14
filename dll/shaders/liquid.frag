@@ -36,6 +36,7 @@ layout(push_constant) uniform PushConstants {
     float rain_speed;     /* vertex only */
     float rain_freq;      /* vertex only */
     float rain_warp;      /* vertex only */
+    float fx_crawl;       /* 0 = off, 1 = crawl (vertex only) */
 } pc;
 
 /* --- Helpers --- */
