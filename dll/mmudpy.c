@@ -3117,35 +3117,30 @@ static void mmudpy_shutdown(void)
     /* Finalize Python.
      *
      * CRASH FIX (Win11 python312.dll+0x244045 = Py_FinalizeEx+0x35):
-     *   Py_Finalize MUST be called with a valid thread state attached to the
-     *   *calling* thread.  We init Python on console_thread and release the
-     *   GIL from there via PyEval_SaveThread — but shutdown is invoked by the
-     *   plugin unloader on the MAIN thread, which has no Python thread state
-     *   in Python's TLS slot.  That causes Py_Finalize to dereference a NULL
-     *   tstate and AV.
+     *   Py_Finalize MUST be called with a Python thread state attached to
+     *   the *calling* thread's platform TLS slot.  We init Python on
+     *   console_thread, but shutdown runs on the main thread (plugin
+     *   unloader) — which has no entry in Python's TLS.  Py_FinalizeEx's
+     *   very first action (mov edi,[tls[index]] then mov eax,[edi+8])
+     *   AVs on the NULL edi.
      *
-     *   Fix: create a fresh PyThreadState for this thread and attach it
-     *   (which also re-acquires the GIL) before calling Py_Finalize.
-     *   If the required functions aren't available (older Python?), skip
-     *   Py_Finalize entirely — leaking at process exit is harmless.
+     *   First attempt used PyEval_AcquireThread(PyThreadState_New(...))
+     *   but in Python 3.12 AcquireThread updates the runtime's
+     *   current-tstate tracker WITHOUT writing the platform TLS slot that
+     *   Py_FinalizeEx reads — same crash.
+     *
+     *   Correct fix: PyGILState_Ensure().  It's specifically designed for
+     *   "foreign thread wants to call into Python" — auto-creates a
+     *   tstate, writes it into TLS, and acquires the GIL, atomically.
+     *   After Py_Finalize we don't Release: the state is invalidated by
+     *   finalization and the process is exiting anyway.
      */
     if (hPython && pPy_IsInitialized && pPy_IsInitialized()) {
-        if (pPy_Finalize && pPyInterpreterState_Main &&
-            pPyThreadState_New && pPyEval_AcquireThread) {
-            PyInterpreterState *interp = pPyInterpreterState_Main();
-            if (interp) {
-                PyThreadState *ts = pPyThreadState_New(interp);
-                if (ts) {
-                    pPyEval_AcquireThread(ts);
-                    pPy_Finalize();  /* safe now: this thread owns a tstate */
-                } else if (api) {
-                    api->log("[mmudpy] PyThreadState_New failed — skipping Py_Finalize\n");
-                }
-            } else if (api) {
-                api->log("[mmudpy] PyInterpreterState_Main NULL — skipping Py_Finalize\n");
-            }
+        if (pPy_Finalize && pPyGILState_Ensure) {
+            (void)pPyGILState_Ensure();  /* writes TLS + acquires GIL */
+            pPy_Finalize();
         } else if (api) {
-            api->log("[mmudpy] shutdown helpers unavailable — skipping Py_Finalize (process exit will clean up)\n");
+            api->log("[mmudpy] PyGILState_Ensure unavailable — skipping Py_Finalize (process exit will clean up)\n");
         }
     }
 
