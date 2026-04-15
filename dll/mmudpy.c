@@ -19,6 +19,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <math.h>
+#include <setjmp.h>  /* for VEH-based exception catching around Py_Initialize */
 
 #define WM_PYEXEC       (WM_USER + 100)
 #define WM_FLOAT        (WM_USER + 101)
@@ -62,6 +63,12 @@ typedef int (*PyGILState_Ensure_t)(void);
 typedef void (*PyGILState_Release_t)(int);
 typedef void *(*PyEval_SaveThread_t)(void);
 typedef void (*PyEval_RestoreThread_t)(void *);
+/* PyInterpreterState / PyThreadState are opaque to us */
+typedef void *PyInterpreterState;
+typedef void *PyThreadState;
+typedef PyInterpreterState *(*PyInterpreterState_Main_t)(void);
+typedef PyThreadState *(*PyThreadState_New_t)(PyInterpreterState *);
+typedef void (*PyEval_AcquireThread_t)(PyThreadState *);
 
 /* Function pointers */
 static HMODULE hPython = NULL;
@@ -87,6 +94,9 @@ static PyGILState_Ensure_t   pPyGILState_Ensure = NULL;
 static PyGILState_Release_t  pPyGILState_Release = NULL;
 static PyEval_SaveThread_t   pPyEval_SaveThread = NULL;
 static PyEval_RestoreThread_t pPyEval_RestoreThread = NULL;
+static PyInterpreterState_Main_t pPyInterpreterState_Main = NULL;
+static PyThreadState_New_t   pPyThreadState_New = NULL;
+static PyEval_AcquireThread_t pPyEval_AcquireThread = NULL;
 static void *saved_gil_state = NULL;  /* For releasing GIL from main thread */
 
 /* Python compile modes */
@@ -2527,6 +2537,70 @@ static const char *py_bootstrap =
 
 /* ---- Load Python runtime ---- */
 
+/* VEH + longjmp exception catcher — MinGW gcc (dwarf2 eh) does not support
+ * MS-style __try/__except, so we use a Vectored Exception Handler combined
+ * with setjmp/longjmp to unwind back to a safe point if Python's init
+ * crashes (missing VCRuntime, corrupted zip, bad stdlib, etc.). This lets
+ * us disable the Python bridge gracefully instead of killing MegaMUD —
+ * exactly the failure mode seen on Win11 with python312.dll @ 0x00244045. */
+static jmp_buf  seh_jmpbuf;
+static volatile LONG seh_armed = 0;
+static volatile DWORD seh_caught_code = 0;
+
+static LONG CALLBACK seh_veh_handler(EXCEPTION_POINTERS *ep)
+{
+    if (!seh_armed || !ep || !ep->ExceptionRecord) return EXCEPTION_CONTINUE_SEARCH;
+    DWORD code = ep->ExceptionRecord->ExceptionCode;
+    /* Only catch hard faults — let debug breakpoints, C++ exceptions, etc. through. */
+    if (code != EXCEPTION_ACCESS_VIOLATION &&
+        code != EXCEPTION_ILLEGAL_INSTRUCTION &&
+        code != EXCEPTION_STACK_OVERFLOW &&
+        code != EXCEPTION_PRIV_INSTRUCTION)
+        return EXCEPTION_CONTINUE_SEARCH;
+    seh_armed = 0;
+    seh_caught_code = code;
+    longjmp(seh_jmpbuf, 1);
+    /* unreachable */
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+/* Returns 0 on success, or the SEH exception code on crash. */
+static int seh_py_initialize(void)
+{
+    PVOID handler = AddVectoredExceptionHandler(1, seh_veh_handler);
+    int rc;
+    seh_caught_code = 0;
+    if (setjmp(seh_jmpbuf) == 0) {
+        seh_armed = 1;
+        pPy_Initialize();
+        seh_armed = 0;
+        rc = 0;
+    } else {
+        /* longjmp landed here — Python crashed */
+        seh_armed = 0;
+        rc = (int)seh_caught_code;
+    }
+    if (handler) RemoveVectoredExceptionHandler(handler);
+    return rc;
+}
+
+static int seh_py_run_bootstrap(const char *code)
+{
+    PVOID handler = AddVectoredExceptionHandler(1, seh_veh_handler);
+    int rc;
+    seh_caught_code = 0;
+    if (setjmp(seh_jmpbuf) == 0) {
+        seh_armed = 1;
+        rc = pPyRun_SimpleString(code);
+        seh_armed = 0;
+    } else {
+        seh_armed = 0;
+        rc = -0x10000 | ((int)seh_caught_code & 0xFFFF);
+    }
+    if (handler) RemoveVectoredExceptionHandler(handler);
+    return rc;
+}
+
 static int load_python(void)
 {
     /* Build path to python312.dll relative to MegaMUD exe */
@@ -2540,6 +2614,11 @@ static int load_python(void)
     char py_dll[MAX_PATH];
     sprintf(py_dll, "%s\\python312.dll", py_dir);
 
+    /* Suppress Windows' error dialogs — if python312.dll is missing deps
+     * (vcruntime, CRT version mismatch, etc.) we want silent failure, not
+     * a modal popup that blocks the whole app. */
+    UINT old_mode = SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOOPENFILEERRORBOX);
+
     /* Temporarily add python dir to DLL search path, then restore */
     char old_dll_dir[MAX_PATH] = {0};
     DWORD old_len = GetDllDirectoryA(MAX_PATH, old_dll_dir);
@@ -2551,10 +2630,12 @@ static int load_python(void)
         hPython = LoadLibraryA("python312.dll");
     }
 
-    /* Restore original DLL search path */
+    /* Restore original DLL search path and error mode */
     SetDllDirectoryA(old_len > 0 ? old_dll_dir : NULL);
+    SetErrorMode(old_mode);
     if (!hPython) {
-        api->log("[mmudpy] Failed to load python312.dll from %s (err=%lu)\n", py_dll, GetLastError());
+        api->log("[mmudpy] Failed to load python312.dll from %s (err=%lu) — Python bridge disabled\n",
+                 py_dll, GetLastError());
         return -1;
     }
 
@@ -2567,8 +2648,6 @@ static int load_python(void)
     LOAD_PY(Py_Initialize);
     LOAD_PY(Py_Finalize);
     LOAD_PY(Py_IsInitialized);
-    LOAD_PY(Py_SetPythonHome);
-    LOAD_PY(Py_SetPath);
     LOAD_PY(PyRun_SimpleString);
     LOAD_PY(PyImport_AddModule);
     LOAD_PY(PyModule_GetDict);
@@ -2590,31 +2669,74 @@ static int load_python(void)
     pPyGILState_Release = (PyGILState_Release_t)GetProcAddress(hPython, "PyGILState_Release");
     pPyEval_SaveThread = (PyEval_SaveThread_t)GetProcAddress(hPython, "PyEval_SaveThread");
     pPyEval_RestoreThread = (PyEval_RestoreThread_t)GetProcAddress(hPython, "PyEval_RestoreThread");
+    /* Needed for cross-thread Py_Finalize — see mmudpy_shutdown */
+    pPyInterpreterState_Main = (PyInterpreterState_Main_t)GetProcAddress(hPython, "PyInterpreterState_Main");
+    pPyThreadState_New       = (PyThreadState_New_t)GetProcAddress(hPython, "PyThreadState_New");
+    pPyEval_AcquireThread    = (PyEval_AcquireThread_t)GetProcAddress(hPython, "PyEval_AcquireThread");
 
-    /* Set Python home to the embedded distribution */
-    static wchar_t py_home_w[MAX_PATH];
-    MultiByteToWideChar(CP_UTF8, 0, py_dir, -1, py_home_w, MAX_PATH);
-    pPy_SetPythonHome(py_home_w);
+    /* ---------- Python 3.12 embeddable init (the "just works" recipe) --------
+     * The embeddable distribution ships a python312._pth file next to the DLL.
+     * When Python sees that file, it configures sys.path from it and ignores
+     * PYTHONPATH/PYTHONHOME env vars — this is "isolated mode" and is the
+     * supported way to embed Python 3.12.
+     *
+     * What was breaking us on Win11 (python312.dll!+0x244045 AV crash):
+     *   - We were calling Py_SetPythonHome() AND Py_SetPath() in addition to
+     *     having a _pth file. These legacy calls are deprecated in 3.12 and
+     *     create inconsistent state with the _pth-driven path config — Python
+     *     crashes during encodings-module import with a NULL deref.
+     *   - Inherited PYTHONHOME/PYTHONPATH env vars (from a system-installed
+     *     Python) can also poison the init.
+     *
+     * Fix: clear the env vars, DO NOT call the deprecated setters, cd into
+     * the python dir so _pth gets picked up deterministically, let Python
+     * auto-configure itself from the _pth.
+     * ------------------------------------------------------------------------- */
 
-    /* Set path to the embedded stdlib zip + python dir */
-    static wchar_t py_path_w[MAX_PATH * 3];
-    wchar_t py_zip_w[MAX_PATH];
-    swprintf(py_zip_w, MAX_PATH, L"%s\\python312.zip", py_home_w);
-    swprintf(py_path_w, MAX_PATH * 3, L"%s;%s", py_zip_w, py_home_w);
-    pPy_SetPath(py_path_w);
+    /* Clear hostile env vars that override _pth / confuse init */
+    _putenv("PYTHONHOME=");
+    _putenv("PYTHONPATH=");
+    _putenv("PYTHONSTARTUP=");
+    _putenv("PYTHONDONTWRITEBYTECODE=1");  /* embed = no .pyc writing */
+    _putenv("PYTHONNOUSERSITE=1");
+    _putenv("PYTHONIOENCODING=utf-8");
 
-    /* Initialize Python */
-    pPy_Initialize();
+    /* Temporarily chdir to python dir so Python finds python312._pth
+     * reliably regardless of where MegaMUD was launched from.  We restore
+     * CWD after Py_Initialize returns. */
+    char saved_cwd[MAX_PATH] = {0};
+    GetCurrentDirectoryA(MAX_PATH, saved_cwd);
+    SetCurrentDirectoryA(py_dir);
+    api->log("[mmudpy] Python init: cwd -> %s (was %s)\n", py_dir, saved_cwd);
+
+    /* Initialize Python — wrapped in SEH so a crash inside libpython (e.g.
+     * missing MSVC runtime, corrupted embedded stdlib) disables the Python
+     * bridge gracefully instead of crashing the whole process. This is
+     * exactly what bit us on Win11 with python312.dll @ offset 0x00244045. */
+    api->log("[mmudpy] Calling Py_Initialize (under SEH guard)...\n");
+    int init_ex = seh_py_initialize();
+
+    /* Restore original CWD regardless of init outcome */
+    if (saved_cwd[0]) SetCurrentDirectoryA(saved_cwd);
+    api->log("[mmudpy] Python init: cwd restored to %s\n", saved_cwd);
+
+    if (init_ex != 0) {
+        api->log("[mmudpy] Py_Initialize crashed with SEH exception 0x%08X — Python bridge disabled\n",
+                 init_ex);
+        FreeLibrary(hPython);
+        hPython = NULL;
+        return -1;
+    }
 
     if (!pPy_IsInitialized()) {
-        api->log("[mmudpy] Py_Initialize failed!\n");
+        api->log("[mmudpy] Py_Initialize returned but Py_IsInitialized is false — Python bridge disabled\n");
         return -1;
     }
 
     api->log("[mmudpy] Python initialized\n");
 
-    /* Run bootstrap */
-    int rc = pPyRun_SimpleString(py_bootstrap);
+    /* Run bootstrap — also SEH-wrapped */
+    int rc = seh_py_run_bootstrap(py_bootstrap);
     if (rc != 0) {
         api->log("[mmudpy] Bootstrap failed (rc=%d)\n", rc);
     }
@@ -2992,9 +3114,39 @@ static void mmudpy_shutdown(void)
 
     py_ready = 0;
 
-    /* Finalize Python */
+    /* Finalize Python.
+     *
+     * CRASH FIX (Win11 python312.dll+0x244045 = Py_FinalizeEx+0x35):
+     *   Py_Finalize MUST be called with a valid thread state attached to the
+     *   *calling* thread.  We init Python on console_thread and release the
+     *   GIL from there via PyEval_SaveThread — but shutdown is invoked by the
+     *   plugin unloader on the MAIN thread, which has no Python thread state
+     *   in Python's TLS slot.  That causes Py_Finalize to dereference a NULL
+     *   tstate and AV.
+     *
+     *   Fix: create a fresh PyThreadState for this thread and attach it
+     *   (which also re-acquires the GIL) before calling Py_Finalize.
+     *   If the required functions aren't available (older Python?), skip
+     *   Py_Finalize entirely — leaking at process exit is harmless.
+     */
     if (hPython && pPy_IsInitialized && pPy_IsInitialized()) {
-        if (pPy_Finalize) pPy_Finalize();
+        if (pPy_Finalize && pPyInterpreterState_Main &&
+            pPyThreadState_New && pPyEval_AcquireThread) {
+            PyInterpreterState *interp = pPyInterpreterState_Main();
+            if (interp) {
+                PyThreadState *ts = pPyThreadState_New(interp);
+                if (ts) {
+                    pPyEval_AcquireThread(ts);
+                    pPy_Finalize();  /* safe now: this thread owns a tstate */
+                } else if (api) {
+                    api->log("[mmudpy] PyThreadState_New failed — skipping Py_Finalize\n");
+                }
+            } else if (api) {
+                api->log("[mmudpy] PyInterpreterState_Main NULL — skipping Py_Finalize\n");
+            }
+        } else if (api) {
+            api->log("[mmudpy] shutdown helpers unavailable — skipping Py_Finalize (process exit will clean up)\n");
+        }
     }
 
     /* Close console */
