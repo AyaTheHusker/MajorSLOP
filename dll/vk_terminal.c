@@ -142,6 +142,8 @@ static res_t resolutions[] = {
 #include "shaders/liquid_frag.h"
 #include "shaders/bg_plasma_vert.h"
 #include "shaders/bg_plasma_frag.h"
+#include "shaders/bg_starfield_vert.h"
+#include "shaders/bg_starfield_frag.h"
 
 /* ---- Plugin state ---- */
 
@@ -150,6 +152,7 @@ static HWND mmansi_hwnd = NULL;
 static HWND mmmain_hwnd = NULL;
 static HWND vkt_hwnd = NULL;
 static HANDLE vkt_thread_handle = NULL;
+static int vkt_mt_init_done = 0; /* Vulkan/font/buffer/descriptor init finished on main thread */
 static volatile int vkt_running = 0;
 static volatile int vkt_visible = 0;
 static int vkt_autoconnect = 0;  /* --autoconnect flag */
@@ -1022,7 +1025,7 @@ static void push_text(int px, int py, const char *str,
 
 #define VKW_MAX_WINDOWS  8
 #define VKW_MAX_LINES    200
-#define VKW_LINE_LEN     128
+#define VKW_LINE_LEN     512  /* enough for a full gossip line without truncation */
 #define VKW_TITLEBAR_H   24
 #define VKW_BORDER_W     1
 #define VKW_SHADOW_OFF   6
@@ -1315,15 +1318,16 @@ static const char *chat_chan_tags[] = {
 };
 
 /* Per-channel colors: {tag_r, tag_g, tag_b, msg_r, msg_g, msg_b}
- * These are base colors; theme accent is blended in at draw time. */
+ * Raw saturated values — no theme blending at draw time, so channels
+ * are visually distinct the same way MegaMUD's native convo window is. */
 static const float chat_chan_colors[][6] = {
-    /* GOSSIP   */ { 1.0f, 0.69f, 0.53f,  1.0f, 0.85f, 0.75f },
-    /* BROADCAST*/ { 1.0f, 0.93f, 0.27f,  1.0f, 0.96f, 0.70f },
-    /* GANGPATH */ { 0.67f, 0.53f, 0.27f,  0.85f, 0.75f, 0.55f },
-    /* TELEPATH */ { 0.87f, 0.53f, 0.80f,  0.93f, 0.75f, 0.90f },
-    /* AUCTION  */ { 0.80f, 0.80f, 0.27f,  0.90f, 0.90f, 0.60f },
-    /* SAY      */ { 0.53f, 0.53f, 0.87f,  0.75f, 0.75f, 0.93f },
-    /* YELL     */ { 1.0f, 0.40f, 0.40f,  1.0f, 0.70f, 0.60f },
+    /* GOSSIP    — bright cyan  */ { 0.40f, 1.00f, 1.00f,  0.80f, 1.00f, 1.00f },
+    /* BROADCAST — bright yellow*/ { 1.00f, 1.00f, 0.30f,  1.00f, 1.00f, 0.80f },
+    /* GANGPATH  — tan/brown    */ { 1.00f, 0.75f, 0.35f,  1.00f, 0.88f, 0.65f },
+    /* TELEPATH  — magenta/pink */ { 1.00f, 0.45f, 1.00f,  1.00f, 0.80f, 1.00f },
+    /* AUCTION   — gold         */ { 1.00f, 0.85f, 0.25f,  1.00f, 0.95f, 0.60f },
+    /* SAY       — soft white   */ { 0.85f, 0.90f, 1.00f,  0.95f, 0.95f, 1.00f },
+    /* YELL      — bright red   */ { 1.00f, 0.35f, 0.35f,  1.00f, 0.65f, 0.60f },
 };
 
 static int convo_out_channel = CHAT_SAY;
@@ -1600,50 +1604,102 @@ static void vkw_draw_one(vkw_window_t *w, int is_focused, int vp_w, int vp_h)
         sel_hi = w->sel_start_line > w->sel_end_line ? w->sel_start_line : w->sel_end_line;
     }
 
-    /* Draw text lines (bottom-up from most recent) */
-    for (int i = 0; i < visible_lines && i < w->line_count; i++) {
-        int line_idx = w->line_head - 1 - i - w->scroll;
-        while (line_idx < 0) line_idx += VKW_MAX_LINES;
-        line_idx %= VKW_MAX_LINES;
-        if (i + w->scroll >= w->line_count) break;
+    /* Draw text lines (bottom-up from most recent) with word-wrap.
+     * Each stored line may span multiple visual rows when it exceeds
+     * the window's character width. Walk stored lines from newest to
+     * oldest, compute chunks top-down, then blit chunks bottom-up into
+     * the remaining visible rows until the viewport is filled. */
+    {
+        int row_y = content_y + content_h - ch;
+        int stored_off = w->scroll;
+        int vis_row = 0; /* counts visual rows drawn (for selection mapping) */
+        while (row_y >= content_y && stored_off < w->line_count) {
+            int line_idx = w->line_head - 1 - stored_off;
+            while (line_idx < 0) line_idx += VKW_MAX_LINES;
+            line_idx %= VKW_MAX_LINES;
 
-        int ly = content_y + content_h - (i + 1) * ch;
-        if (ly < content_y) break;
+            const char *full = w->lines[line_idx];
+            int full_len = (int)strlen(full);
+            int chan = w->line_chan[line_idx];
+            int split = w->line_split[line_idx];
 
-        /* Selection highlight */
-        int vis_line = i;
-        if (w->has_selection && vis_line >= sel_lo && vis_line <= sel_hi) {
-            push_solid(ix + 1, ly, ix + iw - 1, ly + ch,
-                       t->accent[0], t->accent[1], t->accent[2], 0.25f, vp_w, vp_h);
-        }
+            /* Compute chunk boundaries: [start_0, start_1, ..., start_N=full_len] */
+            #define VKW_MAX_CHUNKS 32
+            int chunk_start[VKW_MAX_CHUNKS + 1];
+            int n_chunks = 0;
+            if (max_chars < 1) max_chars = 1;
+            {
+                int pos = 0;
+                chunk_start[0] = 0;
+                while (pos < full_len && n_chunks < VKW_MAX_CHUNKS) {
+                    int remaining = full_len - pos;
+                    if (remaining <= max_chars) { n_chunks++; break; }
+                    int brk = pos + max_chars;
+                    /* Try to break at a space, no more than half the width back */
+                    int min_brk = pos + max_chars / 2;
+                    int probe = brk;
+                    while (probe > min_brk && full[probe] != ' ') probe--;
+                    if (full[probe] == ' ') brk = probe;
+                    n_chunks++;
+                    pos = brk;
+                    /* Skip the space at the break so the next row doesn't start with " " */
+                    while (pos < full_len && full[pos] == ' ') pos++;
+                    chunk_start[n_chunks] = pos;
+                }
+                chunk_start[n_chunks] = full_len;
+            }
 
-        /* Truncate display to window width */
-        char tmp[VKW_LINE_LEN];
-        strncpy(tmp, w->lines[line_idx], max_chars);
-        tmp[max_chars] = 0;
+            /* Pick channel colors — use raw saturated values so channels
+             * are visually distinct (MegaMUD-style), no theme blending. */
+            const float *cc = (chan >= 0 && chan < CHAT_NUM) ? chat_chan_colors[chan] : NULL;
+            float tr0 = cc ? cc[0] : t->text[0] * 0.9f;
+            float tg0 = cc ? cc[1] : t->text[1] * 0.9f;
+            float tb0 = cc ? cc[2] : t->text[2] * 0.9f;
+            float tr1 = cc ? cc[3] : t->text[0] * 0.9f;
+            float tg1 = cc ? cc[4] : t->text[1] * 0.9f;
+            float tb1 = cc ? cc[5] : t->text[2] * 0.9f;
 
-        int chan = w->line_chan[line_idx];
-        int split = w->line_split[line_idx];
-        if (chan >= 0 && chan < CHAT_NUM && split > 0 && split < (int)strlen(tmp)) {
-            /* Draw tag+name portion in channel tag color */
-            const float *cc = chat_chan_colors[chan];
-            float tr0 = cc[0] * 0.5f + t->accent[0] * 0.5f;
-            float tg0 = cc[1] * 0.5f + t->accent[1] * 0.5f;
-            float tb0 = cc[2] * 0.5f + t->accent[2] * 0.5f;
-            /* Draw message portion in channel msg color */
-            float tr1 = cc[3] * 0.6f + t->text[0] * 0.4f;
-            float tg1 = cc[4] * 0.6f + t->text[1] * 0.4f;
-            float tb1 = cc[5] * 0.6f + t->text[2] * 0.4f;
+            /* Draw chunks bottom-up */
+            for (int c = n_chunks - 1; c >= 0 && row_y >= content_y; c--) {
+                int cs = chunk_start[c];
+                int ce = chunk_start[c + 1];
+                int clen = ce - cs;
+                if (clen > VKW_LINE_LEN - 1) clen = VKW_LINE_LEN - 1;
 
-            char tag_part[VKW_LINE_LEN];
-            strncpy(tag_part, tmp, split);
-            tag_part[split] = 0;
-            push_text(ix + VKW_PAD, ly, tag_part, tr0, tg0, tb0, vp_w, vp_h, cw, ch);
-            push_text(ix + VKW_PAD + split * cw, ly, tmp + split, tr1, tg1, tb1, vp_w, vp_h, cw, ch);
-        } else {
-            push_text(ix + VKW_PAD, ly, tmp,
-                      t->text[0] * 0.9f, t->text[1] * 0.9f, t->text[2] * 0.9f,
-                      vp_w, vp_h, cw, ch);
+                /* Selection highlight */
+                if (w->has_selection && vis_row >= sel_lo && vis_row <= sel_hi) {
+                    push_solid(ix + 1, row_y, ix + iw - 1, row_y + ch,
+                               t->accent[0], t->accent[1], t->accent[2], 0.25f, vp_w, vp_h);
+                }
+
+                char tmp[VKW_LINE_LEN];
+                memcpy(tmp, full + cs, clen);
+                tmp[clen] = 0;
+
+                if (cc && split > 0) {
+                    if (split <= cs) {
+                        /* Whole chunk is past the split — message color */
+                        push_text(ix + VKW_PAD, row_y, tmp, tr1, tg1, tb1, vp_w, vp_h, cw, ch);
+                    } else if (split >= ce) {
+                        /* Whole chunk is before the split — tag color */
+                        push_text(ix + VKW_PAD, row_y, tmp, tr0, tg0, tb0, vp_w, vp_h, cw, ch);
+                    } else {
+                        int local_split = split - cs;
+                        char tag_part[VKW_LINE_LEN];
+                        memcpy(tag_part, tmp, local_split);
+                        tag_part[local_split] = 0;
+                        push_text(ix + VKW_PAD, row_y, tag_part, tr0, tg0, tb0, vp_w, vp_h, cw, ch);
+                        push_text(ix + VKW_PAD + local_split * cw, row_y,
+                                  tmp + local_split, tr1, tg1, tb1, vp_w, vp_h, cw, ch);
+                    }
+                } else {
+                    push_text(ix + VKW_PAD, row_y, tmp, tr0, tg0, tb0, vp_w, vp_h, cw, ch);
+                }
+                row_y -= ch;
+                vis_row++;
+            }
+            #undef VKW_MAX_CHUNKS
+            stored_off++;
         }
     }
 
@@ -2246,19 +2302,28 @@ static void convo_parse_line(const char *line)
     if (vkw_convo_idx < 0 || !vkw_windows[vkw_convo_idx].active) return;
     if (!line || !line[0]) return;
 
-    /* Strip ANSI escape sequences for matching */
-    char clean[256];
+    /* Strip ANSI escape sequences AND any MegaMUD status prompt segments
+     * ([HP=.../MA=...]:  or  [HP=...]:  or  [MA=...]:) that may be embedded
+     * anywhere in the line. When chat arrives async right after a prompt,
+     * MegaMUD renders them on the same line as "[HP=x/MA=y]:gossip..." —
+     * scan-and-remove handles that no matter where the prompt lands. */
+    char clean[512];
     int ci = 0;
-    for (const char *p = line; *p && ci < 254; ) {
+    for (const char *p = line; *p && ci < (int)sizeof(clean) - 2; ) {
         if (*p == '\x1b') {
             p++;
             if (*p == '[') {
                 p++;
-                /* Skip params/intermediates until CSI terminator (any letter) */
                 while (*p && !((*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z'))) p++;
                 if (*p) p++;
             }
             continue;
+        }
+        /* Drop [HP=...]: and [MA=...]: prompt segments */
+        if (p[0] == '[' && (p[1] == 'H' || p[1] == 'M') &&
+            (p[2] == 'P' || p[2] == 'A') && p[3] == '=') {
+            const char *rb = strchr(p, ']');
+            if (rb && rb[1] == ':') { p = rb + 2; continue; }
         }
         clean[ci++] = *p++;
     }
@@ -2309,17 +2374,8 @@ static void convo_parse_line(const char *line)
         }
     }
 
-    /* Skip leading whitespace */
+    /* Skip leading whitespace (prompt segments were stripped during ANSI pass) */
     while (*s == ' ') s++;
-
-    /* Strip MegaMUD status prompt prefix: [HP=xxx/MA=xxx]: or [HP=xxx]: etc */
-    if (s[0] == '[' && (s[1] == 'H' || s[1] == 'M')) {
-        const char *rb = strchr(s, ']');
-        if (rb && rb[1] == ':') {
-            s = rb + 2;
-            while (*s == ' ') s++;
-        }
-    }
 
     /* Match channels — just identify, don't reformat */
     if (str_starts(s, "You gossip:") || strstr(s, " gossips:"))
@@ -2892,6 +2948,7 @@ static void pl_fire_remote(const char *cmd)
 }
 
 static char vsb_goto_dest[64] = "";   /* name of goto destination for status display */
+static char vsb_path_name[128];       /* tentative definition — init copy declared below */
 
 /* Execute goto via fake_remote.
  * fake_remote("goto X") already handles everything:
@@ -2912,7 +2969,7 @@ static void pl_do_goto(const char *room_name)
     vkm_goto_add(room_name);
 }
 
-static void pl_do_loop(const char *file, const char *room_name)
+static void pl_do_loop(const char *file, const char *display_name, const char *room_name)
 {
     if (!api || !api->fake_remote) return;
     char cmd[128];
@@ -2923,6 +2980,15 @@ static void pl_do_loop(const char *file, const char *room_name)
         _snprintf(cmd, sizeof(cmd), "loop %s.mp", file);
     cmd[sizeof(cmd) - 1] = '\0';
     pl_fire_remote(cmd);
+
+    /* Seed status bar label: prefer the human-readable name from the .mp
+     * header, fall back to the filename. Stays until MegaMUD's statusbar
+     * overwrites it (or pathing/looping ends). */
+    const char *label = (display_name && display_name[0]) ? display_name : file;
+    if (label && label[0]) {
+        strncpy(vsb_path_name, label, sizeof(vsb_path_name) - 1);
+        vsb_path_name[sizeof(vsb_path_name) - 1] = '\0';
+    }
 
     /* Add starting room to recent destinations */
     if (room_name && room_name[0])
@@ -3102,17 +3168,72 @@ static int   bg_plasma_material   = 0;
 static float bg_plasma_mat_str    = 1.0f;   /* 0..2 material strength */
 static int   bg_tonemap_mode     = 0;      /* 0=none, 1=ACES, 2=Reinhard, 3=Hable, 4=AgX */
 static float bg_tonemap_exposure = 1.0f;   /* 0.2..4.0 */
-/* Beat response: 0=none,1=hue_shift,2=brightness_burst,3=zoom_pulse */
-#define BGP_BEAT_NONE    0
-#define BGP_BEAT_HUE     1
-#define BGP_BEAT_BRIGHT  2
-#define BGP_BEAT_ZOOM    3
-#define BGP_BEAT_COUNT   4
-static const char *bgp_beat_names[BGP_BEAT_COUNT] = { "None", "Hue Shift", "Brightness", "Zoom Pulse" };
+/* Shared beat response enum — each background implements what it can.
+ * Plasma wires hue/bright/zoom/warp/jitter; starfield additionally uses
+ * radial pulse, twinkle burst, drift boost, and layer wave. */
+#define BGP_BEAT_NONE     0
+#define BGP_BEAT_HUE      1
+#define BGP_BEAT_BRIGHT   2
+#define BGP_BEAT_ZOOM     3
+#define BGP_BEAT_PULSE    4   /* radial outward (stars: push; plasma: ripple) */
+#define BGP_BEAT_JITTER   5   /* position/UV shake */
+#define BGP_BEAT_WARP     6   /* large-scale spatial warp */
+#define BGP_BEAT_TWINKLE  7   /* stars: twinkle amp; plasma: turbulence spike */
+#define BGP_BEAT_DRIFT    8   /* stars: drift/parallax boost; plasma: flow */
+#define BGP_BEAT_WAVE     9   /* stars: per-layer sway; plasma: complexity pulse */
+#define BGP_BEAT_COUNT   10
+static const char *bgp_beat_names[BGP_BEAT_COUNT] = {
+    "None", "Hue Shift", "Brightness", "Zoom Pulse",
+    "Radial Pulse", "Jitter", "Warp", "Twinkle Burst",
+    "Drift Boost", "Layer Wave"
+};
 static int bg_plasma_beat_bass   = 0;
 static int bg_plasma_beat_mid    = 0;
 static int bg_plasma_beat_treble = 0;
 static int bg_plasma_beat_rms    = 0;
+
+/* ---- Parallax Starfield parameters ---- */
+/* Camera modes — keep in sync with the shader's MODE_* defines. */
+#define BG_STAR_MODE_WARP       0  /* flying straight at viewer */
+#define BG_STAR_MODE_SWERVE     1  /* warp + ship-like swerve */
+#define BG_STAR_MODE_HORIZONTAL 2  /* classic horizontal parallax */
+#define BG_STAR_MODE_VERTICAL   3  /* vertical parallax (falling) */
+#define BG_STAR_MODE_ORBIT      4  /* warp + slow rotation */
+#define BG_STAR_MODE_TUNNEL     5  /* radial vortex warp */
+#define BG_STAR_MODE_COUNT      6
+static const char *bg_star_mode_names[BG_STAR_MODE_COUNT] = {
+    "Warp (At Viewer)",
+    "Warp + Swerve",
+    "Horizontal Parallax",
+    "Vertical Parallax",
+    "Warp + Orbit",
+    "Tunnel Vortex"
+};
+
+static int   bg_star_camera_mode   = BG_STAR_MODE_WARP;
+static float bg_star_swerve_amt    = 0.35f;  /* 0..1 */
+static float bg_star_drift_x       = 0.0f;   /* NDC/sec base drift (warp = 0) */
+static float bg_star_drift_y       = 0.0f;
+static float bg_star_drift_speed   = 1.0f;   /* overall multiplier */
+static float bg_star_parallax      = 0.62f;  /* 0.4..0.95 */
+static float bg_star_layer_count   = 8.0f;   /* 2..8 — more = denser field */
+static float bg_star_density       = 1.0f;   /* per-cell presence 0.2..1.0 */
+static float bg_star_size          = 1.0f;   /* 0.5..2.5 */
+static float bg_star_brightness    = 1.0f;   /* 0..2 */
+static float bg_star_saturation    = 1.0f;   /* 0..2 */
+static float bg_star_hue           = 0.0f;   /* 0..360 */
+static float bg_star_bg_glow       = 0.35f;  /* 0..1 sky luminance */
+static float bg_star_twinkle_speed = 1.2f;   /* 0..5 */
+static float bg_star_twinkle_amt   = 0.55f;  /* 0..1 */
+/* Per-band beat actions (uses shared BGP_BEAT_* enum) */
+static int   bg_star_beat_bass    = BGP_BEAT_PULSE;
+static int   bg_star_beat_mid     = BGP_BEAT_TWINKLE;
+static int   bg_star_beat_treble  = BGP_BEAT_JITTER;
+static int   bg_star_beat_rms     = BGP_BEAT_BRIGHT;
+
+/* Starfield pipeline */
+static VkPipelineLayout vk_star_pipe_layout = VK_NULL_HANDLE;
+static VkPipeline       vk_star_pipeline    = VK_NULL_HANDLE;
 
 /* Unified Background Settings dialog state
  * Single tabbed dialog: one tab per registered background plugin.
@@ -3317,6 +3438,151 @@ static struct {
 static int vrt_orbit_idx = 0;
 static int vrt_orbits_visible = 1; /* toggle from context menu */
 static int vrt_last_spawn_round = -1; /* prevent double-spawning same round */
+
+/* ---- Beat-driven maneuver & pulse state ---- */
+/* Forward decls: sin/cos helpers live later in the file (with vrt_draw). */
+static float vrt_sinf(float x);
+static float vrt_cosf(float x);
+#define VRT_MANEUVER_COUNT   8
+#define VRT_MANEUVER_DUR     0.85f  /* seconds; quick + smooth */
+static int   vrt_bass_beat_last = -1;     /* last observed mr_beat_snap.beat_count */
+static int   vrt_beat_mod4 = 0;           /* counts beats 0..3; maneuver fires at 4 */
+static float vrt_bass_pulse_time = -10.0f;/* fx_time of last bass hit */
+static int   vrt_man_current = -1;        /* -1 = none, else 0..7 */
+static float vrt_man_start = 0.0f;        /* fx_time when maneuver began */
+static int   vrt_man_recent[2] = {-1,-1}; /* last 2 maneuvers (cooldown) */
+static unsigned int vrt_man_rng = 0xA5A5A5A5u;
+
+static unsigned int vrt_man_rand(void) {
+    vrt_man_rng = vrt_man_rng * 1664525u + 1013904223u;
+    return vrt_man_rng;
+}
+
+/* Drive the widget off SuperFlux kick-band onsets (mr_beat_snap.kick_beat_count).
+ * The new detector fires reliably on kick drums across psytrance/DnB/breaks,
+ * so we no longer need a local fallback detector. */
+static void vrt_update_maneuvers(void)
+{
+    int kc = mr_beat_snap.kick_beat_count;
+    if (vrt_bass_beat_last < 0) vrt_bass_beat_last = kc;
+    int new_kicks = kc - vrt_bass_beat_last;
+    if (new_kicks < 0) new_kicks = 0;
+    if (new_kicks > 4) new_kicks = 4;
+    vrt_bass_beat_last = kc;
+
+    if (new_kicks > 0) {
+        vrt_bass_pulse_time = fx_time;
+        vrt_beat_mod4 += new_kicks;
+        while (vrt_beat_mod4 >= 4 && vrt_man_current < 0) {
+            vrt_beat_mod4 -= 4;
+            int pick = -1;
+            for (int tries = 0; tries < 16; tries++) {
+                int cand = (int)(vrt_man_rand() % (unsigned)VRT_MANEUVER_COUNT);
+                if (cand != vrt_man_recent[0] && cand != vrt_man_recent[1]) {
+                    pick = cand; break;
+                }
+            }
+            if (pick < 0) pick = (int)(vrt_man_rand() % (unsigned)VRT_MANEUVER_COUNT);
+            vrt_man_current = pick;
+            vrt_man_start = fx_time;
+            vrt_man_recent[1] = vrt_man_recent[0];
+            vrt_man_recent[0] = pick;
+        }
+    }
+
+    if (vrt_man_current >= 0 &&
+        (fx_time - vrt_man_start) >= VRT_MANEUVER_DUR) {
+        vrt_man_current = -1;
+    }
+}
+
+/* Compute maneuver offsets for a specific orbital dot.
+ *   slot     : per-dot phase index 0..nslots-1 (derived from phase)
+ *   nslots   : total dots in ring
+ *   *d_ang   : angular offset (radians) added to main_angle
+ *   *d_rfrac : radial fractional offset added to or_frac
+ *   *g_boost : extra glow/size multiplier (0..1) */
+static void vrt_maneuver_offset(int mtype, float t01, int slot, int nslots,
+                                float *d_ang, float *d_rfrac, float *g_boost)
+{
+    *d_ang = 0.0f; *d_rfrac = 0.0f; *g_boost = 0.0f;
+    if (mtype < 0) return;
+    if (t01 < 0.0f) t01 = 0.0f; if (t01 > 1.0f) t01 = 1.0f;
+
+    float bump = vrt_sinf(t01 * (float)M_PI);              /* 0->1->0 */
+    float ease = t01 * t01 * (3.0f - 2.0f * t01);          /* smoothstep */
+    float n = (float)((nslots > 0) ? nslots : 12);
+
+    switch (mtype) {
+        case 0: {
+            /* Swap partners: pairs sweep across the ring in opposite directions,
+             * returning home — visually reads as "trading places". */
+            float dir = ((slot & 1) == 0) ? 1.0f : -1.0f;
+            *d_ang = dir * ease * 2.0f * (float)M_PI;
+            *d_rfrac = bump * 0.06f;
+            break;
+        }
+        case 1: {
+            /* Burst outward and back */
+            *d_rfrac = bump * 0.55f;
+            *g_boost = bump * 0.5f;
+            break;
+        }
+        case 2: {
+            /* Implode to center, then out */
+            *d_rfrac = -bump * 0.25f;
+            *g_boost = bump * 0.7f;
+            break;
+        }
+        case 3: {
+            /* Spin boost: angular velocity pulse */
+            *d_ang = vrt_sinf(t01 * (float)M_PI) * 1.9f;
+            *g_boost = bump * 0.25f;
+            break;
+        }
+        case 4: {
+            /* Reverse flash: briefly rotate backward then forward home */
+            *d_ang = -vrt_sinf(t01 * 2.0f * (float)M_PI) * 1.4f;
+            break;
+        }
+        case 5: {
+            /* Ripple: radial bump travels around the ring sequentially */
+            float slot_phase = (float)slot / n;
+            float wave = t01 - slot_phase * 0.6f;
+            float w01 = wave - (float)(int)wave;
+            if (w01 < 0.0f) w01 += 1.0f;
+            float spike = vrt_sinf(w01 * (float)M_PI);
+            if (w01 > 0.5f) spike = 0.0f;                  /* single half-cycle */
+            *d_rfrac = spike * 0.42f;
+            *g_boost = spike * 0.5f;
+            break;
+        }
+        case 6: {
+            /* Figure-8 cross: pairs dive inward + angular sine, different direction per pair */
+            float dir = ((slot >> 1) & 1) ? 1.0f : -1.0f;
+            *d_rfrac = -vrt_sinf(t01 * (float)M_PI) * 0.32f;
+            *d_ang = dir * vrt_sinf(t01 * 2.0f * (float)M_PI) * 1.1f;
+            *g_boost = bump * 0.35f;
+            break;
+        }
+        case 7: {
+            /* Spiral tighten then release outward */
+            if (t01 < 0.5f) {
+                float s = t01 * 2.0f;
+                float se = s * s * (3.0f - 2.0f * s);
+                *d_rfrac = -se * 0.22f;
+                *d_ang = se * 1.7f;
+            } else {
+                float s = (t01 - 0.5f) * 2.0f;
+                float se = s * s * (3.0f - 2.0f * s);
+                *d_rfrac = -0.22f + se * 0.32f;
+                *d_ang = 1.7f + se * 0.8f;
+            }
+            *g_boost = bump * 0.4f;
+            break;
+        }
+    }
+}
 
 static void vrt_spawn_orbits(float cr, float cg, float cb)
 {
@@ -4212,6 +4478,75 @@ static void vrt_draw(int vp_w, int vp_h)
         }
     }
 
+    /* ---- Beat maneuvers + pulse envelope (advances once per frame) ---- */
+    vrt_update_maneuvers();
+    float beat_env = 0.0f;
+    {
+        float pt = fx_time - vrt_bass_pulse_time;
+        if (pt < 0.0f) pt = 0.0f;
+        /* Fast attack (~60ms), exponential decay ~0.28s */
+        float attack = 1.0f - (pt < 0.06f ? (0.06f - pt) / 0.06f : 0.0f);
+        float decay_t = pt * 3.6f;
+        float decay = 1.0f / (1.0f + decay_t * decay_t * 1.5f);
+        beat_env = attack * decay;
+        if (beat_env < 0.0f) beat_env = 0.0f;
+        if (beat_env > 1.0f) beat_env = 1.0f;
+    }
+    float man_t01 = (vrt_man_current >= 0)
+                  ? (fx_time - vrt_man_start) / VRT_MANEUVER_DUR : 0.0f;
+    if (man_t01 < 0.0f) man_t01 = 0.0f;
+    if (man_t01 > 1.0f) man_t01 = 1.0f;
+
+    /* Pre-compute the round-timer progress color (green -> yellow -> red).
+     * Used for the outer beat-glow and to flag "danger" on red. */
+    float glow_col_r, glow_col_g, glow_col_b, red_danger;
+    {
+        float p_col = progress; if (p_col > 1.0f) p_col = 1.0f;
+        /* Match the main arc gradient: green (low) -> yellow (mid) -> red (high) */
+        if (p_col < 0.5f) {
+            float tt = p_col * 2.0f;
+            glow_col_r = t->accent[0]*0.2f + 0.1f + 0.6f*tt;
+            glow_col_g = t->accent[1]*0.2f + 0.7f;
+            glow_col_b = t->accent[2]*0.2f + 0.15f - 0.05f*tt;
+        } else {
+            float tt = (p_col - 0.5f) * 2.0f;
+            glow_col_r = t->accent[0]*0.2f + 0.8f;
+            glow_col_g = t->accent[1]*0.2f + 0.7f - 0.55f*tt;
+            glow_col_b = t->accent[2]*0.2f + 0.10f;
+        }
+        if (glow_col_r > 1) glow_col_r = 1;
+        if (glow_col_g > 1) glow_col_g = 1;
+        if (glow_col_b > 1) glow_col_b = 1;
+        /* "danger" factor: ramps up as we move into the yellow/red half. */
+        red_danger = 0.0f;
+        if (progress > 0.5f) red_danger = (progress - 0.5f) * 2.0f;
+        if (red_danger > 1.0f) red_danger = 1.0f;
+    }
+
+    /* ---- Outer beat-reactive glow halo (sits OUTSIDE the rim) ----
+     * Pulses on every bass beat, colored to match the current timer color.
+     * Red glows much brighter so it's obvious the round is nearly up. */
+    if (beat_env > 0.01f) {
+        float danger_boost = 1.0f + red_danger * 2.2f;
+        float a_base = beat_env * 0.42f * danger_boost;
+        /* Bright inner halo hugging the rim */
+        vrt_push_arc(cx, cy, R * 0.96f, R * 1.04f, 0, 2.0f*(float)M_PI,
+                     glow_col_r, glow_col_g, glow_col_b,
+                     glow_col_r, glow_col_g, glow_col_b,
+                     a_base * 0.85f, hi_segs, vp_w, vp_h);
+        /* Mid halo */
+        vrt_push_arc(cx, cy, R * 1.02f, R * 1.12f, 0, 2.0f*(float)M_PI,
+                     glow_col_r, glow_col_g, glow_col_b,
+                     glow_col_r*0.7f, glow_col_g*0.7f, glow_col_b*0.7f,
+                     a_base * 0.5f, hi_segs, vp_w, vp_h);
+        /* Soft outer bloom, wider on red for urgency */
+        float outer_r = 1.18f + red_danger * 0.08f;
+        vrt_push_arc(cx, cy, R * 1.08f, R * outer_r, 0, 2.0f*(float)M_PI,
+                     glow_col_r*0.8f, glow_col_g*0.8f, glow_col_b*0.8f,
+                     glow_col_r*0.2f, glow_col_g*0.2f, glow_col_b*0.2f,
+                     a_base * 0.28f, hi_segs, vp_w, vp_h);
+    }
+
     /* ---- Glossy acrylic torus background ---- */
     float acr = t->accent[0], acg = t->accent[1], acb = t->accent[2];
     float rbg0 = t->bg[0], rbg1 = t->bg[1], rbg2 = t->bg[2];
@@ -4418,11 +4753,36 @@ static void vrt_draw(int vp_w, int vp_h)
 
             /* Main orbit angle — all particles sweep around center */
             float main_angle = t * 0.9f;
+
+            /* Derive this dot's slot index (0..11) from its phase for maneuver
+             * targeting. Phase was set to si*(2PI/6), so si = round(phase/(PI/3))
+             * within a strand; combine with strand to get 0..11. */
+            int slot_si = (int)(vrt_orbits[i].phase / ((float)M_PI / 3.0f) + 0.5f) & 7;
+            int slot = slot_si + (int)(vrt_orbits[i].helix_id + 0.5f) * 6;
+
+            /* Beat-reactive jitter applied to the main angle (every beat) */
+            float jit_dth = 0.0f, jit_dr = 0.0f;
+            if (beat_env > 0.01f) {
+                float jh1 = vrt_sinf(vrt_orbits[i].phase * 13.7f + strand_offset);
+                float jh2 = vrt_sinf(vrt_orbits[i].phase * 7.31f + strand_offset * 2.13f);
+                jit_dth = jh1 * beat_env * 0.08f;
+                jit_dr  = jh2 * beat_env * 0.04f;
+            }
+
+            /* Maneuver offsets (active every 4 beats for ~0.85s) */
+            float man_dth = 0.0f, man_dr = 0.0f, man_glow = 0.0f;
+            vrt_maneuver_offset(vrt_man_current, man_t01, slot, 12,
+                                &man_dth, &man_dr, &man_glow);
+
+            main_angle += jit_dth + man_dth;
+
             /* Helix modulation — radial breathing creates the double-helix weave */
             float helix_freq = 3.0f; /* how many times the helix wraps per orbit */
             float helix_amp = 0.12f; /* how far in/out the helix breathes */
             float helix_phase = helix_freq * main_angle + strand_offset;
-            float or_frac = vrt_orbits[i].orbit_r + vrt_sinf(helix_phase) * helix_amp;
+            float or_frac = vrt_orbits[i].orbit_r + vrt_sinf(helix_phase) * helix_amp
+                          + jit_dr + man_dr;
+            if (or_frac < 0.02f) or_frac = 0.02f;
 
             /* Slight vertical wobble for depth illusion (mapped to Y offset) */
             float z_wobble = vrt_cosf(helix_phase) * R * 0.03f;
@@ -4442,9 +4802,11 @@ static void vrt_draw(int vp_w, int vp_h)
                 oy = cy - orb_r * vrt_sinf(main_angle) + z_wobble;
             }
 
-            /* Size pulses slightly with helix phase for 3D feel */
+            /* Size pulses slightly with helix phase for 3D feel, plus a smooth
+             * beat-driven glow pulse and any maneuver glow boost. */
             float ps_base = R * 0.018f;
-            float ps = ps_base * (1.0f + vrt_cosf(helix_phase) * 0.25f);
+            float beat_pulse_sz = 1.0f + beat_env * 0.45f + man_glow * 0.6f;
+            float ps = ps_base * (1.0f + vrt_cosf(helix_phase) * 0.25f) * beat_pulse_sz;
 
             /* Fading trail: draw 5 ghost particles at past positions */
             #define VRT_TRAIL_LEN 5
@@ -4467,10 +4829,11 @@ static void vrt_draw(int vp_w, int vp_h)
             }
             #undef VRT_TRAIL_LEN
 
-            /* Outer glow */
+            /* Outer glow — alpha swells on every bass beat */
+            float glow_a = alpha * (0.12f + beat_env * 0.35f + man_glow * 0.25f);
             vrt_push_circle(ox, oy, ps * 3.0f,
                             vrt_orbits[i].r, vrt_orbits[i].g, vrt_orbits[i].b,
-                            alpha * 0.12f, orb_segs, vp_w, vp_h);
+                            glow_a, orb_segs, vp_w, vp_h);
             /* Core — brighter when "in front" (positive helix phase) */
             float front = (vrt_cosf(helix_phase) * 0.5f + 0.5f);
             float core_a = alpha * (0.6f + front * 0.4f);
@@ -5298,7 +5661,7 @@ static int pl_exec_item(int item_idx)
                     if (pl_search[0] && !pl_stristr(pl_paths[pi].name, pl_search) &&
                         !pl_stristr(pl_paths[pi].file, pl_search)) continue;
                     if (idx == item_idx) {
-                        pl_do_loop(pl_paths[pi].file, pl_paths[pi].start_room);
+                        pl_do_loop(pl_paths[pi].file, pl_paths[pi].name, pl_paths[pi].start_room);
                         pl_wnd_open = 0;
                         return 1;
                     }
@@ -8153,7 +8516,11 @@ static int vkt_upload_font_texture(uint8_t *pixels, uint32_t atlas_w, uint32_t a
     if (vk_font_img) { vkDestroyImage(vk_dev, vk_font_img, NULL); vk_font_img = VK_NULL_HANDLE; }
     if (vk_font_mem) { vkFreeMemory(vk_dev, vk_font_mem, NULL); vk_font_mem = VK_NULL_HANDLE; }
 
-    /* Create VkImage */
+    /* LINEAR tiling + host-visible + direct memcpy — NO staging buffer, NO
+     * CopyBufferToImage, NO command buffer, NO submit. lavapipe's CopyBufferToImage
+     * path corrupts megamud's heap on 32-bit Win11 (~50% crash rate even with
+     * every other workaround applied). Linear images are sampled directly from
+     * host-mapped memory on software renderers — no transfer op needed. */
     VkImageCreateInfo ici = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
     ici.imageType = VK_IMAGE_TYPE_2D;
     ici.format = VK_FORMAT_R8G8B8A8_UNORM;
@@ -8166,66 +8533,33 @@ static int vkt_upload_font_texture(uint8_t *pixels, uint32_t atlas_w, uint32_t a
     ici.initialLayout = VK_IMAGE_LAYOUT_PREINITIALIZED;
     vkCreateImage(vk_dev, &ici, NULL, &vk_font_img);
 
-    VkMemoryRequirements mr;
-    vkGetImageMemoryRequirements(vk_dev, vk_font_img, &mr);
-    VkMemoryAllocateInfo mai = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
-    mai.allocationSize = mr.size;
-    mai.memoryTypeIndex = vk_find_memory(vk_pdev, mr.memoryTypeBits,
+    VkMemoryRequirements img_mr;
+    vkGetImageMemoryRequirements(vk_dev, vk_font_img, &img_mr);
+    VkMemoryAllocateInfo img_mai = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+    img_mai.allocationSize = img_mr.size;
+    img_mai.memoryTypeIndex = vk_find_memory(vk_pdev, img_mr.memoryTypeBits,
         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-    vkAllocateMemory(vk_dev, &mai, NULL, &vk_font_mem);
+    vkAllocateMemory(vk_dev, &img_mai, NULL, &vk_font_mem);
     vkBindImageMemory(vk_dev, vk_font_img, vk_font_mem, 0);
 
-    /* Copy pixel data with proper row pitch */
-    void *mapped;
-    vkMapMemory(vk_dev, vk_font_mem, 0, mr.size, 0, &mapped);
-    VkImageSubresource sub = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0 };
-    VkSubresourceLayout layout;
-    vkGetImageSubresourceLayout(vk_dev, vk_font_img, &sub, &layout);
-    for (uint32_t row = 0; row < atlas_h; row++) {
-        memcpy((uint8_t *)mapped + layout.offset + row * layout.rowPitch,
-               pixels + row * atlas_w * 4, atlas_w * 4);
+    /* Query row pitch — linear images may pad each row for alignment */
+    VkImageSubresource isr = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0 };
+    VkSubresourceLayout sl;
+    vkGetImageSubresourceLayout(vk_dev, vk_font_img, &isr, &sl);
+
+    void *mapped = NULL;
+    vkMapMemory(vk_dev, vk_font_mem, 0, VK_WHOLE_SIZE, 0, &mapped);
+    uint8_t *dst = (uint8_t *)mapped + (size_t)sl.offset;
+    uint32_t src_pitch = atlas_w * 4u;
+    if ((VkDeviceSize)src_pitch == sl.rowPitch) {
+        memcpy(dst, pixels, (size_t)src_pitch * atlas_h);
+    } else {
+        for (uint32_t y = 0; y < atlas_h; y++)
+            memcpy(dst + (size_t)y * sl.rowPitch, pixels + (size_t)y * src_pitch, src_pitch);
     }
     vkUnmapMemory(vk_dev, vk_font_mem);
 
-    /* Transition to SHADER_READ_ONLY_OPTIMAL using a one-shot command buffer.
-     * We must NOT touch the render loop's vk_cmd_buf or vk_fence here,
-     * because that corrupts the render loop's sync state. */
-    VkCommandBuffer tmp_cmd;
-    VkCommandBufferAllocateInfo cbai = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
-    cbai.commandPool = vk_cmd_pool;
-    cbai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    cbai.commandBufferCount = 1;
-    vkAllocateCommandBuffers(vk_dev, &cbai, &tmp_cmd);
-
-    VkCommandBufferBeginInfo cbbi = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
-    cbbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    vkBeginCommandBuffer(tmp_cmd, &cbbi);
-    VkImageMemoryBarrier imb = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
-    imb.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT;
-    imb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-    imb.oldLayout = VK_IMAGE_LAYOUT_PREINITIALIZED;
-    imb.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    imb.image = vk_font_img;
-    imb.subresourceRange = (VkImageSubresourceRange){ VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
-    vkCmdPipelineBarrier(tmp_cmd, VK_PIPELINE_STAGE_HOST_BIT,
-                         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0,
-                         0, NULL, 0, NULL, 1, &imb);
-    vkEndCommandBuffer(tmp_cmd);
-
-    VkFence tmp_fence;
-    VkFenceCreateInfo fci = { VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
-    vkCreateFence(vk_dev, &fci, NULL, &tmp_fence);
-
-    VkSubmitInfo si = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
-    si.commandBufferCount = 1;
-    si.pCommandBuffers = &tmp_cmd;
-    vkQueueSubmit(vk_queue, 1, &si, tmp_fence);
-    vkWaitForFences(vk_dev, 1, &tmp_fence, VK_TRUE, UINT64_MAX);
-
-    vkDestroyFence(vk_dev, tmp_fence, NULL);
-    vkFreeCommandBuffers(vk_dev, vk_cmd_pool, 1, &tmp_cmd);
-
-    /* Image view */
+    /* View + sampler */
     VkImageViewCreateInfo ivci = { VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
     ivci.image = vk_font_img;
     ivci.viewType = VK_IMAGE_VIEW_TYPE_2D;
@@ -8233,27 +8567,30 @@ static int vkt_upload_font_texture(uint8_t *pixels, uint32_t atlas_w, uint32_t a
     ivci.subresourceRange = (VkImageSubresourceRange){ VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
     vkCreateImageView(vk_dev, &ivci, NULL, &vk_font_view);
 
-    /* Sampler */
     VkSamplerCreateInfo saci = { VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
-    VkFilter filt = VK_FILTER_LINEAR;
-    saci.magFilter = filt;
-    saci.minFilter = filt;
+    saci.magFilter = VK_FILTER_LINEAR;
+    saci.minFilter = VK_FILTER_LINEAR;
     saci.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     saci.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     vkCreateSampler(vk_dev, &saci, NULL, &vk_font_sampler);
 
-    /* Update descriptor set to point to new texture */
-    VkDescriptorImageInfo dii = {0};
-    dii.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    dii.imageView = vk_font_view;
-    dii.sampler = vk_font_sampler;
-    VkWriteDescriptorSet wds = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
-    wds.dstSet = vk_desc_set;
-    wds.dstBinding = 0;
-    wds.descriptorCount = 1;
-    wds.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    wds.pImageInfo = &dii;
-    vkUpdateDescriptorSets(vk_dev, 1, &wds, 0, NULL);
+    /* Image stays at PREINITIALIZED. Descriptor uses VK_IMAGE_LAYOUT_GENERAL
+     * which lavapipe's software sampler accepts for linear host-visible
+     * images. Strict spec compliance would require a barrier transition, but
+     * that re-introduces the submit path we're trying to avoid. */
+    if (vk_desc_set != VK_NULL_HANDLE) {
+        VkDescriptorImageInfo dii = {0};
+        dii.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+        dii.imageView = vk_font_view;
+        dii.sampler = vk_font_sampler;
+        VkWriteDescriptorSet wds = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+        wds.dstSet = vk_desc_set;
+        wds.dstBinding = 0;
+        wds.descriptorCount = 1;
+        wds.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        wds.pImageInfo = &dii;
+        vkUpdateDescriptorSets(vk_dev, 1, &wds, 0, NULL);
+    }
 
     return 0;
 }
@@ -8386,39 +8723,10 @@ static void vkt_init_ui_font(void)
     vkUnmapMemory(vk_dev, ui_font_mem);
     free(pixels);
 
-    /* Transition to SHADER_READ_ONLY_OPTIMAL */
-    VkCommandBuffer tmp_cmd;
-    VkCommandBufferAllocateInfo cbai = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
-    cbai.commandPool = vk_cmd_pool;
-    cbai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    cbai.commandBufferCount = 1;
-    vkAllocateCommandBuffers(vk_dev, &cbai, &tmp_cmd);
-
-    VkCommandBufferBeginInfo cbbi = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
-    cbbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    vkBeginCommandBuffer(tmp_cmd, &cbbi);
-    VkImageMemoryBarrier imb = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
-    imb.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT;
-    imb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-    imb.oldLayout = VK_IMAGE_LAYOUT_PREINITIALIZED;
-    imb.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    imb.image = ui_font_img;
-    imb.subresourceRange = (VkImageSubresourceRange){ VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
-    vkCmdPipelineBarrier(tmp_cmd, VK_PIPELINE_STAGE_HOST_BIT,
-                         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0,
-                         0, NULL, 0, NULL, 1, &imb);
-    vkEndCommandBuffer(tmp_cmd);
-
-    VkFence tmp_fence;
-    VkFenceCreateInfo fci = { VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
-    vkCreateFence(vk_dev, &fci, NULL, &tmp_fence);
-    VkSubmitInfo si = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
-    si.commandBufferCount = 1;
-    si.pCommandBuffers = &tmp_cmd;
-    vkQueueSubmit(vk_queue, 1, &si, tmp_fence);
-    vkWaitForFences(vk_dev, 1, &tmp_fence, VK_TRUE, UINT64_MAX);
-    vkDestroyFence(vk_dev, tmp_fence, NULL);
-    vkFreeCommandBuffers(vk_dev, vk_cmd_pool, 1, &tmp_cmd);
+    /* NO barrier transition — image stays at PREINITIALIZED, descriptor uses
+     * GENERAL. Submitting even a tiny layout-transition cmdbuf corrupts
+     * megamud's heap on lavapipe/Win11. lavapipe's software sampler reads
+     * linear host-visible images correctly regardless of formal layout. */
 
     /* Image view */
     VkImageViewCreateInfo ivci = { VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
@@ -8438,7 +8746,7 @@ static void vkt_init_ui_font(void)
 
     /* Update UI descriptor set */
     VkDescriptorImageInfo dii = {0};
-    dii.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    dii.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
     dii.imageView = ui_font_view;
     dii.sampler = ui_font_sampler;
     VkWriteDescriptorSet wds = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
@@ -8607,33 +8915,8 @@ static void vkt_init_vft_font(int font_idx)
     vkUnmapMemory(vk_dev, vft_font_mem);
     free(pixels);
 
-    /* Transition layout */
-    VkCommandBuffer tmp_cmd;
-    VkCommandBufferAllocateInfo cbai = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
-    cbai.commandPool = vk_cmd_pool; cbai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY; cbai.commandBufferCount = 1;
-    vkAllocateCommandBuffers(vk_dev, &cbai, &tmp_cmd);
-    VkCommandBufferBeginInfo cbbi = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
-    cbbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    vkBeginCommandBuffer(tmp_cmd, &cbbi);
-    VkImageMemoryBarrier imb = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
-    imb.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT;
-    imb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-    imb.oldLayout = VK_IMAGE_LAYOUT_PREINITIALIZED;
-    imb.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    imb.image = vft_font_img;
-    imb.subresourceRange = (VkImageSubresourceRange){ VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
-    vkCmdPipelineBarrier(tmp_cmd, VK_PIPELINE_STAGE_HOST_BIT,
-                         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, NULL, 0, NULL, 1, &imb);
-    vkEndCommandBuffer(tmp_cmd);
-    VkFence tmp_fence;
-    VkFenceCreateInfo fci = { VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
-    vkCreateFence(vk_dev, &fci, NULL, &tmp_fence);
-    VkSubmitInfo si2 = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
-    si2.commandBufferCount = 1; si2.pCommandBuffers = &tmp_cmd;
-    vkQueueSubmit(vk_queue, 1, &si2, tmp_fence);
-    vkWaitForFences(vk_dev, 1, &tmp_fence, VK_TRUE, UINT64_MAX);
-    vkDestroyFence(vk_dev, tmp_fence, NULL);
-    vkFreeCommandBuffers(vk_dev, vk_cmd_pool, 1, &tmp_cmd);
+    /* NO barrier — stays at PREINITIALIZED, descriptor uses GENERAL. See
+     * vkt_init_ui_font for rationale (avoids lavapipe/Win11 heap corruption). */
 
     /* Image view */
     VkImageViewCreateInfo ivci = { VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
@@ -8653,7 +8936,7 @@ static void vkt_init_vft_font(int font_idx)
 
     /* Update VFT descriptor set */
     VkDescriptorImageInfo dii = {0};
-    dii.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    dii.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
     dii.imageView = vft_font_view;
     dii.sampler = vft_font_sampler;
     VkWriteDescriptorSet wds = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
@@ -8708,37 +8991,8 @@ static void vib_init_icon_atlas(void)
     }
     vkUnmapMemory(vk_dev, vib_icon_mem);
 
-    /* Transition to SHADER_READ_ONLY_OPTIMAL */
-    VkCommandBuffer tmp_cmd;
-    VkCommandBufferAllocateInfo cbai = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
-    cbai.commandPool = vk_cmd_pool;
-    cbai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    cbai.commandBufferCount = 1;
-    vkAllocateCommandBuffers(vk_dev, &cbai, &tmp_cmd);
-    VkCommandBufferBeginInfo cbbi = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
-    cbbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    vkBeginCommandBuffer(tmp_cmd, &cbbi);
-    VkImageMemoryBarrier imb = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
-    imb.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT;
-    imb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-    imb.oldLayout = VK_IMAGE_LAYOUT_PREINITIALIZED;
-    imb.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    imb.image = vib_icon_img;
-    imb.subresourceRange = (VkImageSubresourceRange){ VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
-    vkCmdPipelineBarrier(tmp_cmd, VK_PIPELINE_STAGE_HOST_BIT,
-                         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0,
-                         0, NULL, 0, NULL, 1, &imb);
-    vkEndCommandBuffer(tmp_cmd);
-    VkFence tmp_fence;
-    VkFenceCreateInfo fci = { VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
-    vkCreateFence(vk_dev, &fci, NULL, &tmp_fence);
-    VkSubmitInfo si2 = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
-    si2.commandBufferCount = 1;
-    si2.pCommandBuffers = &tmp_cmd;
-    vkQueueSubmit(vk_queue, 1, &si2, tmp_fence);
-    vkWaitForFences(vk_dev, 1, &tmp_fence, VK_TRUE, UINT64_MAX);
-    vkDestroyFence(vk_dev, tmp_fence, NULL);
-    vkFreeCommandBuffers(vk_dev, vk_cmd_pool, 1, &tmp_cmd);
+    /* NO barrier — stays at PREINITIALIZED, descriptor uses GENERAL. See
+     * vkt_init_ui_font for rationale (avoids lavapipe/Win11 heap corruption). */
 
     /* Image view */
     VkImageViewCreateInfo ivci = { VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
@@ -8758,7 +9012,7 @@ static void vib_init_icon_atlas(void)
 
     /* Update icon descriptor set */
     VkDescriptorImageInfo dii = {0};
-    dii.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    dii.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
     dii.imageView = vib_icon_view;
     dii.sampler = vib_icon_sampler;
     VkWriteDescriptorSet wds = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
@@ -8771,6 +9025,66 @@ static void vib_init_icon_atlas(void)
 
     vib_icon_ready = 1;
     if (api) api->log("[vk_terminal] Icon atlas ready: %dx%d (%d icons)\n", aw, ah, VIB_ICON_COUNT);
+}
+
+/* One-shot barrier submit: transition all 4 linear host-visible texture images
+ * from PREINITIALIZED → GENERAL so fragment shader sampling is spec-legal.
+ * Pure image memory barrier — no copies, no host writes — safe on lavapipe
+ * (the heap corruption was specific to CopyBufferToImage's staging copy). */
+static void vkt_transition_textures_to_general(void)
+{
+    if (!vk_dev || !vk_cmd_pool) return;
+
+    VkCommandBufferAllocateInfo cbai = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+    cbai.commandPool = vk_cmd_pool;
+    cbai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    cbai.commandBufferCount = 1;
+    VkCommandBuffer cb = VK_NULL_HANDLE;
+    if (vkAllocateCommandBuffers(vk_dev, &cbai, &cb) != VK_SUCCESS || !cb) return;
+
+    VkCommandBufferBeginInfo cbbi = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+    cbbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(cb, &cbbi);
+
+    VkImage imgs[4] = { vk_font_img, ui_font_img, vft_font_img, vib_icon_img };
+    VkImageMemoryBarrier barriers[4];
+    int nb = 0;
+    for (int i = 0; i < 4; i++) {
+        if (!imgs[i]) continue;
+        VkImageMemoryBarrier *b = &barriers[nb++];
+        memset(b, 0, sizeof(*b));
+        b->sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        b->srcAccessMask = VK_ACCESS_HOST_WRITE_BIT;
+        b->dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        b->oldLayout = VK_IMAGE_LAYOUT_PREINITIALIZED;
+        b->newLayout = VK_IMAGE_LAYOUT_GENERAL;
+        b->srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b->dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b->image = imgs[i];
+        b->subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        b->subresourceRange.levelCount = 1;
+        b->subresourceRange.layerCount = 1;
+    }
+    if (nb > 0) {
+        vkCmdPipelineBarrier(cb,
+            VK_PIPELINE_STAGE_HOST_BIT,
+            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+            0, 0, NULL, 0, NULL, nb, barriers);
+    }
+    vkEndCommandBuffer(cb);
+
+    VkFenceCreateInfo fci = { VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
+    VkFence fence = VK_NULL_HANDLE;
+    vkCreateFence(vk_dev, &fci, NULL, &fence);
+
+    VkSubmitInfo si = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
+    si.commandBufferCount = 1;
+    si.pCommandBuffers = &cb;
+    vkQueueSubmit(vk_queue, 1, &si, fence);
+    vkWaitForFences(vk_dev, 1, &fence, VK_TRUE, 1000000000ULL);
+    vkDestroyFence(vk_dev, fence, NULL);
+    vkFreeCommandBuffers(vk_dev, vk_cmd_pool, 1, &cb);
+    if (api) api->log("[vk_terminal] Texture layouts transitioned to GENERAL (%d images)\n", nb);
 }
 
 /* Switch font at runtime — called ONLY from inside vkt_render_frame
@@ -8860,6 +9174,9 @@ static int vkt_create_buffers(void)
 
 static int vkt_create_descriptors(void)
 {
+    /* lavapipe/Win32: ensure prior submits drained before allocating descriptors. */
+    if (vk_dev) vkDeviceWaitIdle(vk_dev);
+
     /* Layout */
     VkDescriptorSetLayoutBinding binding = {0};
     binding.binding = 0;
@@ -8879,23 +9196,19 @@ static int vkt_create_descriptors(void)
     dpci.pPoolSizes = &ps;
     vkCreateDescriptorPool(vk_dev, &dpci, NULL, &vk_desc_pool);
 
-    /* Allocate main font descriptor set */
     VkDescriptorSetAllocateInfo dsai = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
     dsai.descriptorPool = vk_desc_pool;
     dsai.descriptorSetCount = 1;
     dsai.pSetLayouts = &vk_desc_layout;
     vkAllocateDescriptorSets(vk_dev, &dsai, &vk_desc_set);
-
-    /* Allocate UI font descriptor set */
     vkAllocateDescriptorSets(vk_dev, &dsai, &ui_desc_set);
-    /* Allocate icon atlas descriptor set */
     vkAllocateDescriptorSets(vk_dev, &dsai, &vib_desc_set);
-    /* Allocate VFT font descriptor set */
     vkAllocateDescriptorSets(vk_dev, &dsai, &vft_desc_set);
 
-    /* Update with font texture */
+    /* Update with font texture. GENERAL matches the linear-host-visible
+     * image that vkt_upload_font_texture creates (no barrier transition). */
     VkDescriptorImageInfo dii = {0};
-    dii.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    dii.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
     dii.imageView = vk_font_view;
     dii.sampler = vk_font_sampler;
     VkWriteDescriptorSet wds = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
@@ -9266,6 +9579,53 @@ static int vkt_create_swapchain(void)
         else
             api->log("[vk_terminal] Background pipeline OK\n");
     }
+
+    /* ---- Parallax Starfield pipeline ---- */
+    {
+        VkPushConstantRange pcr = {0};
+        pcr.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+        pcr.offset = 0;
+        pcr.size = sizeof(float) * 29; /* starfield push constants */
+
+        VkPipelineLayoutCreateInfo splci = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+        splci.setLayoutCount = 1;
+        splci.pSetLayouts = &vk_desc_layout;
+        splci.pushConstantRangeCount = 1;
+        splci.pPushConstantRanges = &pcr;
+        vkCreatePipelineLayout(vk_dev, &splci, NULL, &vk_star_pipe_layout);
+
+        VkShaderModuleCreateInfo svsci = { VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO };
+        svsci.codeSize = bg_starfield_vert_spv_size;
+        svsci.pCode = bg_starfield_vert_spv;
+        VkShaderModule svs;
+        vkCreateShaderModule(vk_dev, &svsci, NULL, &svs);
+
+        VkShaderModuleCreateInfo sfsci = { VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO };
+        sfsci.codeSize = bg_starfield_frag_spv_size;
+        sfsci.pCode = bg_starfield_frag_spv;
+        VkShaderModule sfs;
+        vkCreateShaderModule(vk_dev, &sfsci, NULL, &sfs);
+
+        VkPipelineShaderStageCreateInfo sstages[2] = {
+            { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0,
+              VK_SHADER_STAGE_VERTEX_BIT, svs, "main", NULL },
+            { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0,
+              VK_SHADER_STAGE_FRAGMENT_BIT, sfs, "main", NULL },
+        };
+
+        VkGraphicsPipelineCreateInfo sgpci = gpci;
+        sgpci.pStages = sstages;
+        sgpci.layout = vk_star_pipe_layout;
+        res = vkCreateGraphicsPipelines(vk_dev, VK_NULL_HANDLE, 1, &sgpci, NULL, &vk_star_pipeline);
+
+        vkDestroyShaderModule(vk_dev, svs, NULL);
+        vkDestroyShaderModule(vk_dev, sfs, NULL);
+
+        if (res != VK_SUCCESS)
+            api->log("[vk_terminal] Starfield pipeline failed: %d\n", res);
+        else
+            api->log("[vk_terminal] Starfield pipeline OK\n");
+    }
     api->log("[vk_terminal] Swapchain %dx%d, %d images\n",
              vk_sc_extent.width, vk_sc_extent.height, vk_sc_count);
     return 0;
@@ -9280,6 +9640,8 @@ static void vkt_destroy_swapchain(void)
     if (vk_liquid_pipe_layout) { vkDestroyPipelineLayout(vk_dev, vk_liquid_pipe_layout, NULL); vk_liquid_pipe_layout = VK_NULL_HANDLE; }
     if (vk_bg_pipeline) { vkDestroyPipeline(vk_dev, vk_bg_pipeline, NULL); vk_bg_pipeline = VK_NULL_HANDLE; }
     if (vk_bg_pipe_layout) { vkDestroyPipelineLayout(vk_dev, vk_bg_pipe_layout, NULL); vk_bg_pipe_layout = VK_NULL_HANDLE; }
+    if (vk_star_pipeline) { vkDestroyPipeline(vk_dev, vk_star_pipeline, NULL); vk_star_pipeline = VK_NULL_HANDLE; }
+    if (vk_star_pipe_layout) { vkDestroyPipelineLayout(vk_dev, vk_star_pipe_layout, NULL); vk_star_pipe_layout = VK_NULL_HANDLE; }
     if (vk_renderpass) { vkDestroyRenderPass(vk_dev, vk_renderpass, NULL); vk_renderpass = VK_NULL_HANDLE; }
     if (vk_sc_fbs) {
         for (uint32_t i = 0; i < vk_sc_count; i++) vkDestroyFramebuffer(vk_dev, vk_sc_fbs[i], NULL);
@@ -9324,11 +9686,9 @@ static void vkt_render_frame(void)
         return;
     }
 
-    /* Build vertex data */
     vkt_read_buffer();
     vkt_build_vertices();
 
-    /* Record command buffer */
     vkResetCommandBuffer(vk_cmd_buf, 0);
     VkCommandBufferBeginInfo cbbi = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
     vkBeginCommandBuffer(vk_cmd_buf, &cbbi);
@@ -9354,7 +9714,7 @@ static void vkt_render_frame(void)
 
     /* Draw 0: Animated background (if active) */
     int term_start = 0;
-    if (bg_mode != BG_NONE && bg_quad_end > 0 && vk_bg_pipeline) {
+    if (bg_mode == BG_PLASMA && bg_quad_end > 0 && vk_bg_pipeline) {
         vkCmdBindPipeline(vk_cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS, vk_bg_pipeline);
         vkCmdBindDescriptorSets(vk_cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                 vk_bg_pipe_layout, 0, 1, &vk_desc_set, 0, NULL);
@@ -9373,9 +9733,18 @@ static void vkt_render_frame(void)
             };
             for (int i = 0; i < 4; i++) {
                 float e = bands[i].energy;
-                if (bands[i].mode == BGP_BEAT_HUE)    beat_hue    += e * 60.0f;
-                if (bands[i].mode == BGP_BEAT_BRIGHT)  beat_bright += e * 0.5f;
-                if (bands[i].mode == BGP_BEAT_ZOOM)    beat_zoom   += e * 0.3f;
+                /* Retuned coefficients: hue/bright stronger, zoom gentler */
+                if (bands[i].mode == BGP_BEAT_HUE)      beat_hue    += e * 140.0f;
+                if (bands[i].mode == BGP_BEAT_BRIGHT)   beat_bright += e * 1.1f;
+                if (bands[i].mode == BGP_BEAT_ZOOM)     beat_zoom   += e * 0.12f;
+                /* Additional modes folded into existing push constants so
+                 * plasma still reacts meaningfully without a shader change. */
+                if (bands[i].mode == BGP_BEAT_PULSE)    beat_zoom   += e * 0.08f;
+                if (bands[i].mode == BGP_BEAT_JITTER)   beat_hue    += e * 40.0f;
+                if (bands[i].mode == BGP_BEAT_WARP)     beat_bright += e * 0.4f;
+                if (bands[i].mode == BGP_BEAT_TWINKLE)  beat_bright += e * 0.6f;
+                if (bands[i].mode == BGP_BEAT_DRIFT)    beat_hue    += e * 80.0f;
+                if (bands[i].mode == BGP_BEAT_WAVE)     beat_zoom   += e * 0.05f;
             }
         }
         float bg_pc[21] = { fx_time, bg_plasma_speed, bg_plasma_turbulence,
@@ -9390,6 +9759,58 @@ static void vkt_render_frame(void)
         vkCmdPushConstants(vk_cmd_buf, vk_bg_pipe_layout,
                            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                            0, sizeof(bg_pc), bg_pc);
+        vkCmdDrawIndexed(vk_cmd_buf, bg_quad_end * 6, 1, 0, 0, 0);
+        term_start = bg_quad_end;
+    } else if (bg_mode == BG_STARFIELD && bg_quad_end > 0 && vk_star_pipeline) {
+        vkCmdBindPipeline(vk_cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS, vk_star_pipeline);
+        vkCmdBindDescriptorSets(vk_cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                vk_star_pipe_layout, 0, 1, &vk_desc_set, 0, NULL);
+        /* Evaluate per-band beat modes into 9 starfield effect channels. */
+        float bp_pulse=0, bp_jitter=0, bp_bright=0, bp_hue=0, bp_zoom=0,
+              bp_warp=0, bp_twinkle=0, bp_drift=0, bp_wave=0;
+        {
+            EnterCriticalSection(&mr_beat_lock);
+            float bass = mr_beat_snap.bass_energy;
+            float mid  = mr_beat_snap.mid_energy;
+            float treb = mr_beat_snap.treble_energy;
+            float rms  = (bass + mid + treb) * 0.33f;
+            LeaveCriticalSection(&mr_beat_lock);
+            struct { int mode; float energy; } bands[4] = {
+                { bg_star_beat_bass, bass }, { bg_star_beat_mid, mid },
+                { bg_star_beat_treble, treb }, { bg_star_beat_rms, rms }
+            };
+            for (int i = 0; i < 4; i++) {
+                float e = bands[i].energy;
+                switch (bands[i].mode) {
+                    case BGP_BEAT_HUE:     bp_hue     += e * 1.0f; break;
+                    case BGP_BEAT_BRIGHT:  bp_bright  += e * 1.2f; break;
+                    case BGP_BEAT_ZOOM:    bp_zoom    += e * 1.0f; break;
+                    case BGP_BEAT_PULSE:   bp_pulse   += e * 1.3f; break;
+                    case BGP_BEAT_JITTER:  bp_jitter  += e * 1.0f; break;
+                    case BGP_BEAT_WARP:    bp_warp    += e * 1.0f; break;
+                    case BGP_BEAT_TWINKLE: bp_twinkle += e * 1.1f; break;
+                    case BGP_BEAT_DRIFT:   bp_drift   += e * 1.0f; break;
+                    case BGP_BEAT_WAVE:    bp_wave    += e * 1.0f; break;
+                    default: break;
+                }
+            }
+        }
+        float sp_pc[29] = {
+            fx_time,
+            (float)vk_sc_extent.width, (float)vk_sc_extent.height,
+            bg_star_layer_count, bg_star_parallax,
+            bg_star_drift_x, bg_star_drift_y, bg_star_drift_speed,
+            bg_star_density, bg_star_size, bg_star_brightness,
+            bg_star_saturation, bg_star_hue, bg_star_bg_glow,
+            bg_star_twinkle_speed, bg_star_twinkle_amt,
+            bp_pulse, bp_jitter, bp_bright, bp_hue,
+            bp_zoom, bp_warp, bp_twinkle, bp_drift, bp_wave,
+            (float)bg_star_camera_mode, bg_star_swerve_amt,
+            0.0f, 0.0f
+        };
+        vkCmdPushConstants(vk_cmd_buf, vk_star_pipe_layout,
+                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                           0, sizeof(sp_pc), sp_pc);
         vkCmdDrawIndexed(vk_cmd_buf, bg_quad_end * 6, 1, 0, 0, 0);
         term_start = bg_quad_end;
     }
@@ -9563,7 +9984,6 @@ static void vkt_render_frame(void)
     vkCmdEndRenderPass(vk_cmd_buf);
     vkEndCommandBuffer(vk_cmd_buf);
 
-    /* Submit */
     VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
     VkSubmitInfo si = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
     si.waitSemaphoreCount = 1;
@@ -9575,7 +9995,6 @@ static void vkt_render_frame(void)
     si.pSignalSemaphores = &vk_sem_done;
     vkQueueSubmit(vk_queue, 1, &si, vk_fence);
 
-    /* Present */
     VkPresentInfoKHR pi = { VK_STRUCTURE_TYPE_PRESENT_INFO_KHR };
     pi.waitSemaphoreCount = 1;
     pi.pWaitSemaphores = &vk_sem_done;
@@ -10887,6 +11306,28 @@ static DWORD WINAPI vkt_autoconnect_thread(LPVOID param)
 
 /* ---- Thread ---- */
 
+/* EnumWindows callback: dismiss any MessageBox/dialog (#32770) belonging to
+ * our process by clicking IDCANCEL / WM_CLOSE. Used to kill MegaMUD's
+ * "TRC/LOG file too large, clear?" popups that race with first queueSubmit
+ * on --startvulkan. */
+static BOOL CALLBACK vkt_dismiss_dialog_cb(HWND hwnd, LPARAM lp)
+{
+    DWORD target_pid = (DWORD)lp;
+    DWORD wnd_pid = 0;
+    GetWindowThreadProcessId(hwnd, &wnd_pid);
+    if (wnd_pid != target_pid) return TRUE;
+    char cls[32] = {0};
+    GetClassNameA(hwnd, cls, sizeof(cls));
+    /* #32770 is the standard Win32 dialog class (MessageBox, DialogBox, etc.) */
+    if (strcmp(cls, "#32770") != 0) return TRUE;
+    if (!IsWindowVisible(hwnd)) return TRUE;
+    if (api) api->log("[vk_terminal] Dismissing MegaMUD dialog hwnd=0x%p\n", hwnd);
+    /* IDCANCEL = 2. Standard Win32 "No"/"Cancel" / Escape equivalent. */
+    PostMessageA(hwnd, WM_COMMAND, 2 /*IDCANCEL*/, 0);
+    PostMessageA(hwnd, WM_CLOSE, 0, 0);
+    return TRUE;
+}
+
 static DWORD WINAPI vkt_thread(LPVOID param)
 {
     HINSTANCE hInst = (HINSTANCE)param;
@@ -10894,16 +11335,15 @@ static DWORD WINAPI vkt_thread(LPVOID param)
     /* Wine DPI is set to 192 in DllMain so MegaMUD's Win32 UI scales properly.
      * With KDE "Apply scaling themselves", XWayland gives us full 4K. */
 
-    /* --startvulkan: hide MegaMUD ASAP, before waiting for MMANSI */
+    /* --startvulkan: find MMMAIN but DON'T hide it yet — hiding it too early
+     * causes the app to exit silently on Win11 (MegaMUD appears to treat
+     * early-hidden main window as a quit signal). We hide it later once the
+     * Vulkan fullscreen window is up and ready to take over. */
     if (vkt_visible) {
         for (int i = 0; i < 200 && !mmmain_hwnd; i++) {
             HWND mw = FindWindowA("MMMAIN", NULL);
-            if (mw) {
-                mmmain_hwnd = mw;
-                ShowWindow(mw, SW_HIDE);
-                megamud_hidden = 1;
-            }
-            if (!mmmain_hwnd) Sleep(50);
+            if (mw) { mmmain_hwnd = mw; break; }
+            Sleep(50);
         }
     }
 
@@ -10911,6 +11351,14 @@ static DWORD WINAPI vkt_thread(LPVOID param)
     #define SPLASH_PROGRESS(pct, msg) do { \
         SetEnvironmentVariableA("SLOP_LOAD_PROGRESS", #pct); \
         SetEnvironmentVariableA("SLOP_LOAD_STATUS", msg); \
+    } while(0)
+
+    /* Dismiss any MegaMUD startup dialogs (e.g. "TRC/LOG file too large, clear?")
+     * that appear during --startvulkan. They grab message queue focus and race
+     * with our first Vulkan queueSubmit, killing the process silently. */
+    #define DISMISS_MEGAMUD_DIALOGS() do { \
+        DWORD my_pid = GetCurrentProcessId(); \
+        EnumWindows(vkt_dismiss_dialog_cb, (LPARAM)my_pid); \
     } while(0)
 
     SPLASH_PROGRESS(5, "Waiting for MegaMUD...");
@@ -10923,30 +11371,30 @@ static DWORD WINAPI vkt_thread(LPVOID param)
         }
         if (mmmain_hwnd)
             mmansi_hwnd = FindWindowExA(mmmain_hwnd, NULL, "MMANSI", NULL);
+        /* Dismiss any MegaMUD startup dialogs that block further init */
+        if (vkt_visible && (i % 5) == 0) DISMISS_MEGAMUD_DIALOGS();
         if (!mmansi_hwnd) Sleep(100);
     }
     if (!mmansi_hwnd) { api->log("[vk_terminal] MMANSI not found\n"); return 1; }
 
-    SPLASH_PROGRESS(15, "Creating Vulkan instance...");
-
-    /* Init Vulkan (instance, device, etc.) */
-    if (vkt_init_vulkan() != 0) return 1;
-
-    SPLASH_PROGRESS(40, "Loading font textures...");
-    if (vkt_create_font_texture() != 0) return 1;
-
-    SPLASH_PROGRESS(55, "Creating buffers...");
-    if (vkt_create_buffers() != 0) return 1;
-
-    SPLASH_PROGRESS(65, "Creating descriptors...");
-    if (vkt_create_descriptors() != 0) return 1;
-
-    SPLASH_PROGRESS(75, "Initializing fonts...");
-    vkt_init_ui_font();
-    vkt_init_vft_font(0);
-
-    SPLASH_PROGRESS(85, "Loading icon atlas...");
-    vib_init_icon_atlas();
+    /* Vulkan/font/buffer/descriptor/icon init already ran on main thread in vkt_init.
+     * Kept here as a fallback in case vkt_mt_init_done was not set (e.g. early error). */
+    if (!vkt_mt_init_done) {
+        SPLASH_PROGRESS(15, "Creating Vulkan instance...");
+        if (vkt_init_vulkan() != 0) return 1;
+        SPLASH_PROGRESS(40, "Loading font textures...");
+        if (vkt_create_font_texture() != 0) return 1;
+        SetEnvironmentVariableA("SLOP_LOAD_PROGRESS", "55");
+        SetEnvironmentVariableA("SLOP_LOAD_STATUS", "Creating buffers...");
+        if (vkt_create_buffers() != 0) return 1;
+        SPLASH_PROGRESS(65, "Creating descriptors...");
+        if (vkt_create_descriptors() != 0) return 1;
+        SPLASH_PROGRESS(75, "Initializing fonts...");
+        vkt_init_ui_font();
+        vkt_init_vft_font(0);
+        SPLASH_PROGRESS(85, "Loading icon atlas...");
+        vib_init_icon_atlas();
+    }
 
     SPLASH_PROGRESS(95, "Starting terminal...");
 
@@ -10964,6 +11412,7 @@ static DWORD WINAPI vkt_thread(LPVOID param)
     vkt_running = 1;
     SPLASH_PROGRESS(100, "Ready!");
     api->log("[vk_terminal] Ready (F11 to toggle fullscreen)\n");
+
 
     /* --autoconnect/--loop: run in background so Vulkan window opens immediately */
     if (vkt_autoconnect) {
@@ -11081,6 +11530,22 @@ static DWORD WINAPI vkt_thread(LPVOID param)
             api->log("[vk_terminal] Fullscreen %dx%d\n", fs_width, fs_height);
             mouse_update_scale((int)vk_sc_extent.width, (int)vk_sc_extent.height);
 
+            /* Post-create settle: pump messages + dismiss MegaMUD popups for
+             * ~2s before the first render submit. The "TRC/LOG file too large,
+             * clear?" dialog in particular races with first queueSubmit and
+             * silently terminates the process on Win11+lavapipe. */
+            for (int s = 0; s < 80; s++) {
+                MSG m2;
+                while (PeekMessageA(&m2, NULL, 0, 0, PM_REMOVE)) {
+                    if (m2.message == WM_QUIT) { vkt_running = 0; break; }
+                    TranslateMessage(&m2);
+                    DispatchMessageA(&m2);
+                }
+                if (!vkt_running) break;
+                /* Scan for and dismiss any MegaMUD dialog popups every ~100ms */
+                if ((s % 4) == 0) DISMISS_MEGAMUD_DIALOGS();
+                Sleep(25);
+            }
         }
 
         /* Process messages */
@@ -11338,7 +11803,12 @@ static void pst_emit_recap(void) {
         buf[sizeof(buf) - 1] = 0;
 
         char inject[280];
-        _snprintf(inject, sizeof(inject), "\r\n%s\r\n", buf);
+        /* No leading CRLF — combat swings from MegaMUD always end with CRLF,
+         * so cursor is already at col 0. Adding another CRLF inserts a blank
+         * line that shows up as an extra empty slat in SpaceWarZ crawl mode.
+         * Use bare \r + clear-to-EOL as a belt-and-suspenders guard in case
+         * we ever get injected mid-line. */
+        _snprintf(inject, sizeof(inject), "\r\x1b[K%s\r\n", buf);
         inject[sizeof(inject) - 1] = 0;
         EnterCriticalSection(&ansi_lock);
         ap_feed(&ansi_term, (const uint8_t *)inject, (int)strlen(inject));
@@ -14496,26 +14966,334 @@ static void bgp_draw(int vp_w, int vp_h) {
 }
 
 /* ---- Starfield tab ----
- * Real content (sliders for speed, size, brightness, layers, comets, etc.)
- * is populated after the starfield pipeline lands. Until then, show a
- * placeholder message so the tab isn't blank. */
-static int bgp_starfield_total_rows(void) { return 1; }
+ * Sliders mirror plasma's layout pattern. Per-band beat dropdowns use the
+ * shared BGP_BEAT_* enum. Rows route through the same virtual-scroll. */
+
+#define STAR_SLIDER_COUNT 14
+static const char *bg_star_labels[STAR_SLIDER_COUNT] = {
+    "Swerve",
+    "Drift X", "Drift Y", "Drift Speed",
+    "Parallax", "Layers",
+    "Density", "Star Size", "Brightness",
+    "Saturation", "Hue", "Sky Glow",
+    "Twinkle Speed", "Twinkle Amt"
+};
+static float bg_star_slider_min[STAR_SLIDER_COUNT] = {
+    0.0f,
+    -0.10f, -0.10f, 0.0f,
+    0.40f, 2.0f,
+    0.20f, 0.15f, 0.0f,        /* Star Size min = 0.15 (can go tiny) */
+    0.0f, 0.0f, 0.0f,
+    0.0f, 0.0f
+};
+static float bg_star_slider_max[STAR_SLIDER_COUNT] = {
+    1.0f,
+    0.10f, 0.10f, 3.0f,
+    0.95f, 8.0f,
+    1.0f, 1.3f, 2.0f,          /* Star Size max = 1.3 (no giants) */
+    2.0f, 360.0f, 1.0f,
+    5.0f, 1.0f
+};
+static float *bg_star_slider_ptr[STAR_SLIDER_COUNT];
+
+/* Virtual rows: [camera section hdr, camera dropdown], sliders, [beat hdr, 4 dds], [defaults hdr, reset btn] */
+#define STAR_TOTAL_ROWS (STAR_SLIDER_COUNT + 9)
+
+static int bgp_starfield_total_rows(void) { return STAR_TOTAL_ROWS; }
+
+/* Helpers shared w/ plasma path */
+static int star_hit_slider(int mx, int my, float *out_pct);
+static int star_hit_dropdown(int mx, int my);
+static int star_hit_defaults_button(int mx, int my);
+static void star_reset_defaults(void);
+
 static void bgp_draw_starfield_tab(float x0, float content_top, float content_bot,
                                    float pw, float sb_w, int vp_w, int vp_h,
                                    const ui_theme_t *t, int cw, int ch)
 {
-    (void)content_bot; (void)sb_w;
-    const char *line1 = "Parallax Starfield";
-    const char *line2 = "(pipeline + controls coming online)";
-    int l1 = (int)strlen(line1), l2 = (int)strlen(line2);
-    int tx1 = (int)(x0 + (pw - l1 * cw) * 0.5f);
-    int tx2 = (int)(x0 + (pw - l2 * cw) * 0.5f);
-    int ty  = (int)(content_top + 20);
-    push_text(tx1, ty, line1,
-              t->accent[0], t->accent[1], t->accent[2], vp_w, vp_h, cw, ch);
-    push_text(tx2, ty + ch + 4, line2,
-              t->text[0] * 0.6f, t->text[1] * 0.6f, t->text[2] * 0.6f,
-              vp_w, vp_h, cw, ch);
+    bg_star_slider_ptr[0]  = &bg_star_swerve_amt;
+    bg_star_slider_ptr[1]  = &bg_star_drift_x;
+    bg_star_slider_ptr[2]  = &bg_star_drift_y;
+    bg_star_slider_ptr[3]  = &bg_star_drift_speed;
+    bg_star_slider_ptr[4]  = &bg_star_parallax;
+    bg_star_slider_ptr[5]  = &bg_star_layer_count;
+    bg_star_slider_ptr[6]  = &bg_star_density;
+    bg_star_slider_ptr[7]  = &bg_star_size;
+    bg_star_slider_ptr[8]  = &bg_star_brightness;
+    bg_star_slider_ptr[9]  = &bg_star_saturation;
+    bg_star_slider_ptr[10] = &bg_star_hue;
+    bg_star_slider_ptr[11] = &bg_star_bg_glow;
+    bg_star_slider_ptr[12] = &bg_star_twinkle_speed;
+    bg_star_slider_ptr[13] = &bg_star_twinkle_amt;
+
+    float row_h = ch + 14;
+    float content_h = content_bot - content_top;
+    float slider_w = pw - 40 - sb_w;
+    int max_visible = (int)(content_h / row_h);
+    if (max_visible < 3) max_visible = 3;
+    int max_scroll = STAR_TOTAL_ROWS - max_visible;
+    if (max_scroll < 0) max_scroll = 0;
+    if (bgp_scroll > max_scroll) bgp_scroll = max_scroll;
+    if (bgp_scroll < 0) bgp_scroll = 0;
+
+    float cy = content_top + 4;
+    int drawn = 0;
+    int vrow = 0;
+    char vbuf[32];
+
+    #define STAR_VIS (vrow >= bgp_scroll && drawn < max_visible)
+    #define STAR_NEXT do { if (STAR_VIS) { cy += row_h; drawn++; } vrow++; } while(0)
+
+    /* --- Camera section header --- */
+    if (STAR_VIS) {
+        push_solid((int)(x0 + 20), (int)(cy + row_h * 0.3f),
+                   (int)(x0 + pw - sb_w - 20), (int)(cy + row_h * 0.35f),
+                   t->accent[0], t->accent[1], t->accent[2], 0.3f, vp_w, vp_h);
+        push_text((int)(x0 + 20), (int)(cy + 2), "Camera",
+                  t->accent[0], t->accent[1], t->accent[2], vp_w, vp_h, cw, ch);
+    }
+    STAR_NEXT;
+
+    /* --- Camera mode dropdown --- */
+    if (STAR_VIS) {
+        push_text((int)(x0 + 20), (int)(cy + 2), "Mode:",
+                  t->text[0], t->text[1], t->text[2], vp_w, vp_h, cw, ch);
+        int dd_x = (int)(x0 + 20 + 11 * cw);
+        int dd_w = (int)(slider_w - 11 * cw - 2);
+        int dd_y = (int)cy;
+        int dd_h = ch + 4;
+        push_solid(dd_x, dd_y, dd_x + dd_w, dd_y + dd_h,
+                   t->bg[0] + 0.05f, t->bg[1] + 0.05f, t->bg[2] + 0.05f, 0.9f, vp_w, vp_h);
+        push_solid(dd_x, dd_y, dd_x + dd_w, dd_y + 1,
+                   1.0f, 1.0f, 1.0f, 0.08f, vp_w, vp_h);
+        push_solid(dd_x, dd_y + dd_h - 1, dd_x + dd_w, dd_y + dd_h,
+                   0.0f, 0.0f, 0.0f, 0.15f, vp_w, vp_h);
+        int mm = bg_star_camera_mode;
+        if (mm < 0 || mm >= BG_STAR_MODE_COUNT) mm = 0;
+        push_text(dd_x + 4, dd_y + 2, bg_star_mode_names[mm],
+                  t->accent[0], t->accent[1], t->accent[2], vp_w, vp_h, cw, ch);
+        push_text(dd_x + dd_w - cw - 2, dd_y + 2, "\x1F",
+                  t->text[0] * 0.5f, t->text[1] * 0.5f, t->text[2] * 0.5f, vp_w, vp_h, cw, ch);
+    }
+    STAR_NEXT;
+
+    /* --- Sliders --- */
+    for (int i = 0; i < STAR_SLIDER_COUNT; i++) {
+        if (STAR_VIS) {
+            float val = *bg_star_slider_ptr[i];
+            if (i == 10)        /* Hue degrees (was 9, +1 for Swerve) */
+                _snprintf(vbuf, sizeof(vbuf), "%.0f\xF8", val);
+            else if (i == 5)    /* Layers integer-ish (was 4, +1 for Swerve) */
+                _snprintf(vbuf, sizeof(vbuf), "%.0f", val);
+            else
+                _snprintf(vbuf, sizeof(vbuf), "%.2f", val);
+            clr_draw_slider(x0 + 20, cy, slider_w, row_h, val,
+                            bg_star_slider_min[i], bg_star_slider_max[i],
+                            bg_star_labels[i], vbuf, vp_w, vp_h, t);
+        }
+        STAR_NEXT;
+    }
+
+    /* --- Beat Response section header --- */
+    if (STAR_VIS) {
+        push_solid((int)(x0 + 20), (int)(cy + row_h * 0.3f),
+                   (int)(x0 + pw - sb_w - 20), (int)(cy + row_h * 0.35f),
+                   t->accent[0], t->accent[1], t->accent[2], 0.3f, vp_w, vp_h);
+        push_text((int)(x0 + 20), (int)(cy + 2), "Beat Response",
+                  t->accent[0], t->accent[1], t->accent[2], vp_w, vp_h, cw, ch);
+    }
+    STAR_NEXT;
+
+    /* --- Beat dropdowns --- */
+    {
+        struct { const char *label; int *val; } beats[4] = {
+            { "Bass/Kick:", &bg_star_beat_bass },
+            { "Mid:",       &bg_star_beat_mid },
+            { "Treble:",    &bg_star_beat_treble },
+            { "RMS:",       &bg_star_beat_rms }
+        };
+        for (int b = 0; b < 4; b++) {
+            if (STAR_VIS) {
+                push_text((int)(x0 + 20), (int)(cy + 2), beats[b].label,
+                          t->text[0], t->text[1], t->text[2], vp_w, vp_h, cw, ch);
+                int dd_x = (int)(x0 + 20 + 11 * cw);
+                int dd_w = (int)(slider_w - 11 * cw - 2);
+                int dd_y = (int)cy;
+                int dd_h = ch + 4;
+                push_solid(dd_x, dd_y, dd_x + dd_w, dd_y + dd_h,
+                           t->bg[0] + 0.05f, t->bg[1] + 0.05f, t->bg[2] + 0.05f, 0.9f, vp_w, vp_h);
+                push_solid(dd_x, dd_y, dd_x + dd_w, dd_y + 1,
+                           1.0f, 1.0f, 1.0f, 0.08f, vp_w, vp_h);
+                push_solid(dd_x, dd_y + dd_h - 1, dd_x + dd_w, dd_y + dd_h,
+                           0.0f, 0.0f, 0.0f, 0.15f, vp_w, vp_h);
+                int mode = *beats[b].val;
+                if (mode < 0 || mode >= BGP_BEAT_COUNT) mode = 0;
+                push_text(dd_x + 4, dd_y + 2, bgp_beat_names[mode],
+                          t->accent[0], t->accent[1], t->accent[2], vp_w, vp_h, cw, ch);
+                push_text(dd_x + dd_w - cw - 2, dd_y + 2, "\x1F",
+                          t->text[0] * 0.5f, t->text[1] * 0.5f, t->text[2] * 0.5f, vp_w, vp_h, cw, ch);
+            }
+            STAR_NEXT;
+        }
+    }
+
+    /* --- Defaults section header --- */
+    if (STAR_VIS) {
+        push_solid((int)(x0 + 20), (int)(cy + row_h * 0.3f),
+                   (int)(x0 + pw - sb_w - 20), (int)(cy + row_h * 0.35f),
+                   t->accent[0], t->accent[1], t->accent[2], 0.3f, vp_w, vp_h);
+        push_text((int)(x0 + 20), (int)(cy + 2), "Defaults",
+                  t->accent[0], t->accent[1], t->accent[2], vp_w, vp_h, cw, ch);
+    }
+    STAR_NEXT;
+
+    /* --- Reset button --- */
+    if (STAR_VIS) {
+        const char *btn = "[ Reset to Defaults ]";
+        int blen = (int)strlen(btn);
+        int bw = blen * cw + 16;
+        int bx = (int)(x0 + (pw - sb_w - bw) * 0.5f);
+        int by = (int)cy;
+        int bh = ch + 6;
+        push_solid(bx, by, bx + bw, by + bh,
+                   t->bg[0] + 0.08f, t->bg[1] + 0.08f, t->bg[2] + 0.08f, 0.9f, vp_w, vp_h);
+        push_solid(bx, by, bx + bw, by + 1, 1.0f, 1.0f, 1.0f, 0.15f, vp_w, vp_h);
+        push_solid(bx, by + bh - 1, bx + bw, by + bh, 0.0f, 0.0f, 0.0f, 0.25f, vp_w, vp_h);
+        push_solid(bx, by, bx + 1, by + bh,
+                   t->accent[0], t->accent[1], t->accent[2], 0.5f, vp_w, vp_h);
+        push_solid(bx + bw - 1, by, bx + bw, by + bh,
+                   t->accent[0], t->accent[1], t->accent[2], 0.5f, vp_w, vp_h);
+        push_text(bx + 8, by + 3, btn,
+                  t->text[0], t->text[1], t->text[2], vp_w, vp_h, cw, ch);
+    }
+    STAR_NEXT;
+
+    #undef STAR_VIS
+    #undef STAR_NEXT
+
+    /* Scrollbar */
+    {
+        float sb_x0 = x0 + pw - sb_w - 2;
+        push_solid((int)sb_x0, (int)content_top, (int)(sb_x0 + sb_w), (int)content_bot,
+                   0.0f, 0.0f, 0.0f, 0.15f, vp_w, vp_h);
+        if (max_scroll > 0) {
+            float track_h = content_bot - content_top;
+            float thumb_frac = (float)max_visible / (float)STAR_TOTAL_ROWS;
+            float thumb_h = track_h * thumb_frac;
+            if (thumb_h < 16.0f) thumb_h = 16.0f;
+            float thumb_pos = ((float)bgp_scroll / (float)max_scroll) * (track_h - thumb_h);
+            float ty0 = content_top + thumb_pos;
+            float ty1 = ty0 + thumb_h;
+            push_solid((int)(sb_x0 + 1), (int)ty0, (int)(sb_x0 + sb_w - 1), (int)ty1,
+                       t->accent[0], t->accent[1], t->accent[2], 0.4f, vp_w, vp_h);
+            push_solid((int)(sb_x0 + 1), (int)ty0, (int)(sb_x0 + sb_w - 1), (int)(ty0 + 1),
+                       1.0f, 1.0f, 1.0f, 0.1f, vp_w, vp_h);
+        }
+    }
+}
+
+/* Starfield-tab hit tests
+ * Layout: row 0 = camera hdr, row 1 = camera dropdown,
+ *         rows 2..STAR_SLIDER_COUNT+1 = sliders,
+ *         row +2 = beat hdr, +3..+6 = beat dropdowns,
+ *         row +7 = defaults hdr, row +8 = reset button */
+#define STAR_SLIDER_BASE_ROW      2
+#define STAR_BEAT_DD_BASE_ROW     (STAR_SLIDER_COUNT + STAR_SLIDER_BASE_ROW + 1)
+#define STAR_DEFAULTS_BTN_ROW     (STAR_SLIDER_COUNT + STAR_SLIDER_BASE_ROW + 6)
+#define STAR_CAMERA_DD_ROW        1
+
+static int star_hit_slider(int mx, int my, float *out_pct) {
+    if (bgp_tab != BGP_TAB_STARFIELD) return -1;
+    int cw = (int)(VKM_CHAR_W * ui_scale), ch = (int)(VKM_CHAR_H * ui_scale);
+    int titlebar_h = ch + 10;
+    int tab_bar_h = ch + 10;
+    float row_h = ch + 14;
+    float sb_w = 10.0f;
+    float slider_w = bgp_w - 40 - sb_w;
+    float sx0 = bgp_x + 20 + (float)(12 * cw);
+    float sx1 = bgp_x + 20 + slider_w - (float)(7 * cw) + 8;
+    float content_top = bgp_y + titlebar_h + tab_bar_h + 4;
+    for (int i = 0; i < STAR_SLIDER_COUNT; i++) {
+        int vrow = STAR_SLIDER_BASE_ROW + i - bgp_scroll;
+        if (vrow < 0) continue;
+        float sy = content_top + 4 + vrow * row_h;
+        if (my >= (int)sy && my < (int)(sy + row_h) &&
+            mx >= (int)(sx0 - 4) && mx <= (int)(sx1 + 4)) {
+            float pct = ((float)mx - sx0) / (sx1 - sx0);
+            if (pct < 0) pct = 0; if (pct > 1) pct = 1;
+            *out_pct = pct;
+            return i;
+        }
+    }
+    return -1;
+}
+
+/* Returns -1 none, 0..3 for bass/mid/treble/rms beat dropdowns,
+ * 100 for the camera mode dropdown. */
+static int star_hit_dropdown(int mx, int my) {
+    if (bgp_tab != BGP_TAB_STARFIELD) return -1;
+    int cw = (int)(VKM_CHAR_W * ui_scale), ch = (int)(VKM_CHAR_H * ui_scale);
+    int titlebar_h = ch + 10;
+    int tab_bar_h = ch + 10;
+    float row_h = ch + 14;
+    float sb_w = 10.0f;
+    float slider_w = bgp_w - 40 - sb_w;
+    float content_top = bgp_y + titlebar_h + tab_bar_h + 4;
+    int dd_x = (int)(bgp_x + 20 + 11 * cw);
+    int dd_w = (int)(slider_w - 11 * cw - 2);
+    if (mx < dd_x || mx >= dd_x + dd_w) return -1;
+
+    /* Camera mode dropdown */
+    {
+        int vrow = STAR_CAMERA_DD_ROW - bgp_scroll;
+        if (vrow >= 0) {
+            float ry = content_top + 4 + vrow * row_h;
+            if (my >= (int)ry && my < (int)(ry + row_h)) return 100;
+        }
+    }
+    /* Beat dropdowns */
+    for (int b = 0; b < 4; b++) {
+        int vrow = STAR_BEAT_DD_BASE_ROW + b - bgp_scroll;
+        if (vrow < 0) continue;
+        float ry = content_top + 4 + vrow * row_h;
+        if (my >= (int)ry && my < (int)(ry + row_h)) return b;
+    }
+    return -1;
+}
+
+static int star_hit_defaults_button(int mx, int my) {
+    if (bgp_tab != BGP_TAB_STARFIELD) return 0;
+    int cw = (int)(VKM_CHAR_W * ui_scale), ch = (int)(VKM_CHAR_H * ui_scale);
+    int titlebar_h = ch + 10;
+    int tab_bar_h = ch + 10;
+    float row_h = ch + 14;
+    float sb_w = 10.0f;
+    float content_top = bgp_y + titlebar_h + tab_bar_h + 4;
+    int vrow = STAR_DEFAULTS_BTN_ROW - bgp_scroll;
+    if (vrow < 0) return 0;
+    float ry = content_top + 4 + vrow * row_h;
+    const char *btn = "[ Reset to Defaults ]";
+    int blen = (int)strlen(btn);
+    int bw = blen * cw + 16;
+    int bx = (int)(bgp_x + (bgp_w - sb_w - bw) * 0.5f);
+    int bh = ch + 6;
+    return (mx >= bx && mx < bx + bw && my >= (int)ry && my < (int)ry + bh);
+}
+
+static void star_reset_defaults(void) {
+    bg_star_camera_mode = BG_STAR_MODE_WARP;
+    bg_star_swerve_amt = 0.35f;
+    bg_star_drift_x = 0.0f; bg_star_drift_y = 0.0f;
+    bg_star_drift_speed = 1.0f;
+    bg_star_parallax = 0.62f; bg_star_layer_count = 8.0f;
+    bg_star_density = 1.0f; bg_star_size = 1.0f;
+    bg_star_brightness = 1.0f; bg_star_saturation = 1.0f;
+    bg_star_hue = 0.0f; bg_star_bg_glow = 0.35f;
+    bg_star_twinkle_speed = 1.2f; bg_star_twinkle_amt = 0.55f;
+    bg_star_beat_bass = BGP_BEAT_PULSE;
+    bg_star_beat_mid = BGP_BEAT_TWINKLE;
+    bg_star_beat_treble = BGP_BEAT_JITTER;
+    bg_star_beat_rms = BGP_BEAT_BRIGHT;
 }
 
 static int bgp_hit_slider(int mx, int my, float *out_pct) {
@@ -14695,12 +15473,46 @@ static int bgp_mouse_down(int mx, int my) {
         }
         return 1;
     }
-    /* Reset-to-Defaults button (must precede slider/dropdown hits) */
+    /* Reset-to-Defaults button (plasma or starfield, tab-aware) */
     if (bgp_hit_defaults_button(mx, my)) {
         bgp_reset_current_tab_defaults();
         return 1;
     }
-    /* Slider click */
+    if (star_hit_defaults_button(mx, my)) {
+        star_reset_defaults();
+        return 1;
+    }
+    /* Starfield tab: its own slider + dropdown hit paths */
+    if (bgp_tab == BGP_TAB_STARFIELD) {
+        float spct;
+        int ss = star_hit_slider(mx, my, &spct);
+        if (ss >= 0) {
+            /* Active slider index space is shared with plasma — use high bits
+             * to distinguish: STAR starts at 100. */
+            bgp_active_slider = 100 + ss;
+            float val = bg_star_slider_min[ss] + spct *
+                        (bg_star_slider_max[ss] - bg_star_slider_min[ss]);
+            *bg_star_slider_ptr[ss] = val;
+            return 1;
+        }
+        int sdd = star_hit_dropdown(mx, my);
+        if (sdd >= 0) {
+            if (sdd == 100) {
+                /* Camera mode dropdown — cycle through modes */
+                bg_star_camera_mode = (bg_star_camera_mode + 1) % BG_STAR_MODE_COUNT;
+            } else {
+                int *val = NULL;
+                if (sdd == 0) val = &bg_star_beat_bass;
+                else if (sdd == 1) val = &bg_star_beat_mid;
+                else if (sdd == 2) val = &bg_star_beat_treble;
+                else if (sdd == 3) val = &bg_star_beat_rms;
+                if (val) *val = (*val + 1) % BGP_BEAT_COUNT;
+            }
+            return 1;
+        }
+        return 1;
+    }
+    /* Slider click (plasma tab) */
     float pct;
     int s = bgp_hit_slider(mx, my, &pct);
     if (s >= 0) {
@@ -14755,7 +15567,14 @@ static void bgp_mouse_move(int mx, int my) {
         float sx1 = bgp_x + 20 + slider_w - (float)(7 * cw) + 8;
         float pct = ((float)mx - sx0) / (sx1 - sx0);
         if (pct < 0) pct = 0; if (pct > 1) pct = 1;
-        bgp_set_from_pct(bgp_active_slider, pct);
+        if (bgp_active_slider >= 100 && bgp_active_slider < 100 + STAR_SLIDER_COUNT) {
+            int si = bgp_active_slider - 100;
+            float val = bg_star_slider_min[si] + pct *
+                        (bg_star_slider_max[si] - bg_star_slider_min[si]);
+            *bg_star_slider_ptr[si] = val;
+        } else {
+            bgp_set_from_pct(bgp_active_slider, pct);
+        }
     }
 }
 
@@ -15830,6 +16649,26 @@ static void vkt_save_settings(void)
     SAVE_INT("bgp_tab", bgp_tab);
     SAVE_INT("bgp_x", (int)bgp_x); SAVE_INT("bgp_y", (int)bgp_y);
     SAVE_INT("bgp_w", (int)bgp_w); SAVE_INT("bgp_h", (int)bgp_h);
+    /* Parallax Starfield */
+    SAVE_INT("star_camera_mode", bg_star_camera_mode);
+    SAVE_FLOAT("star_swerve", bg_star_swerve_amt);
+    SAVE_FLOAT("star_drift_x", bg_star_drift_x);
+    SAVE_FLOAT("star_drift_y", bg_star_drift_y);
+    SAVE_FLOAT("star_drift_speed", bg_star_drift_speed);
+    SAVE_FLOAT("star_parallax", bg_star_parallax);
+    SAVE_FLOAT("star_layers", bg_star_layer_count);
+    SAVE_FLOAT("star_density", bg_star_density);
+    SAVE_FLOAT("star_size", bg_star_size);
+    SAVE_FLOAT("star_bright", bg_star_brightness);
+    SAVE_FLOAT("star_sat", bg_star_saturation);
+    SAVE_FLOAT("star_hue", bg_star_hue);
+    SAVE_FLOAT("star_bg_glow", bg_star_bg_glow);
+    SAVE_FLOAT("star_twinkle_speed", bg_star_twinkle_speed);
+    SAVE_FLOAT("star_twinkle_amt", bg_star_twinkle_amt);
+    SAVE_INT("star_beat_bass", bg_star_beat_bass);
+    SAVE_INT("star_beat_mid", bg_star_beat_mid);
+    SAVE_INT("star_beat_treb", bg_star_beat_treble);
+    SAVE_INT("star_beat_rms", bg_star_beat_rms);
     /* Display / HDR */
     SAVE_INT("hdr_enabled", hdr_enabled);
     SAVE_INT("vk_vsync", vk_vsync);
@@ -15947,6 +16786,28 @@ static void vkt_load_settings(void)
     if (bgp_tab < 0 || bgp_tab >= BGP_TAB_COUNT) bgp_tab = 0;
     if (bgp_w < BGP_MIN_W) bgp_w = BGP_MIN_W;
     if (bgp_h < BGP_MIN_H) bgp_h = BGP_MIN_H;
+    /* Parallax Starfield */
+    LOAD_INT("star_camera_mode", bg_star_camera_mode, BG_STAR_MODE_WARP);
+    if (bg_star_camera_mode < 0 || bg_star_camera_mode >= BG_STAR_MODE_COUNT)
+        bg_star_camera_mode = BG_STAR_MODE_WARP;
+    LOAD_FLOAT("star_swerve", bg_star_swerve_amt, 0.35);
+    LOAD_FLOAT("star_drift_x", bg_star_drift_x, 0.0);
+    LOAD_FLOAT("star_drift_y", bg_star_drift_y, 0.0);
+    LOAD_FLOAT("star_drift_speed", bg_star_drift_speed, 1.0);
+    LOAD_FLOAT("star_parallax", bg_star_parallax, 0.62);
+    LOAD_FLOAT("star_layers", bg_star_layer_count, 8.0);
+    LOAD_FLOAT("star_density", bg_star_density, 1.0);
+    LOAD_FLOAT("star_size", bg_star_size, 1.0);
+    LOAD_FLOAT("star_bright", bg_star_brightness, 1.0);
+    LOAD_FLOAT("star_sat", bg_star_saturation, 1.0);
+    LOAD_FLOAT("star_hue", bg_star_hue, 0.0);
+    LOAD_FLOAT("star_bg_glow", bg_star_bg_glow, 0.35);
+    LOAD_FLOAT("star_twinkle_speed", bg_star_twinkle_speed, 1.2);
+    LOAD_FLOAT("star_twinkle_amt", bg_star_twinkle_amt, 0.55);
+    LOAD_INT("star_beat_bass", bg_star_beat_bass, BGP_BEAT_PULSE);
+    LOAD_INT("star_beat_mid", bg_star_beat_mid, BGP_BEAT_TWINKLE);
+    LOAD_INT("star_beat_treb", bg_star_beat_treble, BGP_BEAT_JITTER);
+    LOAD_INT("star_beat_rms", bg_star_beat_rms, BGP_BEAT_BRIGHT);
     /* Display / HDR */
     LOAD_INT("hdr_enabled", hdr_enabled, 0);
     LOAD_INT("vk_vsync", vk_vsync, 1);
@@ -16093,6 +16954,44 @@ static int vkt_init(const slop_api_t *a)
             if (!vkt_autoconnect)
                 vkt_autoconnect = 2; /* 2 = scripts-only, don't auto-connect */
         }
+    }
+
+    /* Run all Vulkan/font/buffer/descriptor/icon init synchronously on the
+     * main thread while the plugin loader is blocked. Doing this in the
+     * worker thread (where it used to run) races with autoroam/mmudpy/
+     * script_manager/TTS_SAM init and with megamud's own startup, which
+     * corrupted megamud's heap non-deterministically on native Win11.
+     * vk_starfield.exe (standalone, main-thread everything) is rock solid
+     * on the same lavapipe driver, which pointed at thread-ordering as
+     * the real culprit, not Vulkan itself. */
+    SetEnvironmentVariableA("SLOP_LOAD_PROGRESS", "15");
+    SetEnvironmentVariableA("SLOP_LOAD_STATUS", "Creating Vulkan instance...");
+    if (vkt_init_vulkan() == 0) {
+        SetEnvironmentVariableA("SLOP_LOAD_PROGRESS", "40");
+        SetEnvironmentVariableA("SLOP_LOAD_STATUS", "Loading font textures...");
+        if (vkt_create_font_texture() == 0) {
+            SetEnvironmentVariableA("SLOP_LOAD_PROGRESS", "55");
+            SetEnvironmentVariableA("SLOP_LOAD_STATUS", "Creating buffers...");
+            if (vkt_create_buffers() == 0) {
+                SetEnvironmentVariableA("SLOP_LOAD_PROGRESS", "65");
+                SetEnvironmentVariableA("SLOP_LOAD_STATUS", "Creating descriptors...");
+                if (vkt_create_descriptors() == 0) {
+                    SetEnvironmentVariableA("SLOP_LOAD_PROGRESS", "75");
+                    SetEnvironmentVariableA("SLOP_LOAD_STATUS", "Initializing fonts...");
+                    vkt_init_ui_font();
+                    vkt_init_vft_font(0);
+                    SetEnvironmentVariableA("SLOP_LOAD_PROGRESS", "85");
+                    SetEnvironmentVariableA("SLOP_LOAD_STATUS", "Loading icon atlas...");
+                    vib_init_icon_atlas();
+                    vkt_transition_textures_to_general();
+                    vkt_mt_init_done = 1;
+                    api->log("[vk_terminal] Main-thread Vulkan init complete\n");
+                }
+            }
+        }
+    }
+    if (!vkt_mt_init_done) {
+        api->log("[vk_terminal] Main-thread Vulkan init FAILED — worker thread will retry\n");
     }
 
     HINSTANCE hInst = GetModuleHandleA(NULL);

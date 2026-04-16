@@ -337,19 +337,21 @@ static void dsp_stereo_delay(float *in, float *out_lr, int len,
 
 static HWAVEOUT hWaveOut = NULL;
 static volatile int tts_playing = 0;
+static HANDLE tts_done_event = NULL;
+static WAVEHDR *tts_pending_hdr = NULL;
 
-static void CALLBACK wave_out_callback(HWAVEOUT hwo, UINT msg, DWORD_PTR inst,
-                                        DWORD_PTR param1, DWORD_PTR param2)
+static DWORD WINAPI tts_cleanup_thread(LPVOID param)
 {
-    (void)hwo; (void)inst; (void)param2;
-    if (msg == WOM_DONE) {
-        WAVEHDR *hdr = (WAVEHDR *)param1;
-        waveOutUnprepareHeader(hwo, hdr, sizeof(WAVEHDR));
-        free(hdr->lpData);
-        free(hdr);
-        waveOutClose(hwo);
-        tts_playing = 0;
+    (void)param;
+    WaitForSingleObject(tts_done_event, INFINITE);
+    if (hWaveOut && tts_pending_hdr) {
+        waveOutUnprepareHeader(hWaveOut, tts_pending_hdr, sizeof(WAVEHDR));
+        free(tts_pending_hdr->lpData);
+        free(tts_pending_hdr);
+        tts_pending_hdr = NULL;
     }
+    tts_playing = 0;
+    return 0;
 }
 
 /*
@@ -359,7 +361,7 @@ static void CALLBACK wave_out_callback(HWAVEOUT hwo, UINT msg, DWORD_PTR inst,
 EXPORT void tts_speak(const char *text, int pitch, int speed)
 {
     if (!text || !text[0]) return;
-    if (tts_playing) return;  /* don't overlap */
+    if (tts_playing) return;
 
     /* Prepare input for SAM reciter: uppercase + 0x9b terminator */
     unsigned char input[256];
@@ -499,23 +501,32 @@ EXPORT void tts_speak(const char *text, int pitch, int speed)
     wfx.nBlockAlign = 4;  /* 2 channels * 2 bytes */
     wfx.nAvgBytesPerSec = OUTPUT_RATE * 4;
 
-    HWAVEOUT hwo = NULL;
-    MMRESULT rv_result = waveOutOpen(&hwo, WAVE_MAPPER, &wfx,
-                               (DWORD_PTR)wave_out_callback, 0, CALLBACK_FUNCTION);
-    if (rv_result != MMSYSERR_NOERROR) {
-        if (api) api->log("[TTS_SAM] waveOutOpen failed (code %d)\n", rv_result);
-        free(pcm);
-        return;
+    if (!tts_done_event)
+        tts_done_event = CreateEventA(NULL, FALSE, FALSE, NULL);
+    else
+        ResetEvent(tts_done_event);
+
+    if (!hWaveOut) {
+        MMRESULT rv_result = waveOutOpen(&hWaveOut, WAVE_MAPPER, &wfx,
+                                   (DWORD_PTR)tts_done_event, 0, CALLBACK_EVENT);
+        if (rv_result != MMSYSERR_NOERROR) {
+            if (api) api->log("[TTS_SAM] waveOutOpen failed (code %d)\n", rv_result);
+            hWaveOut = NULL;
+            free(pcm);
+            return;
+        }
     }
 
     int byte_len = total_samples * sizeof(short);
     WAVEHDR *hdr = (WAVEHDR *)calloc(1, sizeof(WAVEHDR));
     hdr->lpData = (char *)pcm;
     hdr->dwBufferLength = byte_len;
+    tts_pending_hdr = hdr;
 
-    waveOutPrepareHeader(hwo, hdr, sizeof(WAVEHDR));
+    waveOutPrepareHeader(hWaveOut, hdr, sizeof(WAVEHDR));
     tts_playing = 1;
-    waveOutWrite(hwo, hdr, sizeof(WAVEHDR));
+    waveOutWrite(hWaveOut, hdr, sizeof(WAVEHDR));
+    CreateThread(NULL, 0, tts_cleanup_thread, NULL, 0, NULL);
 
     if (api) api->log("[TTS_SAM] Playing %d bytes stereo 16-bit (lp=%d rv=%d dl=%d)\n",
                        byte_len, lp_enabled, rv_enabled, dl_enabled);
@@ -844,8 +855,15 @@ static int sam_init(const slop_api_t *a)
 
 static void sam_shutdown(void)
 {
-    if (tts_playing && hWaveOut) {
+    if (hWaveOut) {
         waveOutReset(hWaveOut);
+        waveOutClose(hWaveOut);
+        hWaveOut = NULL;
+    }
+    tts_playing = 0;
+    if (tts_done_event) {
+        CloseHandle(tts_done_event);
+        tts_done_event = NULL;
     }
     if (api) api->log("[TTS_SAM] Unloaded\n");
 }

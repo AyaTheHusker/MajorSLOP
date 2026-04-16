@@ -38,6 +38,7 @@
 #include <string.h>
 #include <stdarg.h>
 #include <math.h>
+#include <io.h>      /* _commit, _fileno — for force-flushing log file */
 
 #include "slop_plugin.h"
 
@@ -167,12 +168,22 @@ static FILE *logfile = NULL;
 
 static void logmsg(const char *fmt, ...)
 {
-    if (!logfile) return;
+    char buf[1024];
     va_list ap;
     va_start(ap, fmt);
-    vfprintf(logfile, fmt, ap);
+    int n = vsnprintf(buf, sizeof(buf), fmt, ap);
     va_end(ap);
-    fflush(logfile);
+    if (n < 0) return;
+    if (n >= (int)sizeof(buf)) n = sizeof(buf) - 1;
+    if (logfile) {
+        fwrite(buf, 1, n, logfile);
+        fflush(logfile);
+        /* On crash-prone systems the C stdlib flush isn't enough — force the OS
+         * to commit the bytes to disk so the last log line survives a crash. */
+        _commit(_fileno(logfile));
+    }
+    /* Mirror to debugger (DebugView / VS output) for live tracing */
+    OutputDebugStringA(buf);
 }
 
 /* ---- Hex helpers ---- */
@@ -565,6 +576,7 @@ static void slop_show_about(HWND parent)
 
 /* Forward declarations */
 static volatile int rt_visible;
+static void subclass_toolbar_for_il_dedup(HWND tb);
 static void rt_show_context_menu(HWND hwnd, int x, int y);
 static void rt_show_spell_picker(HWND parent);
 static void rt_perform_manual_sync(void);
@@ -1640,7 +1652,9 @@ static LRESULT CALLBACK slop_mmmain_proc(HWND hwnd, UINT msg, WPARAM wParam, LPA
 
 static void inject_menu(HWND main_wnd)
 {
+    logmsg("[trace] inject_menu: enter hwnd=0x%08X\n", (DWORD)main_wnd);
     HMENU menu_bar = GetMenu(main_wnd);
+    logmsg("[trace] inject_menu: menu_bar=0x%08X\n", (DWORD)menu_bar);
     if (!menu_bar) {
         logmsg("[mudplugin] No menu bar found on MMMAIN\n");
         return;
@@ -1648,6 +1662,7 @@ static void inject_menu(HWND main_wnd)
 
     /* Check if we already injected (look for our menu) */
     int count = GetMenuItemCount(menu_bar);
+    logmsg("[trace] inject_menu: existing menu count=%d\n", count);
     for (int i = 0; i < count; i++) {
         char buf[64] = {0};
         GetMenuStringA(menu_bar, i, buf, sizeof(buf), MF_BYPOSITION);
@@ -1669,12 +1684,15 @@ static void inject_menu(HWND main_wnd)
     AppendMenuA(menu_bar, MF_POPUP, (UINT_PTR)slop_menu, "MegaMud+");
 
     /* Subclass to catch our menu commands (before plugin load so callbacks work) */
+    logmsg("[trace] inject_menu: subclassing MMMAIN\n");
     if (!orig_mmmain_proc) {
         orig_mmmain_proc = (WNDPROC)SetWindowLongA(main_wnd, GWL_WNDPROC, (LONG)slop_mmmain_proc);
     }
+    logmsg("[trace] inject_menu: MMMAIN subclassed, orig_proc=0x%08X\n", (DWORD)orig_mmmain_proc);
     /* Subclass MMANSI for keyboard hotkeys (F11 etc.) — keys go here, not MMMAIN */
     {
         HWND ansi = FindWindowExA(main_wnd, NULL, "MMANSI", NULL);
+        logmsg("[trace] inject_menu: MMANSI hwnd=0x%08X\n", (DWORD)ansi);
         if (ansi && !orig_mmansi_proc) {
             orig_mmansi_proc = (WNDPROC)SetWindowLongA(ansi, GWL_WNDPROC, (LONG)slop_mmansi_proc);
             logmsg("[mudplugin] MMANSI subclassed for hotkeys\n");
@@ -1687,13 +1705,18 @@ static void inject_menu(HWND main_wnd)
     logmsg("[mudplugin] MegaMud+ menu injected to menu bar\n");
 
     /* Start background threads */
+    logmsg("[trace] inject_menu: spawning background threads\n");
     CreateThread(NULL, 0, pro_step_thread, NULL, 0, NULL);
     CreateThread(NULL, 0, auto_struct_thread, NULL, 0, NULL);
     CreateThread(NULL, 0, mmansi_scanner_thread, NULL, 0, NULL);
+    logmsg("[trace] inject_menu: threads spawned\n");
 
     /* Plugin system — load plugins FIRST, then build Plugins menu */
+    logmsg("[trace] inject_menu: ensure_plugins_dir()\n");
     ensure_plugins_dir();
+    logmsg("[trace] inject_menu: load_plugins()\n");
     load_plugins();
+    logmsg("[trace] inject_menu: plugins loaded\n");
 
     /* Create "Plugins" top-level menu with per-plugin submenus */
     {
@@ -1748,6 +1771,7 @@ static void inject_menu(HWND main_wnd)
             ScreenToClient(main_wnd, &pt);
             logmsg("[mudplugin] Toolbar pos: client(%d,%d) size(%dx%d) vis=%d\n",
                    pt.x, pt.y, r.right - r.left, r.bottom - r.top, IsWindowVisible(tb));
+            subclass_toolbar_for_il_dedup(tb);
         }
         if (ansi) {
             GetWindowRect(ansi, &r);
@@ -1774,7 +1798,24 @@ static void rd_process_line(const char *line);
 
 /* FUN_0041C8D0: process incoming server data (also used by inject) */
 typedef void (__cdecl *process_incoming_fn)(int, void *, int);
-#define VA_PROCESS_INCOMING  0x0041C8D0
+
+/* ---- ASLR-safe VA resolver --------------------------------------
+ * All hardcoded VAs below are from Ghidra RE of MegaMUD.exe assuming
+ * its default PE image base 0x00400000. On Windows 11 (or any system
+ * with system-wide ASLR / mandatory ASLR), the EXE gets relocated to
+ * some other base — 0x00400000 is then garbage memory and every
+ * VirtualProtect/call goes boom. mega_va() converts a design-time VA
+ * into the runtime address by rebasing against the actual loaded
+ * MegaMUD.exe module. Every VA_* macro routes through this. */
+static DWORD mega_base_cached = 0;
+static inline DWORD mega_va(DWORD va)
+{
+    if (!mega_base_cached)
+        mega_base_cached = (DWORD)GetModuleHandleA(NULL);
+    return va - 0x00400000 + mega_base_cached;
+}
+
+#define VA_PROCESS_INCOMING  mega_va(0x0041C8D0)
 
 /* ---- Inline hook for FUN_0041C8D0 (incoming data processor) ----
  * Ghidra RE: void __cdecl FUN_0041C8D0(int struct, void *data, int len)
@@ -1812,8 +1853,15 @@ static void incoming_feed_data(const char *data, int len)
 }
 
 /* Our hook — called instead of FUN_0041C8D0 */
+static volatile int hook_0041C8D0_call_count = 0;
 static void __cdecl hooked_process_incoming(int sbase, void *data, int len)
 {
+    /* Log the first few calls so we can confirm the hook is reached cleanly */
+    if (hook_0041C8D0_call_count < 3) {
+        logmsg("[trace] hooked_process_incoming #%d sbase=0x%08X data=0x%08X len=%d\n",
+               hook_0041C8D0_call_count, (DWORD)sbase, (DWORD)data, len);
+        hook_0041C8D0_call_count++;
+    }
     /* Tap the raw ANSI data for plugins */
     if (len > 0 && data) {
         /* Raw byte stream for terminal emulators (byte-by-byte processing) */
@@ -1847,7 +1895,8 @@ static int hook_process_incoming(void)
     /* Save original 5 bytes */
     DWORD old_protect;
     if (!VirtualProtect(target, 5, PAGE_EXECUTE_READWRITE, &old_protect)) {
-        logmsg("[comhook] VirtualProtect failed on 0x%08X\n", VA_PROCESS_INCOMING);
+        logmsg("[comhook] VirtualProtect failed on runtime=0x%08X (design VA=0x0041C8D0, mega_base=0x%08X)\n",
+               (DWORD)target, mega_base_cached);
         return 0;
     }
     memcpy(orig_bytes_0041C8D0, target, 5);
@@ -2210,6 +2259,318 @@ static int hook_recv(void)
 }
 
 /* ================================================================
+ * HIMAGELIST double-free compat shim (native Win11)
+ * ================================================================
+ *
+ * megamud.exe has a latent double-free on an HIMAGELIST in its init /
+ * toolbar-recreate path — documented in MEGAMUD_RE.md under "HIMAGELIST
+ * Double-Free — Code Map". Wine's comctl32 silently tolerates it, but
+ * native Win11's comctl32 validates the "HIML" magic via `cmpxchg` and
+ * AVs if the block has been freed. Without this shim the process dies
+ * ~2–3s after launch whenever vk_terminal.dll is loaded.
+ *
+ * This shim IAT-patches COMCTL32!ImageList_Destroy. It tracks handles
+ * seen by Destroy and drops duplicate Destroys silently, mirroring Wine.
+ * Every call is logged so we can learn the actual handle-flow after the
+ * fact. Thread-safe via a CRITICAL_SECTION — destroys can come from the
+ * UI thread or comctl32 worker threads.
+ */
+
+typedef BOOL (WINAPI *imagelist_destroy_fn)(HIMAGELIST);
+static imagelist_destroy_fn real_imagelist_destroy = NULL;
+
+#define IL_SEEN_CAP 64
+static HIMAGELIST il_seen[IL_SEEN_CAP];
+static int il_seen_count = 0;
+static CRITICAL_SECTION il_seen_lock;
+static int il_seen_lock_inited = 0;
+
+static int il_seen_contains(HIMAGELIST h)
+{
+    for (int i = 0; i < il_seen_count; i++) {
+        if (il_seen[i] == h) return 1;
+    }
+    return 0;
+}
+
+/* Pre-mark a handle as freed so a subsequent ImageList_Destroy call gets
+ * deduped (skipped) by the hook. Used by the toolbar WM_DESTROY subclass:
+ * comctl32 frees the toolbar's imagelists internally on WM_DESTROY without
+ * going through the public ImageList_Destroy export, so our IAT shim never
+ * sees that first free. If the app then calls ImageList_Destroy on the
+ * same handle (as megamud does at MEGAMUD+0x889d3), comctl32's IsValid
+ * cmpxchg AVs on the freed memory. Pre-marking lets us swallow that call. */
+static void il_mark_freed(HIMAGELIST h)
+{
+    if (!h) return;
+    if (!il_seen_lock_inited) {
+        InitializeCriticalSection(&il_seen_lock);
+        il_seen_lock_inited = 1;
+    }
+    EnterCriticalSection(&il_seen_lock);
+    if (!il_seen_contains(h) && il_seen_count < IL_SEEN_CAP) {
+        il_seen[il_seen_count++] = h;
+        logmsg("[ildedup] pre-marked 0x%08X freed (toolbar WM_DESTROY)\n", (DWORD)h);
+    }
+    LeaveCriticalSection(&il_seen_lock);
+}
+
+static WNDPROC orig_toolbar_wndproc = NULL;
+
+static LRESULT CALLBACK toolbar_subclass_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+{
+    if (msg == WM_DESTROY) {
+        HIMAGELIST il_n = (HIMAGELIST)SendMessageA(hwnd, TB_GETIMAGELIST,         0, 0);
+        HIMAGELIST il_h = (HIMAGELIST)SendMessageA(hwnd, TB_GETHOTIMAGELIST,      0, 0);
+        HIMAGELIST il_d = (HIMAGELIST)SendMessageA(hwnd, TB_GETDISABLEDIMAGELIST, 0, 0);
+        il_mark_freed(il_n);
+        il_mark_freed(il_h);
+        il_mark_freed(il_d);
+    }
+    return CallWindowProcA(orig_toolbar_wndproc, hwnd, msg, wp, lp);
+}
+
+static void subclass_toolbar_for_il_dedup(HWND tb)
+{
+    if (!tb || orig_toolbar_wndproc) return;
+    LONG_PTR old = SetWindowLongPtrA(tb, GWLP_WNDPROC, (LONG_PTR)toolbar_subclass_proc);
+    if (old) {
+        orig_toolbar_wndproc = (WNDPROC)old;
+        logmsg("[ildedup] toolbar 0x%08X subclassed for WM_DESTROY pre-mark\n", (DWORD)tb);
+    } else {
+        logmsg("[ildedup] toolbar subclass FAILED on 0x%08X (err=%lu)\n",
+               (DWORD)tb, GetLastError());
+    }
+}
+
+static BOOL WINAPI hooked_imagelist_destroy(HIMAGELIST h)
+{
+    if (!h) {
+        /* comctl32 treats NULL as a no-op returning TRUE; keep Wine-compat */
+        return TRUE;
+    }
+
+    EnterCriticalSection(&il_seen_lock);
+    int already = il_seen_contains(h);
+    if (!already && il_seen_count < IL_SEEN_CAP) {
+        il_seen[il_seen_count++] = h;
+    }
+    LeaveCriticalSection(&il_seen_lock);
+
+    if (already) {
+        logmsg("[ildedup] SKIP duplicate ImageList_Destroy(0x%08X) — would crash native comctl32\n",
+               (DWORD)h);
+        return TRUE;
+    }
+
+    logmsg("[ildedup] ImageList_Destroy(0x%08X) real\n", (DWORD)h);
+    if (real_imagelist_destroy) {
+        return real_imagelist_destroy(h);
+    }
+    return FALSE;
+}
+
+/* IAT-patch COMCTL32!ImageList_Destroy in megamud.exe */
+static int hook_imagelist_destroy(void)
+{
+    if (!il_seen_lock_inited) {
+        InitializeCriticalSection(&il_seen_lock);
+        il_seen_lock_inited = 1;
+    }
+
+    HMODULE exe = GetModuleHandleA(NULL);
+    if (!exe) return 0;
+
+    IMAGE_DOS_HEADER *dos = (IMAGE_DOS_HEADER *)exe;
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE) return 0;
+    IMAGE_NT_HEADERS *nt = (IMAGE_NT_HEADERS *)((char *)exe + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE) return 0;
+
+    DWORD import_rva = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress;
+    if (!import_rva) return 0;
+
+    HMODULE comctl = GetModuleHandleA("comctl32.dll");
+    if (!comctl) comctl = LoadLibraryA("comctl32.dll");
+    FARPROC target = comctl ? GetProcAddress(comctl, "ImageList_Destroy") : NULL;
+    if (!target) {
+        logmsg("[ildedup] cannot resolve comctl32!ImageList_Destroy\n");
+        return 0;
+    }
+    real_imagelist_destroy = (imagelist_destroy_fn)target;
+
+    IMAGE_IMPORT_DESCRIPTOR *imports = (IMAGE_IMPORT_DESCRIPTOR *)((char *)exe + import_rva);
+    int patched = 0;
+    for (; imports->Name; imports++) {
+        const char *dll_name = (const char *)((char *)exe + imports->Name);
+        if (_stricmp(dll_name, "comctl32.dll") != 0) continue;
+
+        IMAGE_THUNK_DATA *thunk = (IMAGE_THUNK_DATA *)((char *)exe + imports->FirstThunk);
+        IMAGE_THUNK_DATA *orig_thunk = NULL;
+        if (imports->OriginalFirstThunk)
+            orig_thunk = (IMAGE_THUNK_DATA *)((char *)exe + imports->OriginalFirstThunk);
+
+        for (int i = 0; thunk->u1.Function; thunk++, i++) {
+            FARPROC *func_ptr = (FARPROC *)&thunk->u1.Function;
+            int match = 0;
+
+            if (orig_thunk) {
+                IMAGE_THUNK_DATA *ot = orig_thunk + i;
+                if (!(ot->u1.Ordinal & IMAGE_ORDINAL_FLAG)) {
+                    IMAGE_IMPORT_BY_NAME *name_entry =
+                        (IMAGE_IMPORT_BY_NAME *)((char *)exe + ot->u1.AddressOfData);
+                    if (strcmp((char *)name_entry->Name, "ImageList_Destroy") == 0) {
+                        match = 1;
+                    }
+                }
+            }
+            if (!match && *func_ptr == target) match = 1;
+
+            if (match) {
+                DWORD old_protect;
+                VirtualProtect(func_ptr, sizeof(FARPROC), PAGE_READWRITE, &old_protect);
+                *func_ptr = (FARPROC)hooked_imagelist_destroy;
+                VirtualProtect(func_ptr, sizeof(FARPROC), old_protect, &old_protect);
+                patched++;
+                logmsg("[ildedup] IAT slot 0x%08X patched (was 0x%08X -> 0x%08X)\n",
+                       (DWORD)func_ptr, (DWORD)target, (DWORD)hooked_imagelist_destroy);
+            }
+        }
+    }
+
+    if (patched == 0) {
+        logmsg("[ildedup] no ImageList_Destroy IAT slot found in megamud.exe imports\n");
+        return 0;
+    }
+    return 1;
+}
+
+/* ================================================================
+ * Exit logging — hook ExitProcess/TerminateProcess/abort so any
+ * silent process death tells us exactly who pulled the trigger.
+ * ================================================================ */
+
+typedef VOID (WINAPI *ExitProcess_fn)(UINT);
+typedef BOOL (WINAPI *TerminateProcess_fn)(HANDLE, UINT);
+static ExitProcess_fn      real_ExitProcess      = NULL;
+static TerminateProcess_fn real_TerminateProcess = NULL;
+
+static void log_caller_module(const char *tag, DWORD caller, UINT code, HANDLE proc)
+{
+    HMODULE mod = NULL;
+    GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                       GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                       (LPCSTR)caller, &mod);
+    char modname[MAX_PATH] = {0};
+    if (mod) GetModuleFileNameA(mod, modname, sizeof(modname));
+    DWORD offset = mod ? (caller - (DWORD)mod) : 0;
+    if (proc) {
+        logmsg("[EXIT] %s(hProc=0x%p, code=%u) from 0x%08X %s+0x%X (tid=%lu)\n",
+               tag, proc, code, caller, modname[0] ? modname : "?", offset,
+               GetCurrentThreadId());
+    } else {
+        logmsg("[EXIT] %s(code=%u) from 0x%08X %s+0x%X (tid=%lu)\n",
+               tag, code, caller, modname[0] ? modname : "?", offset,
+               GetCurrentThreadId());
+    }
+    if (logfile) { fflush(logfile); _commit(_fileno(logfile)); }
+}
+
+static VOID WINAPI hooked_ExitProcess(UINT code)
+{
+    DWORD caller = (DWORD)__builtin_return_address(0);
+    log_caller_module("ExitProcess", caller, code, NULL);
+    if (real_ExitProcess) real_ExitProcess(code);
+    TerminateProcess(GetCurrentProcess(), code);
+    for (;;) Sleep(1000);
+}
+
+static BOOL WINAPI hooked_TerminateProcess(HANDLE hProc, UINT code)
+{
+    DWORD caller = (DWORD)__builtin_return_address(0);
+    /* Only log kills of *our own* process; skip child-process kills */
+    if (hProc == GetCurrentProcess() || hProc == (HANDLE)-1 ||
+        GetProcessId(hProc) == GetCurrentProcessId()) {
+        log_caller_module("TerminateProcess", caller, code, hProc);
+    }
+    if (real_TerminateProcess) return real_TerminateProcess(hProc, code);
+    return FALSE;
+}
+
+/* IAT-patch kernel32!ExitProcess + kernel32!TerminateProcess in megamud.exe */
+static int hook_exit_logging(void)
+{
+    HMODULE exe = GetModuleHandleA(NULL);
+    if (!exe) return 0;
+
+    IMAGE_DOS_HEADER *dos = (IMAGE_DOS_HEADER *)exe;
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE) return 0;
+    IMAGE_NT_HEADERS *nt = (IMAGE_NT_HEADERS *)((char *)exe + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE) return 0;
+
+    DWORD import_rva = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress;
+    if (!import_rva) return 0;
+
+    HMODULE k32 = GetModuleHandleA("kernel32.dll");
+    if (!k32) k32 = LoadLibraryA("kernel32.dll");
+    if (!k32) return 0;
+    FARPROC t_exit = GetProcAddress(k32, "ExitProcess");
+    FARPROC t_term = GetProcAddress(k32, "TerminateProcess");
+    real_ExitProcess      = (ExitProcess_fn)t_exit;
+    real_TerminateProcess = (TerminateProcess_fn)t_term;
+
+    IMAGE_IMPORT_DESCRIPTOR *imports = (IMAGE_IMPORT_DESCRIPTOR *)((char *)exe + import_rva);
+    int patched = 0;
+    for (; imports->Name; imports++) {
+        const char *dll_name = (const char *)((char *)exe + imports->Name);
+        if (_stricmp(dll_name, "kernel32.dll") != 0) continue;
+
+        IMAGE_THUNK_DATA *thunk = (IMAGE_THUNK_DATA *)((char *)exe + imports->FirstThunk);
+        IMAGE_THUNK_DATA *orig_thunk = NULL;
+        if (imports->OriginalFirstThunk)
+            orig_thunk = (IMAGE_THUNK_DATA *)((char *)exe + imports->OriginalFirstThunk);
+
+        for (int i = 0; thunk->u1.Function; thunk++, i++) {
+            FARPROC *func_ptr = (FARPROC *)&thunk->u1.Function;
+            const char *name = NULL;
+
+            if (orig_thunk) {
+                IMAGE_THUNK_DATA *ot = orig_thunk + i;
+                if (!(ot->u1.Ordinal & IMAGE_ORDINAL_FLAG)) {
+                    IMAGE_IMPORT_BY_NAME *ne =
+                        (IMAGE_IMPORT_BY_NAME *)((char *)exe + ot->u1.AddressOfData);
+                    name = (const char *)ne->Name;
+                }
+            }
+
+            FARPROC replacement = NULL;
+            if ((name && strcmp(name, "ExitProcess") == 0) ||
+                (!name && t_exit && *func_ptr == t_exit)) {
+                replacement = (FARPROC)hooked_ExitProcess;
+            } else if ((name && strcmp(name, "TerminateProcess") == 0) ||
+                       (!name && t_term && *func_ptr == t_term)) {
+                replacement = (FARPROC)hooked_TerminateProcess;
+            }
+
+            if (replacement) {
+                DWORD old_protect;
+                VirtualProtect(func_ptr, sizeof(FARPROC), PAGE_READWRITE, &old_protect);
+                *func_ptr = replacement;
+                VirtualProtect(func_ptr, sizeof(FARPROC), old_protect, &old_protect);
+                patched++;
+                logmsg("[exitlog] IAT slot patched: %s -> 0x%08X\n",
+                       name ? name : "(by addr)", (DWORD)replacement);
+            }
+        }
+    }
+
+    if (patched == 0) {
+        logmsg("[exitlog] no ExitProcess/TerminateProcess IAT slots found\n");
+        return 0;
+    }
+    return 1;
+}
+
+/* ================================================================
  * Server data injection — call MegaMUD's incoming data processor
  * ================================================================
  *
@@ -2254,19 +2615,20 @@ static void inject_server_data_impl(const char *data, int len)
  * ================================================================ */
 
 /* Internal function VAs from Ghidra RE */
-#define VA_STOP_PATH     0x00428970  /* void(int struct) — stop current path/movement */
-#define VA_PREP_LOOP     0x0045fee0  /* void(void *struct, int dest_buf) — prepare loop dest */
-#define VA_LOAD_PATH     0x0045f860  /* void(int struct, char *dest, void *entry, int 0) */
-#define VA_START_PATH    0x0042b510  /* int(int struct, void *dest, int entry) — start path */
-#define VA_VERIFY_PATH   0x00428fa0  /* uint(int *struct, int 0) — 0 = success */
-#define VA_UPDATE_ROAM   0x004455b0  /* void(int *struct) — update roaming state */
-#define VA_MM_STRICMP    0x004a31f0  /* int(void *s1, void *s2) — 0 = match */
-#define VA_NORMALIZE_STR 0x0047c870  /* void(void *str) — normalize (lowercase/trim) */
+/* All routed through mega_va() — ASLR-safe at runtime */
+#define VA_STOP_PATH     mega_va(0x00428970)  /* void(int struct) — stop current path/movement */
+#define VA_PREP_LOOP     mega_va(0x0045fee0)  /* void(void *struct, int dest_buf) — prepare loop dest */
+#define VA_LOAD_PATH     mega_va(0x0045f860)  /* void(int struct, char *dest, void *entry, int 0) */
+#define VA_START_PATH    mega_va(0x0042b510)  /* int(int struct, void *dest, int entry) — start path */
+#define VA_VERIFY_PATH   mega_va(0x00428fa0)  /* uint(int *struct, int 0) — 0 = success */
+#define VA_UPDATE_ROAM   mega_va(0x004455b0)  /* void(int *struct) — update roaming state */
+#define VA_MM_STRICMP    mega_va(0x004a31f0)  /* int(void *s1, void *s2) — 0 = match */
+#define VA_NORMALIZE_STR mega_va(0x0047c870)  /* void(void *str) — normalize (lowercase/trim) */
 /* Reset update functions */
-#define VA_RESET_FN1     0x00478a70  /* void(int struct) */
-#define VA_RESET_FN2     0x00478920  /* void(int struct) */
-#define VA_RESET_FN3     0x00478b10  /* void(int struct) */
-#define VA_RESET_FN4     0x0040e8d0  /* void(int struct, int 1) */
+#define VA_RESET_FN1     mega_va(0x00478a70)  /* void(int struct) */
+#define VA_RESET_FN2     mega_va(0x00478920)  /* void(int struct) */
+#define VA_RESET_FN3     mega_va(0x00478b10)  /* void(int struct) */
+#define VA_RESET_FN4     mega_va(0x0040e8d0)  /* void(int struct, int 1) */
 
 /* Struct offsets for @command state (Ghidra RE of FUN_0047cf70) */
 #define OFF_FR_GO_FLAG    0x564C   /* int32: master go/stop toggle. 1=go, 0=stop */
@@ -3362,6 +3724,94 @@ static DWORD WINAPI auto_struct_thread(LPVOID param)
     return 0;
 }
 
+/* ---- Unhandled exception filter — captures crashes on ANY thread ---- */
+static LONG WINAPI slop_crash_filter(EXCEPTION_POINTERS *ep)
+{
+    if (!ep || !ep->ExceptionRecord) return EXCEPTION_CONTINUE_SEARCH;
+    EXCEPTION_RECORD *er = ep->ExceptionRecord;
+    CONTEXT *cx = ep->ContextRecord;
+    logmsg("[CRASH] code=0x%08X addr=0x%08X thread=%lu\n",
+           (DWORD)er->ExceptionCode, (DWORD)er->ExceptionAddress, GetCurrentThreadId());
+    if (er->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && er->NumberParameters >= 2) {
+        logmsg("[CRASH] access violation: %s 0x%08X\n",
+               er->ExceptionInformation[0] == 0 ? "read" :
+               er->ExceptionInformation[0] == 1 ? "write" : "exec",
+               (DWORD)er->ExceptionInformation[1]);
+    }
+    if (cx) {
+        logmsg("[CRASH] eip=0x%08X eax=0x%08X ebx=0x%08X ecx=0x%08X edx=0x%08X\n",
+               (DWORD)cx->Eip, (DWORD)cx->Eax, (DWORD)cx->Ebx, (DWORD)cx->Ecx, (DWORD)cx->Edx);
+        logmsg("[CRASH] esi=0x%08X edi=0x%08X esp=0x%08X ebp=0x%08X\n",
+               (DWORD)cx->Esi, (DWORD)cx->Edi, (DWORD)cx->Esp, (DWORD)cx->Ebp);
+        /* Walk a few frames of the stack to give us a poor-man's backtrace */
+        DWORD *sp = (DWORD *)cx->Esp;
+        for (int i = 0; i < 16 && sp; i++) {
+            logmsg("[CRASH] stack[%02d] @0x%08X = 0x%08X\n", i, (DWORD)(sp + i), sp[i]);
+        }
+    }
+    /* Identify which module the crash address lives in */
+    HMODULE mods[64];
+    DWORD needed = 0;
+    /* Can't easily enumerate modules without psapi, but we can check a few known ones */
+    HMODULE our_dll = NULL;
+    GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                       (LPCSTR)er->ExceptionAddress, &our_dll);
+    if (our_dll) {
+        char modname[MAX_PATH] = {0};
+        GetModuleFileNameA(our_dll, modname, sizeof(modname));
+        logmsg("[CRASH] faulting module: %s @ base 0x%08X (offset 0x%08X)\n",
+               modname, (DWORD)our_dll, (DWORD)er->ExceptionAddress - (DWORD)our_dll);
+    }
+    (void)mods; (void)needed;
+    if (logfile) { fflush(logfile); _commit(_fileno(logfile)); }
+    return EXCEPTION_CONTINUE_SEARCH;  /* let normal crash handling run after logging */
+}
+
+/* First-chance exception handler — runs BEFORE any __try/__except,
+ * so it sees exceptions that get swallowed silently too. We filter
+ * out the common noise codes (debugger strings, C++ throws, etc). */
+static LONG WINAPI slop_vectored_handler(EXCEPTION_POINTERS *ep)
+{
+    if (!ep || !ep->ExceptionRecord) return EXCEPTION_CONTINUE_SEARCH;
+    DWORD code = ep->ExceptionRecord->ExceptionCode;
+    /* Skip noise */
+    if (code == 0x40010006 /* DBG_PRINTEXCEPTION_C */ ||
+        code == 0x4001000A /* DBG_PRINTEXCEPTION_WIDE_C */ ||
+        code == 0x406D1388 /* MS_VC_EXCEPTION (thread name) */ ||
+        code == 0x40010005 /* DBG_CONTROL_C */ ||
+        code == 0xE06D7363 /* C++ throw */ ||
+        code == 0x80000003 /* breakpoint */ ||
+        code == 0x4000001F /* WOW64 single-step */) {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+    HMODULE mod = NULL;
+    GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                       GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                       (LPCSTR)ep->ExceptionRecord->ExceptionAddress, &mod);
+    char modname[MAX_PATH] = {0};
+    if (mod) GetModuleFileNameA(mod, modname, sizeof(modname));
+    DWORD offset = mod ? ((DWORD)ep->ExceptionRecord->ExceptionAddress - (DWORD)mod) : 0;
+    logmsg("[VEH] first-chance exc=0x%08X addr=0x%08X %s+0x%X tid=%lu\n",
+           code, (DWORD)ep->ExceptionRecord->ExceptionAddress,
+           modname[0] ? modname : "?", offset, GetCurrentThreadId());
+    if (code == EXCEPTION_ACCESS_VIOLATION &&
+        ep->ExceptionRecord->NumberParameters >= 2) {
+        logmsg("[VEH] AV %s @ 0x%08X\n",
+               ep->ExceptionRecord->ExceptionInformation[0] == 0 ? "read" :
+               ep->ExceptionRecord->ExceptionInformation[0] == 1 ? "write" : "exec",
+               (DWORD)ep->ExceptionRecord->ExceptionInformation[1]);
+    }
+    if (logfile) { fflush(logfile); _commit(_fileno(logfile)); }
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+static void slop_atexit_log(void)
+{
+    logmsg("[EXIT] atexit handler fired — process returning normally (tid=%lu)\n",
+           GetCurrentThreadId());
+    if (logfile) { fflush(logfile); _commit(_fileno(logfile)); }
+}
+
 /* ---- TCP Server ---- */
 
 static DWORD WINAPI payload_main(LPVOID param)
@@ -3393,28 +3843,50 @@ static DWORD WINAPI payload_main(LPVOID param)
         logmsg("[mudplugin] Incoming data hook FAILED — falling back to MMANSI polling\n");
     }
 
-    /* Legacy recv hook — MegaMUD doesn't use winsock recv, so this always fails.
-     * Kept for reference only. */
-    if (hook_recv()) {
-        logmsg("[mudplugin] recv() hook installed — round detection active\n");
+    /* Compat shim: dedupe HIMAGELIST double-destroy (native Win11 vs Wine).
+     * megamud.exe's toolbar init path double-destroys an HIMAGELIST; Wine
+     * is silent, native Win11 AVs. See MEGAMUD_RE.md "HIMAGELIST Double-
+     * Free — Code Map". Must run before megamud touches the toolbar. */
+    if (hook_imagelist_destroy()) {
+        logmsg("[mudplugin] ImageList_Destroy dedupe shim installed\n");
     } else {
-        logmsg("[mudplugin] recv() hook FAILED (expected — MegaMUD uses ReadFile)\n");
+        logmsg("[mudplugin] ImageList_Destroy shim install FAILED — native Win11 may crash\n");
     }
+
+    /* Log every ExitProcess/TerminateProcess so silent deaths tell us who/why */
+    if (hook_exit_logging()) {
+        logmsg("[mudplugin] Exit logging hooks installed (ExitProcess + TerminateProcess)\n");
+    } else {
+        logmsg("[mudplugin] Exit logging hook install FAILED\n");
+    }
+
+    /* Legacy recv hook — DISABLED. MegaMUD uses ReadFile, not winsock recv(),
+     * so this hook was always useless. On Windows 11 with ASLR it also
+     * crashes inside the PE/IAT walker. The FUN_0041C8D0 hook above gives
+     * us the same data (raw ANSI stream) without any of the hazard. */
+    logmsg("[mudplugin] recv() hook skipped — using FUN_0041C8D0 for incoming data\n");
+    logmsg("[trace] post-recv checkpoint A\n");
 
     /* Server data injection uses direct buffer write (no hooks needed) */
     logmsg("[mudplugin] Server injection ready (direct buffer at +0x863D)\n");
 
     /* Inject menu into MegaMUD */
+    logmsg("[trace] FindWindowA(MMMAIN)...\n");
     HWND main_wnd = FindWindowA("MMMAIN", NULL);
+    logmsg("[trace] MMMAIN hwnd=0x%08X\n", (DWORD)main_wnd);
     if (main_wnd) {
+        logmsg("[trace] calling inject_menu()\n");
         inject_menu(main_wnd);
+        logmsg("[trace] inject_menu() returned\n");
     } else {
         logmsg("[mudplugin] MMMAIN not found yet, will retry...\n");
         for (int i = 0; i < 10; i++) {
             Sleep(1000);
             main_wnd = FindWindowA("MMMAIN", NULL);
             if (main_wnd) {
+                logmsg("[trace] MMMAIN found on retry %d, calling inject_menu()\n", i);
                 inject_menu(main_wnd);
+                logmsg("[trace] inject_menu() returned (retry path)\n");
                 break;
             }
         }
@@ -3683,6 +4155,20 @@ static void load_plugins(void)
 
     slop_api_init();
 
+    /* First pass: count plugin files so splash progress can report N/total */
+    int plugin_total = 0;
+    {
+        WIN32_FIND_DATAA cfd;
+        HANDLE ch = FindFirstFileA(search, &cfd);
+        if (ch != INVALID_HANDLE_VALUE) {
+            do { plugin_total++; } while (FindNextFileA(ch, &cfd));
+            FindClose(ch);
+        }
+    }
+    int plugin_idx = 0;
+    SetEnvironmentVariableA("SLOP_LOAD_PROGRESS", "10");
+    SetEnvironmentVariableA("SLOP_LOAD_STATUS", "Loading plugins...");
+
     WIN32_FIND_DATAA fd;
     HANDLE h = FindFirstFileA(search, &fd);
     if (h == INVALID_HANDLE_VALUE) {
@@ -3704,9 +4190,24 @@ static void load_plugins(void)
 
         logmsg("[plugins] Loading %s...\n", fd.cFileName);
 
+        /* Splash: announce plugin-by-plugin so any fatal load tells us which one */
+        {
+            char st[192];
+            _snprintf(st, sizeof(st) - 1, "Loading plugin: %s", fd.cFileName);
+            st[sizeof(st) - 1] = 0;
+            SetEnvironmentVariableA("SLOP_LOAD_STATUS", st);
+            char pct[16];
+            int p = 10;
+            if (plugin_total > 0) p = 10 + (plugin_idx * 35) / plugin_total;
+            _snprintf(pct, sizeof(pct) - 1, "%d", p);
+            pct[sizeof(pct) - 1] = 0;
+            SetEnvironmentVariableA("SLOP_LOAD_PROGRESS", pct);
+        }
+
         HMODULE dll = LoadLibraryA(full_path);
         if (!dll) {
             logmsg("[plugins] FAILED to load %s (error %lu)\n", fd.cFileName, GetLastError());
+            plugin_idx++;
             continue;
         }
 
@@ -3771,6 +4272,7 @@ static void load_plugins(void)
         }
 
         plugin_count++;
+        plugin_idx++;
 
         logmsg("[plugins] Loaded: %s v%s by %s — %s\n",
                desc->name ? desc->name : fd.cFileName,
@@ -3778,7 +4280,18 @@ static void load_plugins(void)
                desc->author ? desc->author : "?",
                desc->description ? desc->description : "");
 
+        /* Splash: mark plugin as done */
+        {
+            char st[192];
+            _snprintf(st, sizeof(st) - 1, "Loaded: %s",
+                      desc->name ? desc->name : fd.cFileName);
+            st[sizeof(st) - 1] = 0;
+            SetEnvironmentVariableA("SLOP_LOAD_STATUS", st);
+        }
+
     } while (FindNextFileA(h, &fd));
+    SetEnvironmentVariableA("SLOP_LOAD_PROGRESS", "45");
+    SetEnvironmentVariableA("SLOP_LOAD_STATUS", "All plugins loaded");
 
     FindClose(h);
     logmsg("[plugins] %d plugin(s) loaded\n", plugin_count);
@@ -4026,6 +4539,17 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
     switch (fdwReason) {
     case DLL_PROCESS_ATTACH:
         DisableThreadLibraryCalls(hinstDLL);
+        /* Install crash handler immediately — catches crashes on any thread
+         * even before payload_main opens the logfile. slop_crash_filter
+         * calls logmsg which tolerates NULL logfile (mirrors to OutputDebugString). */
+        SetUnhandledExceptionFilter(slop_crash_filter);
+        /* First-chance handler — runs before SEH, catches exceptions that
+         * would otherwise be swallowed by __try/__except in megamud.exe */
+        AddVectoredExceptionHandler(1 /*FIRST*/, slop_vectored_handler);
+        /* Normal-exit log so we can distinguish "returned cleanly" from "crashed" */
+        atexit(slop_atexit_log);
+        /* Open logfile early so crash logs go to disk even before payload_main runs */
+        if (!logfile) logfile = fopen("mudplugin.log", "a");
         {
             char sys_path[MAX_PATH];
             GetSystemDirectory(sys_path, MAX_PATH);

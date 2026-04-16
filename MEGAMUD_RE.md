@@ -2016,3 +2016,153 @@ Records are packed contiguously on data leaf pages starting at page offset +0x0C
 - Spell extended data (+0x64–0x9B) contains bitmask arrays (possibly class/level
   restrictions) with repeating 0x2020/0x2000 patterns — needs further analysis
 - Spell extended data (+0x64–0x9B) contains ability effect arrays not yet mapped
+
+---
+
+## Native Windows 11 Porting (vs Wine)
+
+Context: megamud.exe + `plugins\vk_terminal.dll` runs stably under Wine on Linux but crashes ~2–3s after launch on native Win11 (confirmed on two independent Win11 hosts — our VM with lavapipe software Vulkan and a friend's real-hardware Nvidia box). Without `vk_terminal.dll` loaded, megamud is stable on Win11.
+
+This section documents what we've learned while chasing that crash; each finding is independently useful for future native-Win11 work.
+
+### Known Wine-vs-Native differences that matter
+
+| Behavior | Wine | Native Win11 |
+|---|---|---|
+| `vkUpdateDescriptorSets` with `VK_NULL_HANDLE` dstSet | silently tolerated (winevulkan no-op) | native Khronos loader + lavapipe dereferences → AV at `mov eax,[edi+0x24]` |
+| Double-destroy of a HIMAGELIST | `comctl32` silently allows it | `comctl32!CImageListBase::IsValid` uses `cmpxchg` on the magic signature "HIML" (`0x4c4d4948`); detonates if block was freed |
+| PE `.data` section protection | `PAGE_WRITECOPY` (0x08) | `PAGE_READWRITE` (0x04) — already documented above |
+| Default heap validation | lenient | full Low-Fragmentation Heap with free-list integrity checks → heap corruption surfaces as `0xc0000374` in `RtlFreeHeap` instead of silent progression |
+
+### Crash #1 — NULL Vulkan descriptor set (FIXED)
+
+- **Signature:** access violation (`0xc0000005`) inside `vulkan_lvp.dll` at offset `+0x8a1dd`, `mov eax,[edi+0x24]` with `edi=0`.
+- **Root cause:** init order in `vkt_thread` — `vkt_create_font_texture` (`dll/vk_terminal.c:11412`) ran before `vkt_create_descriptors` (`dll/vk_terminal.c:11418`). The former called `vkt_upload_font_texture` which did `vkUpdateDescriptorSets` with `vk_desc_set` still `VK_NULL_HANDLE`.
+- **Fix:** guard the update at `dll/vk_terminal.c:8610` with `if (vk_desc_set != VK_NULL_HANDLE)`. Descriptor set gets its proper update later inside `vkt_create_descriptors` at `dll/vk_terminal.c:9273`.
+
+### Crash #2 — Heap corruption actually a HIMAGELIST double-free (UNDER INVESTIGATION)
+
+- **WER bucket (misleading):** `HEAP_CORRUPTION_ACTIONABLE_MultipleEntriesCorruption_c0000374_vulkan_lvp.dll!Unknown` — top frame is `ntdll!RtlFreeHeap` invoked from inside `vulkan_lvp.dll`. Looks like a Vulkan bug. Isn't.
+- **Real fault, exposed by Full Page Heap:**
+  ```
+  comctl32!CImageListBase::IsValid+0x4c      (lock cmpxchg [ecx],edx)
+  comctl32!HIMAGELIST_QueryInterface+0x26
+  comctl32!ImageList_Destroy+0x27
+  megamud+0x889d3
+  megamud+0x30128
+  megamud+0x4ac19                            (near WinMain message pump)
+  kernel32!BaseThreadInitThunk
+  ```
+  - `edx = 0x4c4d4948` = ASCII "HIML" — the signature comctl32 stamps into every HIMAGELIST block.
+  - `ecx` points into a guarded (unmapped) page — so the HIMAGELIST has already been destroyed and its page reclaimed by page heap.
+- **Chain of causation:**
+  1. megamud.exe double-destroys an HIMAGELIST during early init/cleanup.
+  2. Without page heap: double-free silently corrupts the Low-Fragmentation Heap free-list metadata.
+  3. Later a legitimate `free()` inside `vulkan_lvp` walks the corrupted list and detonates → WER blames `vulkan_lvp.dll`.
+  4. With page heap: the freed block's page is unmapped on free, so comctl32's `IsValid` cmpxchg AVs instantly at the double-destroy site — the true culprit.
+- **Why it only happens with vk_terminal loaded:** unknown yet. Hypothesis: vk_terminal's init returns a status/state that megamud interprets as "init failed", triggering an error-cleanup path that double-destroys an imagelist.
+- `grep -r ImageList_ dll/` finds nothing — we do NOT touch imagelists in any of our DLLs. The bug is entirely in megamud.exe; we only trigger it.
+
+### Diagnostic tooling setup on Win11
+
+- **Full Page Heap (gflags) via registry IFEO** (no gflags.exe needed):
+  - Key: `HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\megamud.exe`
+  - `GlobalFlag = 0x02000000` (`FLG_HEAP_PAGE_ALLOCS`)
+  - `PageHeapFlags = 0x3` (full page heap — guard page at end of every allocation)
+  - Catches buffer overruns and use-after-frees at the exact offending instruction.
+  - Turn off when done: `REG DELETE "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\megamud.exe" /v GlobalFlag /f` (and the same for `PageHeapFlags`).
+- **procdump** at `C:\Tools\procdump\procdump.exe` — launch with `-accepteula -ma -e 1 -t -x <dumpdir> megamud.exe` to catch first-chance exceptions with full memory.
+- **cdb (x86)** at `C:\Program Files\WindowsApps\Microsoft.WinDbg_1.2603.20001.0_x64__8wekyb3d8bbwe\x86\cdb.exe`. Use `-cf <cmdfile>` (NOT `-c "a; b; c"`; cdb parses the semicolons as separate `-c` args and tries to open them as files).
+- **Symbol path:** `.sympath srv*C:\symbols*https://msdl.microsoft.com/download/symbols` — pulls Microsoft system PDBs; do this before `.reload` and any stack walk.
+- **Without symbols for megamud.exe / vk_terminal.dll**, stack unwinding dies at the first frame without frame pointers; use `dds esp L100` (manual stack scan) to find return addresses and map them by RVA with `i686-w64-mingw32-objdump -t`.
+- **WER dumps** land at `C:\CrashDumps\megamud.exe.<pid>.dmp` (configured by Windows Error Reporting registry; size can reach ~280MB for a full process).
+
+### Known RVAs in megamud.exe (partial map from native-Win11 crashes)
+
+| RVA | Role | Notes |
+|---|---|---|
+| `+0x4acb0` | Main message loop | Observed as return addr from `user32!GetMessageA` in the benign thread-0 stack trace of a dump. |
+| `+0x4ac19` | Inside the main message loop / early startup | Caller of `megamud+0x30128` in both the HIMAGELIST double-free and the benign traces. |
+| `+0x96eb2` | Thread start thunk | Return to `kernel32!BaseThreadInitThunk` → strong hint this is main-thread bottom-of-WinMain. |
+| `+0x30128` | Mid-startup dispatch | Calls `megamud+0x889d3`. |
+| `+0x889d3` | Direct caller of `ImageList_Destroy` | Unidentified; disassemble to identify the HIMAGELIST owner (likely a toolbar/tab control cleanup). |
+
+These supplement the already-documented `0x00447050` WndProc, `0x0048a7c0` STAT dump, `0x004322a0` INI save, `0x004387e0` INI load, `0x0041C8D0` incoming-data processor.
+
+### HIMAGELIST Double-Free — Code Map
+
+Goal: map every `ImageList_*` call site in megamud.exe so we can reason about the double-free that trips native Win11's comctl32 validator.
+
+**IAT slots (COMCTL32.DLL imports):**
+
+| IAT offset | Function |
+|---|---|
+| `0x4fe008` | `ImageList_Create` |
+| `0x4fe00c` | `ImageList_Destroy` |
+| `0x4fe010` | `ImageList_ReplaceIcon` |
+
+Only two real call sites for `ImageList_Destroy` exist in megamud.exe (the third hit at `0x496305` is the standard MSVC PLT-style `jmp *0x4fe00c` trampoline — not a real caller):
+
+**Destroyer #1 — `0x4468d0` (tiny wrapper):**
+```
+push   0x128(%eax)       # arg->[state+0x128]
+call   *0x4fe00c         # ImageList_Destroy
+ret                      # does NOT clear arg->[state+0x128]
+```
+Called from exactly one site: `0x44b005` inside `0x44afa0`, which is the state-struct shutdown routine (passes `0x521398` to sub-cleanups). Frees the per-state imagelist stored at `state+0x128`.
+
+**Destroyer #2 — `0x4889c0` (`cleanup_imagelists`):**
+Destroys three global HIMAGELISTs and clears each after:
+```
+if (g_A != NULL) { ImageList_Destroy(g_A); g_A = NULL; }   # g_A = 0x52bc4c
+if (g_B != NULL) { ImageList_Destroy(g_B); g_B = NULL; }   # g_B = 0x52bc50
+if (g_C != NULL) { ImageList_Destroy(g_C); g_C = NULL; }   # g_C = 0x52bc54
+```
+Called from exactly one site: `0x4860ae` inside `0x486020` (toolbar-imagelist init). The crash instruction `0x4889d3` is the return from the first `ImageList_Destroy` (the g_A slot).
+
+**Creators:**
+
+| Writer site | Destination | What it creates |
+|---|---|---|
+| `0x4468f0` → `0x44691d` | `state+0x128` | Creates a 21×21 imagelist (args `0x15, 0x15, 0x1, 0x32` to `GetSystemMetrics`), then `ImageList_Create`, then populates with `ImageList_ReplaceIcon` calls for icons `0xca, 0xc8, 0xd4, 0x16b, 0xcc, ...` |
+| `0x486020` → `0x4860cf` | `g_A (0x52bc4c)` | Toolbar-imagelist init (16×16, 0x8b images, `ILC_COLOR32|ILC_MASK`). Issues `TB_SETIMAGELIST 0x430`, `TB_SETHOTIMAGELIST 0x434`, `TB_SETPRESSEDIMAGELIST 0x468` — **same imagelist pointer attached to toolbar three times**. |
+
+No other writers to `0x52bc4c/50/54` or to `state+0x128` exist. So the double-free can't be a simple "two writers, one destroyer".
+
+**Callers of toolbar init `0x486020`:**
+
+| Call site | Context |
+|---|---|
+| `0x430123` | Inside `0x4300f0`, reached from the main init sequence `0x44a8d0 → 0x44ac14 → 0x4300f0`. |
+| `0x448757` | Inside another state-init function around `0x448740`. |
+| `0x48815f` | Inside a WM_COMMAND-style handler that first creates new HWNDs via DialogBoxParam-like calls (`0x4fe4ec`) with dialog IDs `0x6e8`, `0x6e9`, then stores them in `state+0x16c` and `state+0x170`, then calls `0x486020`. This path RE-CREATES the toolbar. |
+
+Since `g_A/B/C` live in BSS and are zero on first visit, a double-free on `g_A` implies the toolbar init ran **at least twice**, and between the two runs something freed `g_A`'s HIMAGELIST without nulling the global. The only known ImageList_Destroy paths don't touch `g_A`'s slot, so the most likely culprit is **comctl32 itself auto-destroying the imagelist on child-control WM_DESTROY** (some control/style combos do this despite docs claiming they don't), or vk_terminal causing the `0x48815f` recreate path to fire after a toolbar HWND was already destroyed in a path that also releases its imagelist.
+
+For practical purposes we don't have to fully explain the mechanism — an IAT shim on `COMCTL32!ImageList_Destroy` that dedupes already-freed handles fully papers over the bug (mirroring Wine's behavior) and unblocks native-Win11 testing. The shim should log every call to learn the actual handle flow and confirm the mechanism after the fact.
+
+### Status (2026-04-15) — HIMAGELIST theory was wrong
+
+**Fix #1** (NULL-descriptor guard at `dll/vk_terminal.c:8610`) is still valid.
+
+**Fix #2** (IAT shim for `COMCTL32!ImageList_Destroy`) does **not** stop the crash. Empirical evidence from back-to-back tests on `busket@192.168.122.234`:
+
+| Config | Result | `[ildedup]` calls before crash |
+|---|---|---|
+| PageHeap ON + shim  | stable 25 s+, "Tripmunk" struct base at `0x001B1398`, Vulkan running | 0 (only the patch-install line) |
+| PageHeap OFF + shim | AVs at t+3 s, `0xc0000374` at `ntdll+0x000ee62f` (heap walker detects corruption) | 0 |
+
+The shim's `hooked_imagelist_destroy` is never called in either config — megamud's buggy init path doesn't actually invoke `ImageList_Destroy` before dying. So the HIMAGELIST double-free framing is rejected.
+
+**New hypothesis:** the startup crash is a heap overflow/underflow, not a use-after-free or double-free. Page heap makes megamud stable because it puts each allocation on its own page — an adjacent overflow can't trash neighboring heap blocks. Without page heap, something overwrites free-list metadata, and a later `RtlFreeHeap` walker fails.
+
+The earlier page-heap stack showing `comctl32!CImageListBase::IsValid` was a **victim**: an HIMAGELIST block happened to sit next to the overflowing alloc and its "HIML" magic got clobbered. That's why `cmpxchg` AVd on the magic — not because of a double-destroy. All the HIMAGELIST code-map above is true as disassembly but irrelevant to the root cause.
+
+**Next direction:** the overflow must be in `vk_terminal.dll`'s init path (app is stable when `vk_terminal.dll` is renamed `.OFF`). Candidates to audit, in order of suspicion:
+1. `kiss_fft` workspace alloc (custom cfg size math)
+2. faad2 frame buffers (size returned by mp4 parser not checked against our buffer)
+3. Font atlas copy — we pack glyph rects from a CP437 source; any stride miscalc overruns
+4. VK uniform/SSBO writes where `sizeof(struct)` in the shader header disagrees with host-side struct
+
+The shim stays installed as defense-in-depth (if anything, it prevents one *class* of victim-signature crash from confusing future analyses), but it is **not** the working fix. Investigation continues.
+

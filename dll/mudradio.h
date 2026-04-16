@@ -14,7 +14,8 @@ typedef struct {
     float spectrum[512];
     float waveform[256];    /* time-domain PCM samples for oscilloscope */
     int   onset_detected;
-    int   beat_count;       /* monotonic counter, increments on each onset */
+    int   beat_count;       /* monotonic counter, increments on each ANY-band onset */
+    int   kick_beat_count;  /* monotonic counter, increments on each KICK-band onset */
     DWORD tick;
 } mr_beat_t;
 

@@ -264,19 +264,21 @@ static float *upsample_2x(short *in, int in_len, int *out_len)
 
 static HWAVEOUT hWaveOut = NULL;
 static volatile int tts_playing = 0;
+static HANDLE tts_done_event = NULL;
+static WAVEHDR *tts_pending_hdr = NULL;
 
-static void CALLBACK wave_out_callback(HWAVEOUT hwo, UINT msg, DWORD_PTR inst,
-                                        DWORD_PTR param1, DWORD_PTR param2)
+static DWORD WINAPI tts_cleanup_thread(LPVOID param)
 {
-    (void)hwo; (void)inst; (void)param2;
-    if (msg == WOM_DONE) {
-        WAVEHDR *hdr = (WAVEHDR *)param1;
-        waveOutUnprepareHeader(hwo, hdr, sizeof(WAVEHDR));
-        free(hdr->lpData);
-        free(hdr);
-        waveOutClose(hwo);
-        tts_playing = 0;
+    (void)param;
+    WaitForSingleObject(tts_done_event, INFINITE);
+    if (hWaveOut && tts_pending_hdr) {
+        waveOutUnprepareHeader(hWaveOut, tts_pending_hdr, sizeof(WAVEHDR));
+        free(tts_pending_hdr->lpData);
+        free(tts_pending_hdr);
+        tts_pending_hdr = NULL;
     }
+    tts_playing = 0;
+    return 0;
 }
 
 /* ---- eSpeak synthesis callback: accumulates PCM ---- */
@@ -409,23 +411,32 @@ EXPORT void tts_speak(const char *text, int pitch, int speed)
     wfx.nBlockAlign = 4;
     wfx.nAvgBytesPerSec = OUTPUT_RATE * 4;
 
-    HWAVEOUT hwo = NULL;
-    MMRESULT res = waveOutOpen(&hwo, WAVE_MAPPER, &wfx,
-                               (DWORD_PTR)wave_out_callback, 0, CALLBACK_FUNCTION);
-    if (res != MMSYSERR_NOERROR) {
-        if (api) api->log("[TTS_eSpeak] waveOutOpen failed (code %d)\n", res);
-        free(pcm);
-        return;
+    if (!tts_done_event)
+        tts_done_event = CreateEventA(NULL, FALSE, FALSE, NULL);
+    else
+        ResetEvent(tts_done_event);
+
+    if (!hWaveOut) {
+        MMRESULT res = waveOutOpen(&hWaveOut, WAVE_MAPPER, &wfx,
+                                   (DWORD_PTR)tts_done_event, 0, CALLBACK_EVENT);
+        if (res != MMSYSERR_NOERROR) {
+            if (api) api->log("[TTS_eSpeak] waveOutOpen failed (code %d)\n", res);
+            hWaveOut = NULL;
+            free(pcm);
+            return;
+        }
     }
 
     int byte_len = total_samples * sizeof(short);
     WAVEHDR *hdr = (WAVEHDR *)calloc(1, sizeof(WAVEHDR));
     hdr->lpData = (char *)pcm;
     hdr->dwBufferLength = byte_len;
+    tts_pending_hdr = hdr;
 
-    waveOutPrepareHeader(hwo, hdr, sizeof(WAVEHDR));
+    waveOutPrepareHeader(hWaveOut, hdr, sizeof(WAVEHDR));
     tts_playing = 1;
-    waveOutWrite(hwo, hdr, sizeof(WAVEHDR));
+    waveOutWrite(hWaveOut, hdr, sizeof(WAVEHDR));
+    CreateThread(NULL, 0, tts_cleanup_thread, NULL, 0, NULL);
 
     if (api) api->log("[TTS_eSpeak] Playing %d bytes stereo 16-bit @ %dHz (lp=%d rv=%d dl=%d)\n",
                        byte_len, OUTPUT_RATE, lp_enabled, rv_enabled, dl_enabled);
@@ -627,7 +638,16 @@ static int espeak_plugin_init(const slop_api_t *a)
 
 static void espeak_plugin_shutdown(void)
 {
-    if (tts_playing && hWaveOut) waveOutReset(hWaveOut);
+    if (hWaveOut) {
+        waveOutReset(hWaveOut);
+        waveOutClose(hWaveOut);
+        hWaveOut = NULL;
+    }
+    tts_playing = 0;
+    if (tts_done_event) {
+        CloseHandle(tts_done_event);
+        tts_done_event = NULL;
+    }
     espeak_Terminate();
     if (api) api->log("[TTS_eSpeak] Unloaded\n");
 }

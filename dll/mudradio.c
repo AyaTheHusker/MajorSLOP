@@ -13,15 +13,497 @@
 #include "kiss_fftr.h"
 #include <math.h>
 
-/* ---- Beat detection state ---- */
-#define MR_FFT_SIZE   1024
+/* ---- Beat detection state (SuperFlux, Böck 2013) ----
+ * Paper: "Maximum Filter Vibrato Suppression for Onset Detection" (DAFx'13)
+ * - 2048-sample Hann STFT at 48 kHz, hop 512 → ~94 fps (overlap 75%).
+ * - Triangular filter bank over 40 log-spaced bands (30 Hz - 17 kHz).
+ * - Log magnitude log10(1 + spec).
+ * - Freq-wise max filter radius 3 on previous frame → vibrato suppression.
+ * - Half-wave rectified spectral flux, summed → onset detection function (ODF).
+ * - Peak pick: local max over (pre=1, post=4) AND >= moving_avg(pre_avg=14)*1.08
+ *   AND ≥ 3 frames since last onset (~32 ms).
+ *
+ * Two ODFs are run in parallel on the same spectrogram:
+ *   1) full-band ODF → generic onsets → beat_count (kick/snare/hats alike)
+ *   2) kick-band ODF (lowest 6 bands, ~30-150 Hz) → bass_energy envelope
+ *
+ * `bass_energy` is now an onset-driven envelope that snaps up on each kick
+ * hit and decays exponentially, so when listeners hear a kick drum the
+ * visualizers *pulse* on it rather than tracking sustained sub-bass.
+ * `mid_energy` / `treble_energy` remain continuous band energies — those
+ * still drive timbral effects (hat shimmer, synth warmth, etc.).
+ */
+#define MR_FFT_SIZE      2048
+#define MR_FFT_HOP        512
+#define MR_BANDS           40
+/* Kick band: log-spaced SuperFlux bands spanning ~40-160 Hz.
+ * Maps to mudamp bars 3-4 (spectrum bins 1-6, FFT bins 2-6) — the range
+ * the user verified *always* flares on kick drums. Lower bound skips
+ * sub-bass rumble (bands 0-1) so sustained sub doesn't contaminate the
+ * kick ODF; upper bound includes the kick click/beater attack so
+ * beater-heavy kicks (house/techno) detect as reliably as dubbier ones. */
+#define MR_KICK_BAND_LO     1     /* start at band 1 (~35 Hz center) */
+#define MR_KICK_BAND_HI    11     /* exclusive; ends at band 10 (~170 Hz center) */
+/* Click band covers the kick beater/attack in 1.5-5 kHz region. Real kicks
+ * have a broadband click transient co-located with the thump; sustained
+ * bassline notes do not. Requiring both-bands-fire gates out basslines. */
+#define MR_CLICK_BAND_LO   25     /* ~1.5 kHz center */
+#define MR_CLICK_BAND_HI   32     /* exclusive; ~5 kHz upper */
+#define MR_MAXFILT_R        3
+#define MR_ODF_HIST        64
+#define MR_PK_PRE_MAX       5
+#define MR_PK_POST_MAX      5     /* ~53 ms lookahead */
+#define MR_PK_PRE_AVG      24     /* ~255 ms moving avg window (stable baseline) */
+/* Refractory: kicks never come closer than this. 14 hops ≈ 150 ms covers
+ * double-time kicks at 200 BPM. Was 3 (~32 ms) which let each kick's decay
+ * tail re-fire 4-5 times. */
+#define MR_PK_COMBINE      14     /* ~150 ms min separation */
+/* Threshold/floor tuned to REJECT background spectral-flux noise. Old
+ * values (1.10 / 0.035) let noise qualify and the refractory metronome'd
+ * them out at ~150 ms intervals → visible "shitload of pulses" between
+ * real kicks. A real kick ODF in the 10-band kick region is ~0.6-1.5
+ * (log-compressed, half-wave flux); background noise is ~0.03-0.10. */
+#define MR_PK_THRESH     1.45f    /* must be 45% above moving avg */
+#define MR_PK_FLOOR      0.18f    /* absolute ODF floor — kills noise */
+/* Click co-occurrence: kick onset must have a click-band flux spike within
+ * this many hops of the low-band onset. Real kicks have beater click;
+ * sustained bass notes do not. */
+#define MR_CLICK_WINDOW     4     /* ±4 hops = ±42 ms */
+#define MR_CLICK_FLOOR   0.025f   /* min click-band flux to qualify */
+#define MR_ASSUMED_SR   48000
+
+/* ===================================================================
+ * Time-domain kick detector (Mixxx/aubio/BTrack-style pipeline).
+ * FFT-based kick detection suffers from spectral leakage — a loud snare
+ * or clap's sinc sidelobes reach into the 5-6 FFT bins that comprise the
+ * kick band. Time-domain IIR biquad BP + envelope follower is the
+ * production-proven approach used by every serious kick-aware tool.
+ *
+ * Pipeline:
+ *   1. Biquad bandpass 60-130 Hz (Q=0.707 Butterworth) on raw samples
+ *   2. abs() rectify + 1-pole envelope (attack 3ms / release 80ms)
+ *   3. Positive derivative of envelope (sampled at hop boundaries)
+ *   4. Adaptive threshold: running mean of derivative * 3.0 + floor
+ *   5. HFC sidechain gate: parallel 2-5 kHz biquad BP + same pipeline;
+ *      kick requires click-band derivative to also fire (broadband
+ *      attack). Sustained bass notes have no click → rejected.
+ *   6. Refractory 240 ms (250 BPM kicks = 240 ms)
+ * =================================================================== */
+#define MR_KD_HIST           24    /* ~255 ms derivative history (median/mean) */
+#define MR_KD_REFRACT        22    /* ~235 ms min kick separation */
+#define MR_KD_THRESH_K      3.0f   /* kick deriv must be 3x mean */
+#define MR_KD_FLOOR_K     0.003f   /* abs floor for kick deriv */
+#define MR_KD_THRESH_C      2.0f   /* click deriv 2x mean */
+#define MR_KD_FLOOR_C     0.002f   /* abs floor for click deriv */
+
 static kiss_fftr_cfg mr_fft_cfg = NULL;
-static float         mr_fft_buf[MR_FFT_SIZE];  /* mono accumulator */
-static int           mr_fft_pos = 0;
-static float         mr_prev_kick = 0;     /* previous kick energy for onset */
-static float         mr_kick_avg  = 0;     /* running average of kick energy */
-static DWORD         mr_last_onset_tick = 0; /* cooldown between onsets */
-#define MR_ONSET_COOLDOWN_MS  120          /* min ms between beat triggers */
+static float  mr_fft_buf[MR_FFT_SIZE];         /* mono slide-window accumulator */
+static int    mr_fft_pos = 0;
+static int    mr_sflux_init = 0;
+static float  mr_window[MR_FFT_SIZE];
+static float  mr_fbank[MR_BANDS][MR_FFT_SIZE/2 + 1];
+static float  mr_prev_bands[MR_BANDS];         /* last frame's log bands */
+static float  mr_odf_full[MR_ODF_HIST];
+static float  mr_odf_kick[MR_ODF_HIST];
+static float  mr_odf_click[MR_ODF_HIST];
+static float  mr_kick_lin_hist[MR_ODF_HIST];   /* linear kick-band mag per frame */
+static int    mr_odf_head = -1;                /* index of newest frame in ring */
+static int    mr_odf_count = 0;
+static int    mr_frames_since_full = 9999;
+static int    mr_frames_since_kick = 9999;
+static float  mr_kick_lin_peak = 1.0f;         /* slowly-decaying loudest kick */
+
+/* ---- Time-domain kick detector state ---- */
+typedef struct { float b0, b1, b2, a1, a2; float z1, z2; } mr_biquad_t;
+static mr_biquad_t mr_bp_kick;    /* 60-130 Hz bandpass on raw audio */
+static mr_biquad_t mr_bp_click;   /* 2-5 kHz bandpass on raw audio */
+static float mr_kd_kick_env  = 0.0f;    /* envelope follower state */
+static float mr_kd_click_env = 0.0f;
+static float mr_kd_kick_last = 0.0f;    /* last-hop envelope sample */
+static float mr_kd_click_last= 0.0f;
+static float mr_kd_kick_d[MR_KD_HIST];  /* per-hop positive derivative ring */
+static float mr_kd_click_d[MR_KD_HIST];
+static int   mr_kd_head  = -1;
+static int   mr_kd_count = 0;
+static int   mr_kd_refract_left = 0;
+static float  mr_bass_env = 0.0f;              /* kick-onset envelope, 0..1 */
+/* Adaptive strength normalization for onset_strength output */
+static float  mr_odf_full_peak = 0.001f;
+static float  mr_odf_kick_peak = 0.001f;
+
+/* RBJ biquad bandpass (constant skirt gain, peak = Q).
+ *   w0 = 2*pi*f0/fs,  alpha = sin(w0)/(2*Q)
+ *   b0 = alpha,  b1 = 0,  b2 = -alpha
+ *   a0 = 1+alpha, a1 = -2*cos(w0), a2 = 1-alpha */
+static void mr_biquad_set_bp(mr_biquad_t *bq, float f0, float fs, float Q)
+{
+    float w0 = 2.0f * (float)M_PI * f0 / fs;
+    float cw = cosf(w0), sw = sinf(w0);
+    float alpha = sw / (2.0f * Q);
+    float a0 = 1.0f + alpha;
+    bq->b0 =  alpha / a0;
+    bq->b1 =  0.0f;
+    bq->b2 = -alpha / a0;
+    bq->a1 = -2.0f * cw / a0;
+    bq->a2 = (1.0f - alpha) / a0;
+    bq->z1 = bq->z2 = 0.0f;
+}
+/* Transposed Direct-Form II */
+static inline float mr_biquad_proc(mr_biquad_t *bq, float x)
+{
+    float y = bq->b0 * x + bq->z1;
+    bq->z1  = bq->b1 * x - bq->a1 * y + bq->z2;
+    bq->z2  = bq->b2 * x - bq->a2 * y;
+    return y;
+}
+
+static void mr_sflux_setup(void)
+{
+    if (mr_sflux_init) return;
+    /* Kick detector filters — center freqs chosen for psytrance-class
+     * 4/4 kicks sitting in ~60-130 Hz region. */
+    mr_biquad_set_bp(&mr_bp_kick,   88.0f, (float)MR_ASSUMED_SR, 0.707f);
+    mr_biquad_set_bp(&mr_bp_click, 3162.0f, (float)MR_ASSUMED_SR, 1.05f);
+    mr_kd_kick_env = mr_kd_click_env = 0.0f;
+    mr_kd_kick_last = mr_kd_click_last = 0.0f;
+    mr_kd_head = -1; mr_kd_count = 0; mr_kd_refract_left = 0;
+    for (int i = 0; i < MR_KD_HIST; i++) { mr_kd_kick_d[i] = 0.0f; mr_kd_click_d[i] = 0.0f; }
+    /* Hann window */
+    for (int i = 0; i < MR_FFT_SIZE; i++) {
+        mr_window[i] = 0.5f - 0.5f * cosf(2.0f * (float)M_PI * (float)i / (float)(MR_FFT_SIZE - 1));
+    }
+    /* Triangular log-spaced filter bank, 30 Hz .. 17 kHz */
+    int n_bins = MR_FFT_SIZE / 2 + 1;
+    float f_lo = 30.0f, f_hi = 17000.0f;
+    float logf_lo = logf(f_lo), logf_hi = logf(f_hi);
+    float bin_hz = (float)MR_ASSUMED_SR / (float)MR_FFT_SIZE;
+    float centers[MR_BANDS + 2];
+    for (int i = 0; i < MR_BANDS + 2; i++) {
+        float lf = logf_lo + (logf_hi - logf_lo) * (float)i / (float)(MR_BANDS + 1);
+        centers[i] = expf(lf);
+    }
+    for (int m = 0; m < MR_BANDS; m++)
+        for (int k = 0; k < n_bins; k++) mr_fbank[m][k] = 0.0f;
+    for (int m = 0; m < MR_BANDS; m++) {
+        float f_left = centers[m];
+        float f_ctr  = centers[m + 1];
+        float f_right= centers[m + 2];
+        for (int k = 0; k < n_bins; k++) {
+            float fk = (float)k * bin_hz;
+            float w = 0.0f;
+            if (fk > f_left && fk < f_right) {
+                if (fk <= f_ctr) w = (fk - f_left) / (f_ctr - f_left);
+                else             w = (f_right - fk) / (f_right - f_ctr);
+            }
+            mr_fbank[m][k] = w;
+        }
+    }
+    for (int m = 0; m < MR_BANDS; m++) mr_prev_bands[m] = 0.0f;
+    for (int i = 0; i < MR_ODF_HIST; i++) {
+        mr_odf_full[i] = 0.0f; mr_odf_kick[i] = 0.0f; mr_odf_click[i] = 0.0f;
+        mr_kick_lin_hist[i] = 0.0f;
+    }
+    mr_sflux_init = 1;
+}
+
+/* Peak-pick helper. ring: ring buffer of length MR_ODF_HIST, head: newest index.
+ * Returns 1 if the frame at (head - POST_MAX) is an onset. Fills *out_peak
+ * with its ODF value so callers can derive a strength. */
+static int mr_pick_peak(const float *ring, int head, int *frames_since,
+                        float *out_peak)
+{
+    int detect = (head - MR_PK_POST_MAX + MR_ODF_HIST) % MR_ODF_HIST;
+    float center = ring[detect];
+    *out_peak = center;
+
+    /* Need pre_avg + post_max valid frames before peak-picking */
+    if (mr_odf_count < MR_PK_PRE_AVG + MR_PK_POST_MAX + 1) {
+        (*frames_since)++;
+        return 0;
+    }
+
+    /* Local max over pre_max + post_max window */
+    for (int d = 1; d <= MR_PK_PRE_MAX; d++) {
+        int idx = (detect - d + MR_ODF_HIST) % MR_ODF_HIST;
+        if (ring[idx] > center) { (*frames_since)++; return 0; }
+    }
+    for (int d = 1; d <= MR_PK_POST_MAX; d++) {
+        int idx = (detect + d) % MR_ODF_HIST;
+        if (ring[idx] > center) { (*frames_since)++; return 0; }
+    }
+    /* Moving average (pre_avg frames ending at detect, inclusive) */
+    float avg = 0.0f;
+    for (int d = 0; d <= MR_PK_PRE_AVG; d++) {
+        int idx = (detect - d + MR_ODF_HIST) % MR_ODF_HIST;
+        avg += ring[idx];
+    }
+    avg /= (float)(MR_PK_PRE_AVG + 1);
+
+    if (center >= avg * MR_PK_THRESH &&
+        center >= MR_PK_FLOOR &&
+        *frames_since >= MR_PK_COMBINE) {
+        *frames_since = 0;
+        return 1;
+    }
+    (*frames_since)++;
+    return 0;
+}
+
+static void mr_sflux_process_window(void)
+{
+    /* Windowed copy for FFT */
+    static float work[MR_FFT_SIZE];
+    for (int i = 0; i < MR_FFT_SIZE; i++) work[i] = mr_fft_buf[i] * mr_window[i];
+    kiss_fft_cpx freq[MR_FFT_SIZE / 2 + 1];
+    kiss_fftr(mr_fft_cfg, work, freq);
+    int n_bins = MR_FFT_SIZE / 2 + 1;
+
+    /* Magnitudes */
+    static float mags[MR_FFT_SIZE / 2 + 1];
+    for (int k = 0; k < n_bins; k++)
+        mags[k] = sqrtf(freq[k].r * freq[k].r + freq[k].i * freq[k].i);
+
+    /* Filter bank → log bands */
+    float bands[MR_BANDS];
+    for (int m = 0; m < MR_BANDS; m++) {
+        float sum = 0.0f;
+        const float *row = mr_fbank[m];
+        for (int k = 0; k < n_bins; k++) sum += row[k] * mags[k];
+        bands[m] = log10f(1.0f + sum);
+    }
+
+    /* Max filter ±3 bins of the PREVIOUS frame (vibrato suppression) */
+    float prev_max[MR_BANDS];
+    for (int m = 0; m < MR_BANDS; m++) {
+        float mx = mr_prev_bands[m];
+        for (int d = 1; d <= MR_MAXFILT_R; d++) {
+            int lo = m - d, hi = m + d;
+            if (lo >= 0         && mr_prev_bands[lo] > mx) mx = mr_prev_bands[lo];
+            if (hi <  MR_BANDS  && mr_prev_bands[hi] > mx) mx = mr_prev_bands[hi];
+        }
+        prev_max[m] = mx;
+    }
+
+    /* Half-wave rectified spectral flux → ODFs */
+    float odf_full = 0.0f, odf_kick = 0.0f, odf_click = 0.0f;
+    for (int m = 0; m < MR_BANDS; m++) {
+        float d = bands[m] - prev_max[m];
+        if (d > 0.0f) {
+            odf_full += d;
+            if (m >= MR_KICK_BAND_LO  && m < MR_KICK_BAND_HI)  odf_kick  += d;
+            if (m >= MR_CLICK_BAND_LO && m < MR_CLICK_BAND_HI) odf_click += d;
+        }
+    }
+    /* Save as next frame's reference */
+    for (int m = 0; m < MR_BANDS; m++) mr_prev_bands[m] = bands[m];
+
+    /* Linear kick-band magnitude (pre-log) — used for absolute amplitude
+     * gating. A real kick is LOUD; sustained bassline notes + ambient
+     * rumble tend to be quieter in this specific band. */
+    float kick_lin = 0.0f;
+    {
+        int kb_lo = (int)( 40.0f * MR_FFT_SIZE / (float)MR_ASSUMED_SR);
+        int kb_hi = (int)(160.0f * MR_FFT_SIZE / (float)MR_ASSUMED_SR);
+        for (int b = kb_lo; b <= kb_hi && b < n_bins; b++) kick_lin += mags[b];
+    }
+
+    /* Push into rings */
+    mr_odf_head = (mr_odf_head + 1) % MR_ODF_HIST;
+    mr_odf_full [mr_odf_head] = odf_full;
+    mr_odf_kick [mr_odf_head] = odf_kick;
+    mr_odf_click[mr_odf_head] = odf_click;
+    mr_kick_lin_hist[mr_odf_head] = kick_lin;
+    if (mr_odf_count < MR_ODF_HIST) mr_odf_count++;
+
+    /* Track slowly-decaying loudest kick-band magnitude — used as adaptive
+     * relative threshold. Very slow decay so quiet passages don't "lower
+     * the bar" and re-enable noise detection. */
+    if (kick_lin > mr_kick_lin_peak) mr_kick_lin_peak = kick_lin;
+    else mr_kick_lin_peak *= 0.9998f;   /* ~5s half-life at 94 fps */
+    if (mr_kick_lin_peak < 1.0f) mr_kick_lin_peak = 1.0f;
+
+    /* Peak-pick both streams (POST_MAX frames behind real-time) */
+    float peak_full = 0.0f, peak_kick = 0.0f;
+    int onset_full = mr_pick_peak(mr_odf_full, mr_odf_head, &mr_frames_since_full, &peak_full);
+    int onset_kick = mr_pick_peak(mr_odf_kick, mr_odf_head, &mr_frames_since_kick, &peak_kick);
+
+    /* ======= MULTI-GATE KICK VALIDATION =======
+     * The flux peak picker is necessary but not sufficient. Real kicks must:
+     *   (1) be LOUD (abs amplitude gate)
+     *   (2) be near the recent loudest kick (adaptive relative gate)
+     *   (3) have a sharp transient (not a slow swell)
+     *   (4) co-occur with a click-band flux spike
+     * Any gate failing → reject and quietly arm for quick re-eval.
+     */
+    if (onset_kick) {
+        int detect = (mr_odf_head - MR_PK_POST_MAX + MR_ODF_HIST) % MR_ODF_HIST;
+        float lin_now = mr_kick_lin_hist[detect];
+        int prev_idx  = (detect - 3 + MR_ODF_HIST) % MR_ODF_HIST;  /* ~32 ms before */
+        float lin_prev= mr_kick_lin_hist[prev_idx];
+
+        /* Gate 1: absolute linear amplitude — just a silence floor. */
+        int pass_abs      = (lin_now >= 2.0f);
+        /* Gate 2: relative to recent loudest kick — must be a PROPER
+         * kick, not a ghost bass note. */
+        int pass_rel      = (lin_now >= mr_kick_lin_peak * 0.35f);
+        /* Gate 3: transient sharpness — current mag vs ~32 ms prior.
+         * Real kicks slam up. Bass swells rise gently. */
+        int pass_transient= (lin_now >= lin_prev * 1.30f);
+
+        /* Gate 4: click-band co-occurrence (existing) */
+        int pass_click = 0;
+        {
+            float click_peak = 0.0f;
+            for (int d = -MR_CLICK_WINDOW; d <= MR_CLICK_WINDOW; d++) {
+                int idx = (detect + d + MR_ODF_HIST) % MR_ODF_HIST;
+                if (mr_odf_click[idx] > click_peak) click_peak = mr_odf_click[idx];
+            }
+            pass_click = (click_peak >= MR_CLICK_FLOOR);
+        }
+
+        /* Require 3 of the 4 gates — tolerates one false negative
+         * (e.g., dubby kick with no click, or slow-attack kick). */
+        int gates_passed = pass_abs + pass_rel + pass_transient + pass_click;
+        if (gates_passed < 3) {
+            onset_kick = 0;
+            if (mr_frames_since_kick > 2) mr_frames_since_kick = 2;
+        }
+    }
+
+    /* Adaptive normalization — track slow-decaying peaks */
+    if (peak_full > mr_odf_full_peak) mr_odf_full_peak = peak_full;
+    else mr_odf_full_peak *= 0.9995f;
+    if (mr_odf_full_peak < 0.01f) mr_odf_full_peak = 0.01f;
+    if (peak_kick > mr_odf_kick_peak) mr_odf_kick_peak = peak_kick;
+    else mr_odf_kick_peak *= 0.9995f;
+    if (mr_odf_kick_peak < 0.01f) mr_odf_kick_peak = 0.01f;
+
+    /* ---- Continuous (unchanged) band energies for mid/treble, plus
+     * a raw bass reference for the ENVELOPE below. Use linear mags. ---- */
+    float bass_raw = 0.0f;  /* 0-150 Hz */
+    int bass_bin_hi = (int)(150.0f * MR_FFT_SIZE / (float)MR_ASSUMED_SR); /* ~6 */
+    for (int b = 0; b <= bass_bin_hi && b < n_bins; b++) bass_raw += mags[b];
+    bass_raw /= (float)(bass_bin_hi + 1);
+    float mid = 0.0f;   /* 300-4000 Hz */
+    int mid_lo = (int)( 300.0f * MR_FFT_SIZE / (float)MR_ASSUMED_SR);
+    int mid_hi = (int)(4000.0f * MR_FFT_SIZE / (float)MR_ASSUMED_SR);
+    for (int b = mid_lo; b < mid_hi && b < n_bins; b++) mid += mags[b];
+    mid /= (float)(mid_hi - mid_lo);
+    float treble = 0.0f; /* 4k-16k Hz */
+    int tr_lo = mid_hi;
+    int tr_hi = (int)(16000.0f * MR_FFT_SIZE / (float)MR_ASSUMED_SR);
+    for (int b = tr_lo; b < tr_hi && b < n_bins; b++) treble += mags[b];
+    treble /= (float)(tr_hi - tr_lo);
+
+    float mid_n    = mid    * 0.04f;
+    float treble_n = treble * 0.08f;
+    if (mid_n > 1.0f) mid_n = 1.0f;
+    if (treble_n > 1.0f) treble_n = 1.0f;
+
+    /* ---- Kick envelope: snap up on kick onset, exponential decay per hop.
+     * tau ≈ 160 ms → decay ~0.935/hop at 94 fps. Attack is instant. */
+    const float bass_decay = 0.935f;
+    if (onset_kick) {
+        float strength = peak_kick / mr_odf_kick_peak;
+        if (strength < 0.4f) strength = 0.4f; /* ensure audible kick always lights up visually */
+        if (strength > 1.0f) strength = 1.0f;
+        if (strength > mr_bass_env) mr_bass_env = strength;
+    } else {
+        mr_bass_env *= bass_decay;
+    }
+
+    /* ---- Spectrum for the visualizer (512 bins linearly from 1025 bins) ---- */
+    float spec_peak = 0.001f;
+    for (int b = 0; b < 512; b++) {
+        int k = (b * (n_bins - 1)) / 511;
+        if (k >= n_bins) k = n_bins - 1;
+        float m = mags[k];
+        if (m > spec_peak) spec_peak = m;
+        mr_beat.spectrum[b] = m;
+    }
+    static float spectrum_peak = 1.0f;
+    if (spec_peak > spectrum_peak) spectrum_peak = spec_peak;
+    else spectrum_peak *= 0.999f;
+    if (spectrum_peak < 0.001f) spectrum_peak = 0.001f;
+    for (int b = 0; b < 512; b++) mr_beat.spectrum[b] /= spectrum_peak;
+
+    /* Waveform (time-domain) — downsample 2048 → 256 */
+    for (int w = 0; w < 256; w++) mr_beat.waveform[w] = mr_fft_buf[w * 8];
+
+    /* Commit */
+    DWORD now = GetTickCount();
+    EnterCriticalSection(&mr_beat_lock);
+    mr_beat_snap.bass_energy    = mr_bass_env;
+    mr_beat_snap.mid_energy     = mid_n;
+    mr_beat_snap.treble_energy  = treble_n;
+    mr_beat_snap.onset_detected = onset_full;
+    if (onset_full) mr_beat_snap.beat_count++;
+    /* NOTE: kick_beat_count is now driven by the time-domain detector in
+     * mr_analyze_audio (biquad BP → envelope → adaptive threshold + HFC
+     * sidechain), NOT the FFT flux path. Ignore onset_kick here. */
+    (void)onset_kick;
+    mr_beat_snap.onset_strength = peak_full / mr_odf_full_peak;
+    if (mr_beat_snap.onset_strength > 1.0f) mr_beat_snap.onset_strength = 1.0f;
+    mr_beat_snap.tick = now;
+    memcpy(mr_beat_snap.spectrum, mr_beat.spectrum, sizeof(mr_beat_snap.spectrum));
+    memcpy(mr_beat_snap.waveform, mr_beat.waveform, sizeof(mr_beat_snap.waveform));
+    LeaveCriticalSection(&mr_beat_lock);
+    (void)bass_raw;     /* reserved for future use */
+}
+
+/* Time-domain kick detection step, called at each hop boundary.
+ * Samples the envelope follower values, computes positive derivatives,
+ * maintains adaptive thresholds, applies HFC sidechain gate + refractory,
+ * and increments mr_beat_snap.kick_beat_count when a kick is confirmed. */
+static void mr_kd_detect_at_hop(void)
+{
+    float kd = mr_kd_kick_env  - mr_kd_kick_last;
+    float cd = mr_kd_click_env - mr_kd_click_last;
+    if (kd < 0.0f) kd = 0.0f;
+    if (cd < 0.0f) cd = 0.0f;
+    mr_kd_kick_last  = mr_kd_kick_env;
+    mr_kd_click_last = mr_kd_click_env;
+
+    mr_kd_head = (mr_kd_head + 1) % MR_KD_HIST;
+    mr_kd_kick_d [mr_kd_head] = kd;
+    mr_kd_click_d[mr_kd_head] = cd;
+    if (mr_kd_count < MR_KD_HIST) mr_kd_count++;
+
+    if (mr_kd_refract_left > 0) mr_kd_refract_left--;
+
+    if (mr_kd_count < MR_KD_HIST) return;   /* need full history */
+    if (mr_kd_refract_left > 0)    return;
+
+    /* Adaptive threshold = mean of history * K + floor. Exclude the
+     * current frame so a big spike doesn't immediately gate itself. */
+    float sum_k = 0.0f, sum_c = 0.0f;
+    for (int i = 0; i < MR_KD_HIST; i++) {
+        if (i == mr_kd_head) continue;
+        sum_k += mr_kd_kick_d[i];
+        sum_c += mr_kd_click_d[i];
+    }
+    float mean_k = sum_k / (float)(MR_KD_HIST - 1);
+    float mean_c = sum_c / (float)(MR_KD_HIST - 1);
+
+    float thr_k = mean_k * MR_KD_THRESH_K + MR_KD_FLOOR_K;
+    float thr_c = mean_c * MR_KD_THRESH_C + MR_KD_FLOOR_C;
+
+    int kick_spike  = (kd >= thr_k);
+    /* Click doesn't need to spike on THIS exact hop — look back 3 hops
+     * for a click spike within ~32 ms of the kick. */
+    int click_spike = 0;
+    for (int d = 0; d <= 3; d++) {
+        int idx = (mr_kd_head - d + MR_KD_HIST) % MR_KD_HIST;
+        if (mr_kd_click_d[idx] >= thr_c) { click_spike = 1; break; }
+    }
+
+    if (kick_spike && click_spike) {
+        mr_beat_snap.kick_beat_count++;   /* updates without lock — int write */
+        mr_kd_refract_left = MR_KD_REFRACT;
+        /* Also snap bass_env so starfield/plasma pulse in sync. */
+        mr_bass_env = 1.0f;
+    }
+}
 
 static void mr_analyze_audio(const float *pcm_stereo, int frames)
 {
@@ -29,122 +511,37 @@ static void mr_analyze_audio(const float *pcm_stereo, int frames)
         mr_fft_cfg = kiss_fftr_alloc(MR_FFT_SIZE, 0, NULL, NULL);
         if (!mr_fft_cfg) return;
     }
+    if (!mr_sflux_init) mr_sflux_setup();
 
-    /* Downmix stereo to mono into accumulator */
+    /* 1-pole envelope coeffs at 48k: attack 3ms, release 80ms.
+     *   a = 1 - exp(-1/(tau*SR)) */
+    const float a_atk = 0.00693f;   /* 3 ms */
+    const float a_rel = 0.000260f;  /* 80 ms */
+
     for (int i = 0; i < frames; i++) {
-        mr_fft_buf[mr_fft_pos] = (pcm_stereo[i*2] + pcm_stereo[i*2+1]) * 0.5f;
+        float s = (pcm_stereo[i*2] + pcm_stereo[i*2+1]) * 0.5f;
+
+        /* --- Time-domain kick detection filters (full SR) --- */
+        float yk = mr_biquad_proc(&mr_bp_kick,  s);
+        float yc = mr_biquad_proc(&mr_bp_click, s);
+        float ak = yk < 0.0f ? -yk : yk;
+        float ac = yc < 0.0f ? -yc : yc;
+        if (ak > mr_kd_kick_env)  mr_kd_kick_env  += (ak - mr_kd_kick_env)  * a_atk;
+        else                      mr_kd_kick_env  += (ak - mr_kd_kick_env)  * a_rel;
+        if (ac > mr_kd_click_env) mr_kd_click_env += (ac - mr_kd_click_env) * a_atk;
+        else                      mr_kd_click_env += (ac - mr_kd_click_env) * a_rel;
+
+        /* --- FFT feed --- */
+        mr_fft_buf[mr_fft_pos] = s;
         mr_fft_pos++;
         if (mr_fft_pos >= MR_FFT_SIZE) {
-            /* Run FFT */
-            kiss_fft_cpx freq[MR_FFT_SIZE / 2 + 1];
-            kiss_fftr(mr_fft_cfg, mr_fft_buf, freq);
-
-            int n_bins = MR_FFT_SIZE / 2 + 1;
-
-            /* Kick drum band: 40-215 Hz (bins 1-5 at 44100/1024 ≈ 43Hz/bin) */
-            float kick = 0;
-            for (int b = 1; b <= 5 && b < n_bins; b++) {
-                float mag = sqrtf(freq[b].r * freq[b].r + freq[b].i * freq[b].i);
-                kick += mag;
-            }
-            kick /= 5.0f;
-
-            /* Sub-bass: 0-40 Hz (bin 0) — rumble, not beats */
-            float sub = sqrtf(freq[0].r * freq[0].r + freq[0].i * freq[0].i);
-
-            /* Full bass: 0-300 Hz (bins 0-7) */
-            float bass = 0;
-            for (int b = 0; b < 7 && b < n_bins; b++) {
-                float mag = sqrtf(freq[b].r * freq[b].r + freq[b].i * freq[b].i);
-                bass += mag;
-            }
-            bass /= 7.0f;
-
-            /* Mid: 300-4000 Hz (bins 7-93) */
-            float mid = 0;
-            for (int b = 7; b < 93 && b < n_bins; b++) {
-                float mag = sqrtf(freq[b].r * freq[b].r + freq[b].i * freq[b].i);
-                mid += mag;
-            }
-            mid /= 86.0f;
-
-            /* Treble: 4000-16000 Hz (bins 93-372) */
-            float treble = 0;
-            for (int b = 93; b < 372 && b < n_bins; b++) {
-                float mag = sqrtf(freq[b].r * freq[b].r + freq[b].i * freq[b].i);
-                treble += mag;
-            }
-            treble /= 279.0f;
-
-            /* Normalize — auto-scale: track peak and normalize against it */
-            static float kick_peak = 1.0f;
-            if (kick > kick_peak) kick_peak = kick;
-            else kick_peak *= 0.9999f; /* slow decay so it adapts */
-            if (kick_peak < 0.001f) kick_peak = 0.001f;
-            float kick_n = kick / kick_peak; /* 0-1 relative to recent peak */
-
-            static float bass_peak = 1.0f;
-            if (bass > bass_peak) bass_peak = bass;
-            else bass_peak *= 0.9999f;
-            if (bass_peak < 0.001f) bass_peak = 0.001f;
-            float bass_n = bass / bass_peak;
-            float mid_n    = mid    * 0.04f;
-            float treble_n = treble * 0.08f;
-            if (kick_n > 1.0f) kick_n = 1.0f;
-            if (bass_n > 1.0f) bass_n = 1.0f;
-            if (mid_n > 1.0f) mid_n = 1.0f;
-            if (treble_n > 1.0f) treble_n = 1.0f;
-
-            /* Running average for adaptive threshold */
-            mr_kick_avg = mr_kick_avg * 0.92f + kick_n * 0.08f;
-
-            /* Onset detection: kick-only, must exceed running average by 40%+ */
-            DWORD now = GetTickCount();
-            int onset = 0;
-            float thresh = mr_kick_avg * 1.4f;
-            if (thresh < 0.12f) thresh = 0.12f; /* minimum absolute threshold */
-
-            if (kick_n > thresh && kick_n > mr_prev_kick * 1.3f &&
-                (now - mr_last_onset_tick) > MR_ONSET_COOLDOWN_MS) {
-                onset = 1;
-                mr_last_onset_tick = now;
-            }
-
-            /* Fill spectrum magnitudes (normalized) */
-            float spec_peak = 0.001f;
-            for (int b = 0; b < 512 && b < n_bins; b++) {
-                float mag = sqrtf(freq[b].r * freq[b].r + freq[b].i * freq[b].i);
-                if (mag > spec_peak) spec_peak = mag;
-                mr_beat.spectrum[b] = mag;
-            }
-            /* Normalize spectrum to 0-1 */
-            static float spectrum_peak = 1.0f;
-            if (spec_peak > spectrum_peak) spectrum_peak = spec_peak;
-            else spectrum_peak *= 0.999f;
-            if (spectrum_peak < 0.001f) spectrum_peak = 0.001f;
-            for (int b = 0; b < 512; b++)
-                mr_beat.spectrum[b] /= spectrum_peak;
-
-            /* Copy time-domain waveform (downsample 1024 → 256 samples) */
-            for (int w = 0; w < 256; w++)
-                mr_beat.waveform[w] = mr_fft_buf[w * 4];
-
-            /* Update beat snapshot */
-            EnterCriticalSection(&mr_beat_lock);
-            mr_beat_snap.bass_energy   = bass_n;
-            mr_beat_snap.mid_energy    = mid_n;
-            mr_beat_snap.treble_energy = treble_n;
-            mr_beat_snap.onset_detected = onset;
-            if (onset) mr_beat_snap.beat_count++;
-            mr_beat_snap.onset_strength = kick_n;
-            mr_beat_snap.tick = now;
-            memcpy(mr_beat_snap.spectrum, mr_beat.spectrum, sizeof(mr_beat_snap.spectrum));
-            memcpy(mr_beat_snap.waveform, mr_beat.waveform, sizeof(mr_beat_snap.waveform));
-            LeaveCriticalSection(&mr_beat_lock);
-
-            mr_prev_kick = kick_n;
-
-            mr_fft_pos = 0;
+            mr_sflux_process_window();
+            /* Time-domain kick detection at hop boundary */
+            mr_kd_detect_at_hop();
+            /* Slide by HOP: keep the last (FFT_SIZE - HOP) samples. */
+            int keep = MR_FFT_SIZE - MR_FFT_HOP;
+            memmove(mr_fft_buf, mr_fft_buf + MR_FFT_HOP, keep * sizeof(float));
+            mr_fft_pos = keep;
         }
     }
 }
