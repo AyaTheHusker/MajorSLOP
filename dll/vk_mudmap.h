@@ -873,38 +873,45 @@ static void mdw_line_h(float x0, float y0, float x1, float y1, float thick,
     float by0 = y0 < y1 ? y0 : y1, by1 = y0 > y1 ? y0 : y1;
     if (bx1 < cx0 || bx0 > cx1 || by1 < cy0 || by0 > cy1) return;
 
-    /* Orthogonal lines → single axis-aligned quad */
+    /* Orthogonal lines → single axis-aligned quad, centered on the line */
+    float ht = thick * 0.5f;
     if (ady < 0.5f) {
-        float qx0 = bx0, qx1 = bx1, qy0 = y0, qy1 = y0 + thick;
+        float qx0 = bx0, qx1 = bx1, qy0 = y0 - ht, qy1 = y0 + ht;
         if (qx0 < cx0) qx0 = cx0; if (qx1 > cx1) qx1 = cx1;
         if (qy0 < cy0) qy0 = cy0; if (qy1 > cy1) qy1 = cy1;
         if (qx1 > qx0 && qy1 > qy0) psolid(qx0, qy0, qx1, qy1, r, g, b, a, vp_w, vp_h);
         return;
     }
     if (adx < 0.5f) {
-        float qx0 = x0, qx1 = x0 + thick, qy0 = by0, qy1 = by1;
+        float qx0 = x0 - ht, qx1 = x0 + ht, qy0 = by0, qy1 = by1;
         if (qx0 < cx0) qx0 = cx0; if (qx1 > cx1) qx1 = cx1;
         if (qy0 < cy0) qy0 = cy0; if (qy1 > cy1) qy1 = cy1;
         if (qx1 > qx0 && qy1 > qy0) psolid(qx0, qy0, qx1, qy1, r, g, b, a, vp_w, vp_h);
         return;
     }
 
-    /* Diagonal → 4 stepped quads, hard cap */
-    int steps = 4;
-    for (int s = 0; s < steps; s++) {
-        float t0 = (float)s / steps, t1 = (float)(s + 1) / steps;
-        float px0 = x0 + dx * t0, py0 = y0 + dy * t0;
-        float px1 = x0 + dx * t1, py1 = y0 + dy * t1;
-        float qx0 = px0 < px1 ? px0 : px1;
-        float qy0 = py0 < py1 ? py0 : py1;
-        float qx1 = px0 > px1 ? px0 : px1;
-        float qy1 = py0 > py1 ? py0 : py1;
-        if (qx1 - qx0 < thick) qx1 = qx0 + thick;
-        if (qy1 - qy0 < thick) qy1 = qy0 + thick;
-        if (qx0 < cx0) qx0 = cx0; if (qy0 < cy0) qy0 = cy0;
-        if (qx1 > cx1) qx1 = cx1; if (qy1 > cy1) qy1 = cy1;
-        if (qx1 <= qx0 || qy1 <= qy0) continue;
-        psolid(qx0, qy0, qx1, qy1, r, g, b, a, vp_w, vp_h);
+    /* Diagonal → single rotated quad via push_quad_free (true 45° line
+     * instead of staircase — rooms visibly connected at any zoom). */
+    {
+        float len = sqrtf(dx * dx + dy * dy);
+        if (len < 0.5f) return;
+        float nx = -dy / len, ny = dx / len;   /* perpendicular unit vec */
+        float ht = thick * 0.5f;
+        float ox = nx * ht, oy = ny * ht;
+        float px0 = x0 - ox, py0 = y0 - oy;
+        float px1 = x1 - ox, py1 = y1 - oy;
+        float px2 = x1 + ox, py2 = y1 + oy;
+        float px3 = x0 + ox, py3 = y0 + oy;
+        /* Convert pixels → NDC and push a free-form quad. */
+        float nx0 = (px0 / (float)vp_w) * 2.0f - 1.0f;
+        float ny0 = (py0 / (float)vp_h) * 2.0f - 1.0f;
+        float nx1 = (px1 / (float)vp_w) * 2.0f - 1.0f;
+        float ny1 = (py1 / (float)vp_h) * 2.0f - 1.0f;
+        float nx2 = (px2 / (float)vp_w) * 2.0f - 1.0f;
+        float ny2 = (py2 / (float)vp_h) * 2.0f - 1.0f;
+        float nx3 = (px3 / (float)vp_w) * 2.0f - 1.0f;
+        float ny3 = (py3 / (float)vp_h) * 2.0f - 1.0f;
+        push_quad_free(nx0, ny0, nx1, ny1, nx2, ny2, nx3, ny3, r, g, b, a);
     }
 }
 
@@ -1076,7 +1083,12 @@ static void mdw_draw(int vp_w, int vp_h)
             if (ex->flags & 0x0001) { lr = 0.85f; lg = 0.55f; lb = 0.20f; }
             if (ex->flags & 0x0002) { lr = 0.35f; lg = 0.35f; lb = 0.35f; }
             if (ex->flags & 0x0004) { lr = 0.90f; lg = 0.15f; lb = 0.15f; }
-            mdw_line_h(sx0, sy0, sx1, sy1, 1.5f, lr, lg, lb, 0.80f,
+            /* Thickness scales mildly with zoom so the line doesn't vanish
+             * when zoomed out and doesn't overwhelm rooms when zoomed in. */
+            float lthick = 3.0f * mdw_zoom;
+            if (lthick < 2.0f) lthick = 2.0f;
+            if (lthick > 6.0f) lthick = 6.0f;
+            mdw_line_h(sx0, sy0, sx1, sy1, lthick, lr, lg, lb, 0.85f,
                        c_x0, c_y0, c_x1, c_y1, vp_w, vp_h);
         }
     }
