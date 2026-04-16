@@ -5,3 +5,7 @@ EXPORTS
     GradientFill=proxy_GradientFill @3
     TransparentBlt=proxy_TransparentBlt @4
     vSetDdrawflag=proxy_vSetDdrawflag @5
+    rm_every_step_get @10
+    rm_every_step_set @11
+    get_room_checksum @12
+    get_location @13

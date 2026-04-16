@@ -123,6 +123,7 @@ def export(mdb_path: str, out_path: str) -> None:
 #   name name_len bytes (latin-1)
 #   checksum u32
 #   [exits] exit_count × exit_record
+#   (v4+) lair_raw_len u16, lair_raw bytes   — raw MDB Lair field text
 #
 # exit_record:
 #   dir_code u8 (0=N,1=S,2=E,3=W,4=NE,5=NW,6=SE,7=SW,8=U,9=D)
@@ -227,7 +228,7 @@ def export_bin(mdb_path: str, out_path: str, rooms_md_path: str | None = None) -
     rooms = sorted(data["rooms"].items())
     room_index: dict[tuple[int,int], int] = {}
     buf = bytearray()
-    buf += struct.pack("<IIII", 0x44554D4D, 3, len(rooms), len(data["maps"]))
+    buf += struct.pack("<IIII", 0x44554D4D, 4, len(rooms), len(data["maps"]))
     for i, ((m, rn), row) in enumerate(rooms):
         room_index[(m, rn)] = i
         wv, oo = detect_special_items(row, data["items"])
@@ -276,6 +277,9 @@ def export_bin(mdb_path: str, out_path: str, rooms_md_path: str | None = None) -
                 ex.map & 0xFFFF, ex.room & 0xFFFF,
                 (ex.key_item or ex.req_item) & 0xFFFF,
             )
+        # v4+: raw Lair field text (u16 len prefix, then bytes). Empty → len=0.
+        lr_bytes = lair_raw.encode("latin-1", "replace")[:65534]
+        buf += struct.pack("<H", len(lr_bytes)) + lr_bytes
     for m, rs in sorted(data["maps"].items()):
         buf += struct.pack("<HI", m & 0xFFFF, len(rs))
         for rn in rs:

@@ -3577,7 +3577,10 @@ static int mmansi_read_row(HWND mmansi, int row, char *out, int out_sz)
     return (int)strlen(out);
 }
 
-/* Scan MMANSI buffer for most recent "Location:" line, extract map,room */
+/* Scan MMANSI buffer for most recent "Location:" line, extract map,room.
+ * Rejects chat spoofs (gossips/telepaths/say/yell/...) by requiring the
+ * line to START with "Location:" after whitespace. Legitimate rm output
+ * has no speaker prefix; every chat variant does. */
 static int scan_mmansi_for_location(void)
 {
     HWND mw = FindWindowA("MMMAIN", NULL);
@@ -3590,11 +3593,26 @@ static int scan_mmansi_for_location(void)
     for (int r = MMANSI_MAX_ROWS - 1; r >= 0; r--) {
         int len = mmansi_read_row(ansi, r, row_buf, sizeof(row_buf));
         if (len < 10) continue;
-        /* Look for "Location:" */
-        char *loc = strstr(row_buf, "Location:");
-        if (!loc) continue;
-        /* Parse "Location:            X,Y" */
-        char *p = loc + 9;
+        /* Anchor to start of line. MegaMUD prefixes output lines with one
+         * or more "[HP=.../MA=...]:" prompts (stackable), e.g.:
+         *   [HP=238/MA=131]:[HP=238/MA=131]:Location:            6,2327
+         * Strip any number of leading prompts + whitespace, then require
+         * "Location:" to be the next token. Chat ("Name gossips: ...",
+         * "You say: ...", etc.) still fails this check because after the
+         * optional prompt a speaker name remains, not "Location:". */
+        char *p = row_buf;
+        for (;;) {
+            while (*p == ' ' || *p == '\t') p++;
+            if (p[0] == '[' && p[1] == 'H' && p[2] == 'P' && p[3] == '=') {
+                char *end = strchr(p, ']');
+                if (!end || end[1] != ':') break;
+                p = end + 2;
+                continue;
+            }
+            break;
+        }
+        if (strncmp(p, "Location:", 9) != 0) continue;
+        p += 9;
         while (*p == ' ') p++;
         int map = 0, room = 0;
         if (sscanf(p, "%d,%d", &map, &room) == 2) {
@@ -3672,17 +3690,14 @@ static DWORD WINAPI pro_step_thread(LPVOID param)
             continue;
         }
 
-        /* Path step changed — type rm */
+        /* Path step changed — type rm. Location parsing is handled by
+         * get_location() which self-scans MMANSI ~20Hz, so we don't block
+         * here waiting for the response (combat output used to push the
+         * Location: line past a fixed 500ms sleep, leaving the cache stale). */
         if (step != pro_last_step && step > 0) {
             logmsg("[prostep] Step %d->%d\n", pro_last_step, step);
             pro_last_step = step;
             type_into_megamud("rm");
-            /* Wait for rm output to appear in terminal, then parse Location */
-            Sleep(500);
-            if (scan_mmansi_for_location()) {
-                update_statusbar_location();
-                logmsg("[prostep] Location: Map %d, Room %d\n", loc_map, loc_room);
-            }
         } else {
             pro_last_step = step;
         }
@@ -3714,6 +3729,36 @@ void WINAPI rm_every_step_set(int on)
     }
     cfg_save();
     logmsg("[mudplugin] RM Every Step: %s (via vk_terminal)\n", on ? "ON" : "OFF");
+}
+
+/* Live current room checksum. Returns 0 when struct not resolved yet.
+ * Safe to call every frame — just a memory read. */
+unsigned int WINAPI get_room_checksum(void)
+{
+    if (!struct_base) return 0;
+    return *(DWORD *)(struct_base + OFF_ROOM_CHECKSUM);
+}
+
+/* Live current location as parsed from the "rm" command output (Map, Room).
+ * Returns packed value: (map << 16) | (room & 0xFFFF), or 0 if not yet known.
+ * Map/room can each be 0..65535. MajorMUD map numbers are small (<256), room
+ * numbers fit in 16 bits. Safe to call every frame.
+ *
+ * Rescans MMANSI itself (rate-limited ~20Hz) so the value is always fresh —
+ * the prostep "type rm; Sleep(500); scan" pattern was missing fresh Location
+ * lines when combat output delayed them past the sleep window. */
+unsigned int WINAPI get_location(void)
+{
+    static DWORD last_scan = 0;
+    DWORD now = GetTickCount();
+    if ((DWORD)(now - last_scan) >= 50) {
+        last_scan = now;
+        scan_mmansi_for_location();
+    }
+    if (loc_map == 0 && loc_room == 0) return 0;
+    unsigned int m = (unsigned int)loc_map & 0xFFFF;
+    unsigned int r = (unsigned int)loc_room & 0xFFFF;
+    return (m << 16) | r;
 }
 
 /* ---- Auto struct finder thread ---- */

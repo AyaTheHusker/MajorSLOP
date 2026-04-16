@@ -812,8 +812,12 @@ static int megamud_hidden = 0; /* 1 = MegaMUD windows hidden, VK-only mode */
  * it without duplicating the struct_base / OFF_CUR_PATH_STEP logic. */
 typedef int  (WINAPI *pfn_rm_get_t)(void);
 typedef void (WINAPI *pfn_rm_set_t)(int);
+typedef unsigned int (WINAPI *pfn_room_cksum_t)(void);
+typedef unsigned int (WINAPI *pfn_location_t)(void);
 static pfn_rm_get_t pfn_rm_every_step_get = NULL;
 static pfn_rm_set_t pfn_rm_every_step_set = NULL;
+static pfn_room_cksum_t pfn_get_room_checksum = NULL;
+static pfn_location_t   pfn_get_location = NULL;
 static int          rm_bridge_resolved = 0;
 
 static void rm_bridge_resolve(void)
@@ -826,6 +830,8 @@ static void rm_bridge_resolve(void)
     if (!mm) return;
     pfn_rm_every_step_get = (pfn_rm_get_t)GetProcAddress(mm, "rm_every_step_get");
     pfn_rm_every_step_set = (pfn_rm_set_t)GetProcAddress(mm, "rm_every_step_set");
+    pfn_get_room_checksum = (pfn_room_cksum_t)GetProcAddress(mm, "get_room_checksum");
+    pfn_get_location      = (pfn_location_t)GetProcAddress(mm, "get_location");
 }
 
 static int rm_every_step_get_safe(void)
@@ -839,6 +845,19 @@ static void rm_every_step_toggle_safe(void)
     rm_bridge_resolve();
     if (!pfn_rm_every_step_get || !pfn_rm_every_step_set) return;
     pfn_rm_every_step_set(pfn_rm_every_step_get() ? 0 : 1);
+}
+
+static unsigned int get_room_checksum_safe(void)
+{
+    rm_bridge_resolve();
+    return pfn_get_room_checksum ? pfn_get_room_checksum() : 0;
+}
+
+/* Returns packed (map << 16) | room from the live RM parse, or 0 if unknown. */
+static unsigned int get_location_safe(void)
+{
+    rm_bridge_resolve();
+    return pfn_get_location ? pfn_get_location() : 0;
 }
 
 /* ---- PTT Voice Overlay ---- */
@@ -7805,6 +7824,18 @@ static void vkt_build_vertices(void)
     vxb_draw(vp_w, vp_h);
     pl_draw(vp_w, vp_h);
     pst_draw(vp_w, vp_h);
+    /* Live current-room tracking — use the map/room parsed from the most
+     * recent `rm` command output (msimg32 maintains loc_map / loc_room).
+     * Checksums are NOT unique per room, so matching by checksum silently
+     * teleported the marker to dup rooms. Gated by [x] use rm. */
+    if (mdw_use_rm) {
+        unsigned int packed = get_location_safe();
+        if (packed) {
+            int map = (int)((packed >> 16) & 0xFFFF);
+            int room = (int)(packed & 0xFFFF);
+            if (room > 0) mdw_set_current(map, room);
+        }
+    }
     mdw_draw(vp_w, vp_h);
     stw_draw(vp_w, vp_h, 0, 0, 0);  /* draw only, clicks handled in WM_LBUTTONDOWN */
     bsp_draw(vp_w, vp_h);
@@ -7888,6 +7919,10 @@ static int numpad_handle(WPARAM vk, int ctrl, int alt, int shift)
     cmd[sizeof(cmd) - 1] = '\0';
 
     input_send_raw(cmd);
+    /* If "rm every step" is on AND this is a plain walk (no pick/disarm/bash),
+     * chase with "rm" so the Location: line refreshes on every step. */
+    if (!ctrl && !alt && !shift && rm_every_step_get_safe())
+        input_send_raw("rm");
     /* Swallow the WM_CHAR that TranslateMessage will generate — otherwise
      * "8" also lands in the terminal input box while we're also sending "n"
      * to the MUD. */
@@ -10106,6 +10141,13 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         return 0;
 
     case WM_KEYDOWN: {
+        /* Reset swallow-char at the start of every keydown so it can't get
+         * stuck (e.g., when a prior keydown set it but no WM_CHAR followed,
+         * which happens with modified/dead keys). Only the current keystroke
+         * is allowed to set it, which is consumed by the immediately-
+         * following WM_CHAR. Without this, a single stuck flag silently
+         * eats all typed input forever. */
+        mdw_swallow_char = 0;
         /* File picker absorbs all keys when modal */
         if (fp_visible() && fp_key_down((unsigned int)wParam)) return 0;
         int ctrl = GetKeyState(VK_CONTROL) & 0x8000;
@@ -10293,6 +10335,8 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
          * that TranslateMessage generates so numpad walking doesn't also
          * type "4" into the terminal input. */
         if (mdw_swallow_char) { mdw_swallow_char = 0; return 0; }
+        /* Map Walker input boxes (Map/Room fields) take priority */
+        if (mdw_char_input((unsigned int)wParam)) return 0;
         /* File picker absorbs character input when modal */
         if (fp_visible()) return 0;
         /* Suppress Ctrl+chars (already handled in WM_KEYDOWN) */
@@ -11137,6 +11181,8 @@ vkm_click_handler:
         int rmy = mouse_ty((short)HIWORD(lParam));
         /* File picker is modal — swallow right-clicks too */
         if (fp_visible()) return 0;
+        /* Map walker: right-click a room to center the view on it */
+        if (mdw_rbutton_down(rmx, rmy)) return 0;
         /* Right-click on floating window → font size context menu */
         {
             int wnd = vkw_hit_test(rmx, rmy);
