@@ -9,3 +9,5 @@ EXPORTS
     rm_every_step_set @11
     get_room_checksum @12
     get_location @13
+    auto_rm_queue_peek @14
+    auto_rm_queue_consume @15

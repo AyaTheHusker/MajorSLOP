@@ -120,6 +120,11 @@ static uint32_t mdw_hover_ri = 0xFFFFFFFF;
  * target ri is stashed here and applied on the first frame hover clears. */
 static uint32_t mdw_pending_recenter_ri = 0xFFFFFFFF;
 
+/* Auto-recenter the view on every room change (default). When 0, the view
+ * stays put — useful for AFK loop scripting where you set the framing once
+ * and just watch the player marker move around the visible map. */
+static int mdw_auto_recenter = 1;
+
 /* ---- Path recorder (ported from mudmap_test.c) ----
  * Records each room transition as an MME-compatible step so we can write a
  * .mp file and its enhanced .mpx sidecar. The sidebar panel on the right of
@@ -341,6 +346,7 @@ static int  mdw_input_focus = 0;          /* 0=none, 1=map, 2=room */
 /* Hit rects for the bottom control strip (filled every frame by mdw_draw) */
 static float mdw_ctrl_y0 = 0, mdw_ctrl_y1 = 0;
 static float mdw_cb_use_rm_x0 = 0,  mdw_cb_use_rm_x1 = 0;
+static float mdw_cb_auto_x0   = 0,  mdw_cb_auto_x1   = 0;
 static float mdw_btn_zoom_out_x0 = 0, mdw_btn_zoom_out_x1 = 0;
 static float mdw_btn_zoom_in_x0  = 0, mdw_btn_zoom_in_x1  = 0;
 static float mdw_in_map_x0  = 0,  mdw_in_map_x1  = 0;
@@ -630,17 +636,22 @@ static int mdw_set_current(int map_num, int room_num)
             if (ex) mdw_rec_append(mdw_cur_ri, ex);
         }
     }
+    int map_switched = 0;
     if (mdw_rooms[ri].map != mdw_cur_map_view || mdw_rooms[ri].gx == INT16_MIN) {
         for (uint32_t k = 0; k < mdw_room_count; k++)
             mdw_rooms[k].gx = mdw_rooms[k].gy = INT16_MIN;
         mdw_layout_bfs(mdw_rooms[ri].map, ri);
         mdw_cur_map_view = mdw_rooms[ri].map;
         changed = 1;
+        map_switched = 1;
     }
     mdw_cur_ri = ri;
     if (changed) {
         mdw_pulse_tick = GetTickCount();
-        if (mdw_rooms[ri].gx != INT16_MIN) {
+        /* Recenter on same-map moves only if auto is on; on a map switch
+         * recenter unconditionally so the user isn't staring at blank
+         * space in coords that belong to a different map. */
+        if (mdw_rooms[ri].gx != INT16_MIN && (mdw_auto_recenter || map_switched)) {
             if (mdw_hover_ri != 0xFFFFFFFF) {
                 /* Hovering — queue it, apply on the frame hover clears. */
                 mdw_pending_recenter_ri = ri;
@@ -1212,13 +1223,16 @@ static void mdw_draw(int vp_w, int vp_h)
     mdw_hover_ri = hover_ri;
 
     /* Hover just cleared? Flush any queued recenter so the camera catches
-     * up with the player's current room. */
+     * up with the player's current room (only when auto-recenter is on —
+     * if the user flipped it off during a hover, drop the pending target). */
     if (mdw_hover_ri == 0xFFFFFFFF && mdw_pending_recenter_ri != 0xFFFFFFFF
         && mdw_pending_recenter_ri < mdw_room_count) {
-        MdwRoom *pr = &mdw_rooms[mdw_pending_recenter_ri];
-        if (pr->gx != INT16_MIN) {
-            mdw_view_x = pr->gx * 20.0f;
-            mdw_view_y = pr->gy * 20.0f;
+        if (mdw_auto_recenter) {
+            MdwRoom *pr = &mdw_rooms[mdw_pending_recenter_ri];
+            if (pr->gx != INT16_MIN) {
+                mdw_view_x = pr->gx * 20.0f;
+                mdw_view_y = pr->gy * 20.0f;
+            }
         }
         mdw_pending_recenter_ri = 0xFFFFFFFF;
     }
@@ -1487,6 +1501,29 @@ static void mdw_draw(int vp_w, int vp_h)
         cx = bx1 + 4 + 6 * cw + 10;
     }
 
+    /* [X] auto checkbox — auto-recenter map on room change vs manual pan */
+    {
+        int bx0 = cx, by0 = cy, bx1 = cx + ch, by1 = cy + ch;
+        mdw_cb_auto_x0 = (float)bx0; mdw_cb_auto_x1 = (float)bx1;
+        psolid((float)bx0, (float)by0, (float)bx1, (float)by1,
+               bgr * 0.2f, bgg * 0.2f, bgb * 0.2f, 1.0f, vp_w, vp_h);
+        psolid((float)bx0, (float)by0, (float)bx1, (float)by0 + 1,
+               acr, acg, acb, 0.8f, vp_w, vp_h);
+        psolid((float)bx0, (float)by1 - 1, (float)bx1, (float)by1,
+               acr, acg, acb, 0.8f, vp_w, vp_h);
+        psolid((float)bx0, (float)by0, (float)bx0 + 1, (float)by1,
+               acr, acg, acb, 0.8f, vp_w, vp_h);
+        psolid((float)bx1 - 1, (float)by0, (float)bx1, (float)by1,
+               acr, acg, acb, 0.8f, vp_w, vp_h);
+        if (mdw_auto_recenter) {
+            psolid((float)bx0 + 3, (float)by0 + 3,
+                   (float)bx1 - 3, (float)by1 - 3,
+                   0.25f, 0.95f, 0.35f, 1.0f, vp_w, vp_h);
+        }
+        ptext(bx1 + 4, cy, "auto", txr, txg, txb, vp_w, vp_h, cw, ch);
+        cx = bx1 + 4 + 4 * cw + 10;
+    }
+
     /* Map: [  ]  Room: [    ] */
     {
         int mw = 4 * cw + 6;
@@ -1641,6 +1678,19 @@ static int mdw_mouse_down(int mx, int my)
         float fmx = (float)mx;
         if (fmx >= mdw_cb_use_rm_x0 && fmx <= mdw_cb_use_rm_x1) {
             mdw_use_rm = !mdw_use_rm;
+            mdw_input_focus = 0;
+            return 1;
+        }
+        if (fmx >= mdw_cb_auto_x0 && fmx <= mdw_cb_auto_x1) {
+            mdw_auto_recenter = !mdw_auto_recenter;
+            /* Flipping auto back ON while a room is known snaps view to it
+             * so the user doesn't have to wait for the next movement. */
+            if (mdw_auto_recenter && mdw_cur_ri != 0xFFFFFFFF &&
+                mdw_cur_ri < mdw_room_count &&
+                mdw_rooms[mdw_cur_ri].gx != INT16_MIN) {
+                mdw_view_x = mdw_rooms[mdw_cur_ri].gx * 20.0f;
+                mdw_view_y = mdw_rooms[mdw_cur_ri].gy * 20.0f;
+            }
             mdw_input_focus = 0;
             return 1;
         }
@@ -1871,9 +1921,11 @@ static void mdw_toggle(void)
         mdw_focused = 1;
         /* Center view on current room if we have one, otherwise fall back
          * to the centroid of the visible map so the user sees rooms
-         * immediately instead of a blank canvas requiring pan-to-find. */
-        int centered = 0;
-        if (mdw_cur_ri != 0xFFFFFFFF && mdw_cur_ri < mdw_room_count &&
+         * immediately instead of a blank canvas requiring pan-to-find.
+         * In manual (auto-recenter off) mode we trust the saved view. */
+        int centered = !mdw_auto_recenter;
+        if (mdw_auto_recenter && mdw_cur_ri != 0xFFFFFFFF &&
+            mdw_cur_ri < mdw_room_count &&
             mdw_rooms[mdw_cur_ri].gx != INT16_MIN) {
             mdw_view_x = mdw_rooms[mdw_cur_ri].gx * 20.0f;
             mdw_view_y = mdw_rooms[mdw_cur_ri].gy * 20.0f;

@@ -3653,6 +3653,12 @@ static void update_statusbar_location(void)
 /* Watches ROOM_CHECKSUM for changes and types "pro<Enter>" into MegaMUD's
  * MMANSI terminal. We're in-process, so PostMessage works directly. */
 
+/* Queue of "pending auto-rm injections" the vk_terminal filter should
+ * swallow. Incremented right before PostMessage(WM_CHAR) types "rm\r";
+ * vk_terminal peeks this to decide if the next "rm"/"Location:" line
+ * came from us (hide it) vs. a manual user/script "rm" (show it). */
+static volatile LONG auto_rm_queue_count = 0;
+
 /* Type a string + Enter into MegaMUD's terminal */
 static void type_into_megamud(const char *cmd)
 {
@@ -3697,6 +3703,7 @@ static DWORD WINAPI pro_step_thread(LPVOID param)
         if (step != pro_last_step && step > 0) {
             logmsg("[prostep] Step %d->%d\n", pro_last_step, step);
             pro_last_step = step;
+            InterlockedIncrement(&auto_rm_queue_count);
             type_into_megamud("rm");
         } else {
             pro_last_step = step;
@@ -3729,6 +3736,26 @@ void WINAPI rm_every_step_set(int on)
     }
     cfg_save();
     logmsg("[mudplugin] RM Every Step: %s (via vk_terminal)\n", on ? "ON" : "OFF");
+}
+
+/* Returns current auto-rm queue depth without modifying it. vk_terminal uses
+ * this to peek whether the next "rm" echo / Location block is ours. */
+int WINAPI auto_rm_queue_peek(void)
+{
+    return (int)auto_rm_queue_count;
+}
+
+/* Decrement the auto-rm queue (floor at 0) and return 1 if we consumed a
+ * slot, 0 if queue was already empty. vk_terminal calls this on the
+ * Location: row match, once per auto-rm response. */
+int WINAPI auto_rm_queue_consume(void)
+{
+    for (;;) {
+        LONG cur = auto_rm_queue_count;
+        if (cur <= 0) return 0;
+        if (InterlockedCompareExchange(&auto_rm_queue_count, cur - 1, cur) == cur)
+            return 1;
+    }
 }
 
 /* Live current room checksum. Returns 0 when struct not resolved yet.

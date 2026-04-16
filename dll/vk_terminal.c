@@ -787,7 +787,8 @@ static int ttf_loaded[MAX_TTF_FONTS] = {0};
 #define VKM_X2_RMSTEP    3   /* RM Every Step toggle (auto-room after walks) */
 #define VKM_X2_MAPWALK   4   /* Map Walker window toggle */
 #define VKM_X2_LOADDB    5   /* Load Map DB… (MDB file picker) */
-#define VKM_X2_COUNT     6
+#define VKM_X2_RMDEBUG   6   /* Show full RM debug text (bypass rm filter) */
+#define VKM_X2_COUNT     7
 
 /* Visualizations 3rd-level submenu */
 #define VKM_SUB_VIZ      9
@@ -814,10 +815,13 @@ typedef int  (WINAPI *pfn_rm_get_t)(void);
 typedef void (WINAPI *pfn_rm_set_t)(int);
 typedef unsigned int (WINAPI *pfn_room_cksum_t)(void);
 typedef unsigned int (WINAPI *pfn_location_t)(void);
+typedef int  (WINAPI *pfn_auto_rm_q_t)(void);
 static pfn_rm_get_t pfn_rm_every_step_get = NULL;
 static pfn_rm_set_t pfn_rm_every_step_set = NULL;
 static pfn_room_cksum_t pfn_get_room_checksum = NULL;
 static pfn_location_t   pfn_get_location = NULL;
+static pfn_auto_rm_q_t  pfn_auto_rm_queue_peek = NULL;
+static pfn_auto_rm_q_t  pfn_auto_rm_queue_consume = NULL;
 static int          rm_bridge_resolved = 0;
 
 static void rm_bridge_resolve(void)
@@ -832,6 +836,20 @@ static void rm_bridge_resolve(void)
     pfn_rm_every_step_set = (pfn_rm_set_t)GetProcAddress(mm, "rm_every_step_set");
     pfn_get_room_checksum = (pfn_room_cksum_t)GetProcAddress(mm, "get_room_checksum");
     pfn_get_location      = (pfn_location_t)GetProcAddress(mm, "get_location");
+    pfn_auto_rm_queue_peek    = (pfn_auto_rm_q_t)GetProcAddress(mm, "auto_rm_queue_peek");
+    pfn_auto_rm_queue_consume = (pfn_auto_rm_q_t)GetProcAddress(mm, "auto_rm_queue_consume");
+}
+
+static int auto_rm_queue_peek_safe(void)
+{
+    rm_bridge_resolve();
+    return pfn_auto_rm_queue_peek ? pfn_auto_rm_queue_peek() : 0;
+}
+
+static int auto_rm_queue_consume_safe(void)
+{
+    rm_bridge_resolve();
+    return pfn_auto_rm_queue_consume ? pfn_auto_rm_queue_consume() : 0;
 }
 
 static int rm_every_step_get_safe(void)
@@ -4023,11 +4041,127 @@ static void clipboard_copy(const char *text, int len)
     CloseClipboard();
 }
 
+/* rm-block filter that operates on the grid AFTER ap_feed has parsed a
+ * line. The existing ANSI state machine already handles CSI/ANSI/CR/LF
+ * correctly — we just inspect the row contents at \n time and decide
+ * whether to blank the row.
+ *
+ * We only filter rows that came from an *auto* rm injection (triggered by
+ * the RM-Every-Step thread in msimg32_proxy). pro_step_thread increments
+ * auto_rm_queue_count before typing "rm\r"; we peek it when a row closes,
+ * consume one slot on the Location row, and then stay in a "block active"
+ * state so the following Regen Time + Room Illu rows get suppressed too.
+ *
+ * Manual rms (user-typed at any source) are displayed in full — their
+ * Location row closes with queue=0, we don't enter block state, nothing
+ * is suppressed.
+ *
+ * The "Show full RM debug text" Extras toggle (rm_show_debug) bypasses
+ * filtering entirely for debugging. */
+static int rm_show_debug = 0;   /* persisted; bypass filter when 1 */
+
+static int row_contains(ap_term_t *t, int row, const char *s)
+{
+    int slen = (int)strlen(s);
+    if (row < 0 || row >= t->rows || slen <= 0) return 0;
+    for (int col = 0; col + slen <= t->cols; col++) {
+        int match = 1;
+        for (int k = 0; k < slen; k++) {
+            if ((char)t->grid[row][col + k].ch != s[k]) { match = 0; break; }
+        }
+        if (match) return 1;
+    }
+    return 0;
+}
+
+/* True if row's only non-prompt / non-whitespace content is the literal
+ * echo "rm" — i.e. the auto-typed command, not a normal prompt where the
+ * user typed something. We scan from the last ']' (end of prompt like
+ * "[HP=XX]:") to the end and require the trailing chars to be exactly "rm". */
+static int row_is_rm_echo(ap_term_t *t, int row)
+{
+    if (row < 0 || row >= t->rows) return 0;
+    int last_bracket = -1;
+    for (int c = 0; c < t->cols; c++) {
+        if ((char)t->grid[row][c].ch == ']') last_bracket = c;
+    }
+    int start = (last_bracket >= 0) ? last_bracket + 1 : 0;
+    /* skip the ':' right after prompt */
+    while (start < t->cols && (char)t->grid[row][start].ch == ':') start++;
+    /* skip leading spaces */
+    while (start < t->cols && (char)t->grid[row][start].ch == ' ') start++;
+    if (start + 1 >= t->cols) return 0;
+    if ((char)t->grid[row][start].ch != 'r') return 0;
+    if ((char)t->grid[row][start + 1].ch != 'm') return 0;
+    /* anything after "rm" must be space (or end) */
+    for (int c = start + 2; c < t->cols; c++) {
+        char ch = (char)t->grid[row][c].ch;
+        if (ch != ' ' && ch != 0) return 0;
+    }
+    return 1;
+}
+
+static int row_has_location(ap_term_t *t, int row)   { return row_contains(t, row, "Location:"); }
+static int row_has_regen(ap_term_t *t, int row)      { return row_contains(t, row, "Regen Time:"); }
+static int row_has_illu(ap_term_t *t, int row)       { return row_contains(t, row, "Room Illu:"); }
+
+static void row_blank(ap_term_t *t, int row)
+{
+    for (int c = 0; c < t->cols; c++) {
+        t->grid[row][c].ch = ' ';
+        t->grid[row][c].attr = (ap_attr_t){ 7, 0, 0, 0, 0, 0, 0 };
+    }
+}
+
+/* True while we're mid auto-rm response block (Location → Regen → Illu).
+ * Set when we consume the queue on a Location row; cleared after the
+ * third suppressed row (Room Illu:). */
+static int rm_block_remaining = 0;
+
+/* Wrapper for ap_feed that suppresses auto-rm rows at \n time. */
+static void ap_feed_rm_filtered(ap_term_t *t, const uint8_t *data, int len)
+{
+    for (int i = 0; i < len; i++) {
+        uint8_t c = data[i];
+        if (c == '\n' && !rm_show_debug) {
+            int suppress = 0;
+            if (rm_block_remaining > 0) {
+                /* Inside an auto-rm response — suppress Regen / Illu lines. */
+                if (row_has_regen(t, t->cy) || row_has_illu(t, t->cy)) {
+                    suppress = 1;
+                    rm_block_remaining--;
+                } else {
+                    /* Unexpected row inside block — bail out of block state
+                     * so we don't accidentally swallow real output. */
+                    rm_block_remaining = 0;
+                }
+            } else if (row_has_location(t, t->cy)) {
+                /* Location row — consume a queued auto-rm slot. If we got
+                 * one, this is ours: suppress and arm the block state. */
+                if (auto_rm_queue_consume_safe()) {
+                    suppress = 1;
+                    rm_block_remaining = 2;  /* Regen + Illu still coming */
+                }
+            } else if (row_is_rm_echo(t, t->cy) && auto_rm_queue_peek_safe() > 0) {
+                /* The "rm" command echo row right before the response block.
+                 * Peek (not consume) — we consume on the Location row. */
+                suppress = 1;
+            }
+            if (suppress) {
+                row_blank(t, t->cy);
+                t->cx = 0;
+                continue;
+            }
+        }
+        ap_feed_byte(t, c);
+    }
+}
+
 /* on_data callback — raw server bytes fed to state machine + backscroll */
 static void vkt_on_data(const char *data, int len)
 {
     EnterCriticalSection(&ansi_lock);
-    ap_feed(&ansi_term, (const uint8_t *)data, len);
+    ap_feed_rm_filtered(&ansi_term, (const uint8_t *)data, len);
     LeaveCriticalSection(&ansi_lock);
     bs_append(data, len);
     ra_append(data, len);
@@ -5988,6 +6122,10 @@ static void vkm_draw(int vp_w, int vp_h)
                     is_active = mdw_visible;
                 } else if (i == VKM_X2_LOADDB) {
                     label = "Load Map DB...";
+                } else if (i == VKM_X2_RMDEBUG) {
+                    label = rm_show_debug ? "\x04 Show RM Debug Text"
+                                          : "  Show RM Debug Text";
+                    is_active = rm_show_debug;
                 }
             } else if (vkm_sub == VKM_SUB_BG) {
                 if (i == VKM_BG_SETTINGS) {
@@ -11092,6 +11230,15 @@ vkm_click_handler:
                 vkm_sub = VKM_SUB_NONE;
                 return 0;
             }
+            if (si == VKM_X2_RMDEBUG) {
+                rm_show_debug = !rm_show_debug;
+                if (api) api->log("[vk_terminal] Show RM Debug: %s\n",
+                                  rm_show_debug ? "ON" : "OFF");
+                vkt_save_settings();
+                vkm_open = 0;
+                vkm_sub = VKM_SUB_NONE;
+                return 0;
+            }
             return 0;
         }
 
@@ -12029,23 +12176,30 @@ static void pst_emit_recap(void) {
     pst_s.cr_glance = 0; pst_s.cr_dodge = 0; pst_s.cr_dmg = 0;
 }
 
-/* Called from vrt_on_round — emit recap for the round that just ended.
- * No grace period: the round tick marks the START of a new round, and all
- * combat events from the previous round have already arrived by now (they
- * arrive 1-4s after the previous tick, well within the 5s window). */
+/* Called from vrt_on_round. Recap emission is now driven by
+ * pst_check_round_gap (inside pst_parse_line), which fires on cluster
+ * boundaries BEFORE the next round's first swing is counted. This tick
+ * stays as a belt-and-suspenders safety net for rounds where no further
+ * combat events arrive (e.g. combat ended); it's a no-op otherwise
+ * because the gap check already drained the counters. */
 static void pst_on_round_tick(int round_num) {
     pst_flush_round();
-    pst_emit_recap();
     pst_last_recap_tick = GetTickCount();
 }
 
 /* Called every frame — if combat events have accumulated and no swing has
- * arrived for >1500ms, the round is over. Emit the recap now, during the
- * idle gap, before the next round's swings arrive and merge with them. */
+ * arrived for >PST_IDLE_EMIT_MS, the round is over. Emit the recap now,
+ * during the idle gap, so the user sees the recap promptly.
+ *
+ * MegaMUD rounds fire every ~5s and all events in a burst land within a
+ * few hundred ms of each other. 250ms is tight enough to feel responsive
+ * while still clearing any normal intra-burst jitter. Cluster-gap (500ms)
+ * stays as a belt-and-suspenders fallback. */
+#define PST_IDLE_EMIT_MS 100
 static void pst_recap_poll(void) {
     if (pst_s.last_swing_tick == 0) return;
     DWORD elapsed = GetTickCount() - pst_s.last_swing_tick;
-    if (elapsed < 1500) return;
+    if (elapsed < PST_IDLE_EMIT_MS) return;
     int has_data = pst_s.cr_hits || pst_s.cr_crits || pst_s.cr_extra ||
                    pst_s.cr_spell || pst_s.cr_bs || pst_s.cr_miss ||
                    pst_s.cr_glance || pst_s.cr_dodge;
@@ -12056,14 +12210,38 @@ static void pst_recap_poll(void) {
     }
 }
 
-/* Check if enough time passed to consider this a new round (>1500ms gap).
- * Only flushes the per-round hit recording — recap emission is handled
- * exclusively by pst_on_round_tick to avoid mid-round splits. */
+/* Cluster-boundary check — runs at the TOP of every combat-event branch in
+ * pst_parse_line, BEFORE the event is accumulated into this round's counters.
+ *
+ * If >CLUSTER_GAP_MS has passed since the last swing and we have combat data
+ * buffered, this event belongs to a NEW round — emit the recap of the
+ * previous round now, then clear counters. The event will then accumulate
+ * cleanly into the fresh round.
+ *
+ * This fixes round splits that happen when msimg32's round-tick fires AFTER
+ * pst_feed has already added round N+1's first swing to round N's counters
+ * (both triggered synchronously from the same hooked_process_incoming chunk,
+ * pst_feed ran first). By making pst_parse_line itself the state-machine
+ * driver for recap emission, ordering becomes deterministic. */
+#define PST_CLUSTER_GAP_MS 500
+
 static void pst_check_round_gap(void) {
     DWORD now = GetTickCount();
-    if (pst_s.last_swing_tick > 0 && pst_s.cur_round_swings > 0) {
+    if (pst_s.last_swing_tick > 0) {
         DWORD elapsed = now - pst_s.last_swing_tick;
-        if (elapsed > 1500) pst_flush_round();
+        if (elapsed > PST_CLUSTER_GAP_MS) {
+            /* New cluster — emit recap of what we've accumulated. */
+            int has_data = pst_s.cr_hits || pst_s.cr_crits || pst_s.cr_extra ||
+                           pst_s.cr_spell || pst_s.cr_bs || pst_s.cr_miss ||
+                           pst_s.cr_glance || pst_s.cr_dodge;
+            if (has_data) {
+                pst_flush_round();
+                pst_emit_recap();
+            } else if (pst_s.cur_round_swings > 0) {
+                /* per-round rnd stats still want flushing */
+                pst_flush_round();
+            }
+        }
     }
     pst_s.last_swing_tick = now;
 }
@@ -12131,40 +12309,40 @@ static void pst_parse_line(const char *line)
         int dmg = pst_parse_dmg(line);
 
         if (pst_contains(line, "backstab") || pst_contains(line, "You surprise")) {
+            /* BS starts a new round. Emit previous recap BEFORE counting. */
+            pst_check_round_gap();
             pst_record_hit(&pst_s.backstab, dmg);
             pst_s.cr_bs++;
             pst_s.cr_dmg += dmg;
-            /* BS consumes the whole round — flush prev, record BS as complete round */
             pst_flush_round();
             pst_record_hit(&pst_s.rnd, dmg);
-            pst_s.last_swing_tick = GetTickCount();
         } else if (pst_contains(line, " critically ")) {
+            pst_check_round_gap();
             pst_record_hit(&pst_s.crit, dmg);
             pst_s.cr_crits++;
             pst_s.cr_dmg += dmg;
-            pst_check_round_gap();
             pst_s.cur_round_dmg += dmg;
             pst_s.cur_round_swings++;
         } else if (pst_contains(line, "Your ") && (pst_contains(line, " hits ") || pst_contains(line, " blasts ") ||
                    pst_contains(line, " burns ") || pst_contains(line, " freezes ") || pst_contains(line, " zaps "))) {
+            pst_check_round_gap();
             pst_record_hit(&pst_s.spell, dmg);
             pst_s.cr_spell++;
             pst_s.cr_dmg += dmg;
-            pst_check_round_gap();
             pst_s.cur_round_dmg += dmg;
             pst_s.cur_round_swings++;
         } else if (pst_contains(line, "extra attack")) {
+            pst_check_round_gap();
             pst_record_hit(&pst_s.extra, dmg);
             pst_s.cr_extra++;
             pst_s.cr_dmg += dmg;
-            pst_check_round_gap();
             pst_s.cur_round_dmg += dmg;
             pst_s.cur_round_swings++;
         } else {
+            pst_check_round_gap();
             pst_record_hit(&pst_s.hit, dmg);
             pst_s.cr_hits++;
             pst_s.cr_dmg += dmg;
-            pst_check_round_gap();
             pst_s.cur_round_dmg += dmg;
             pst_s.cur_round_swings++;
         }
@@ -12173,9 +12351,9 @@ static void pst_parse_line(const char *line)
 
     /* --- Glancing Blow (weapon ineffective, "Your cut glances off ...") --- */
     if (strncmp(line, "Your ", 5) == 0 && pst_contains(line, " glances off")) {
-        pst_s.miss++;          /* counts as a miss in stats */
-        pst_s.cr_glance++;     /* tracked separately for recap */
         pst_check_round_gap();
+        pst_s.miss++;
+        pst_s.cr_glance++;
         pst_s.cur_round_swings++;
         return;
     }
@@ -12184,9 +12362,9 @@ static void pst_parse_line(const char *line)
     if (pst_contains(line, "dodges your ") ||
         pst_contains(line, "sidesteps your ") ||
         pst_contains(line, "evades your ")) {
+        pst_check_round_gap();
         pst_s.miss++;
         pst_s.cr_dodge++;
-        pst_check_round_gap();
         pst_s.cur_round_swings++;
         return;
     }
@@ -12216,9 +12394,9 @@ static void pst_parse_line(const char *line)
         pst_contains(line, "You kick")) {
         /* Only count as miss if the line does NOT also contain " damage!" (already handled above) */
         if (!pst_contains(line, " damage!")) {
+            pst_check_round_gap();
             pst_s.miss++;
             pst_s.cr_miss++;
-            pst_check_round_gap();
             pst_s.cur_round_swings++;
         }
         return;
@@ -16826,6 +17004,7 @@ static void vkt_save_settings(void)
     SAVE_INT("player_stats", pst_visible);
     SAVE_INT("round_recap", pst_round_recap);
     SAVE_INT("mudradio", mr_visible);
+    SAVE_INT("rm_show_debug", rm_show_debug);
     SAVE_INT("font_adj", term_font_adj);
     SAVE_INT("term_margin", term_margin);
     SAVE_FLOAT("brightness", pp_brightness);
@@ -16904,6 +17083,16 @@ static void vkt_save_settings(void)
     SAVE_INT("pst_x", (int)pst_x); SAVE_INT("pst_y", (int)pst_y);
     SAVE_INT("mr_x", (int)mr_x); SAVE_INT("mr_y", (int)mr_y);
     SAVE_INT("mr_w", (int)mr_w); SAVE_INT("mr_h", (int)mr_h);
+    /* Map Walker state */
+    SAVE_INT("mdw_visible", mdw_visible);
+    SAVE_INT("mdw_x", (int)mdw_x); SAVE_INT("mdw_y", (int)mdw_y);
+    SAVE_INT("mdw_w", (int)mdw_w); SAVE_INT("mdw_h", (int)mdw_h);
+    SAVE_FLOAT("mdw_zoom", mdw_zoom);
+    SAVE_FLOAT("mdw_view_x", mdw_view_x);
+    SAVE_FLOAT("mdw_view_y", mdw_view_y);
+    SAVE_INT("mdw_cur_map_view", (int)mdw_cur_map_view);
+    SAVE_INT("mdw_auto_recenter", mdw_auto_recenter);
+    SAVE_INT("mdw_use_rm", mdw_use_rm);
     /* Recent destinations */
     SAVE_INT("recent_count", vkm_goto_count);
     for (int i = 0; i < vkm_goto_count; i++) {
@@ -16958,6 +17147,7 @@ static void vkt_load_settings(void)
     LOAD_INT("player_stats", pst_visible, 0);
     LOAD_INT("round_recap", pst_round_recap, 1);
     LOAD_INT("mudradio", mr_visible, 0);
+    LOAD_INT("rm_show_debug", rm_show_debug, 0);
     LOAD_INT("font_adj", term_font_adj, 0);
     LOAD_INT("term_margin", term_margin, 0);
     LOAD_FLOAT("brightness", pp_brightness, 0.0);
@@ -17050,6 +17240,18 @@ static void vkt_load_settings(void)
     { int v; LOAD_INT("mr_y", v, (int)mr_y); mr_y = (float)v; }
     { int v; LOAD_INT("mr_w", v, (int)mr_w); mr_w = (float)v; }
     { int v; LOAD_INT("mr_h", v, (int)mr_h); mr_h = (float)v; }
+    /* Map Walker state */
+    LOAD_INT("mdw_visible", mdw_visible, 0);
+    { int v; LOAD_INT("mdw_x", v, (int)mdw_x); mdw_x = (float)v; }
+    { int v; LOAD_INT("mdw_y", v, (int)mdw_y); mdw_y = (float)v; }
+    { int v; LOAD_INT("mdw_w", v, (int)mdw_w); mdw_w = (float)v; }
+    { int v; LOAD_INT("mdw_h", v, (int)mdw_h); mdw_h = (float)v; }
+    LOAD_FLOAT("mdw_zoom", mdw_zoom, 4.0);
+    LOAD_FLOAT("mdw_view_x", mdw_view_x, 0.0);
+    LOAD_FLOAT("mdw_view_y", mdw_view_y, 0.0);
+    { int v; LOAD_INT("mdw_cur_map_view", v, 1); mdw_cur_map_view = (uint16_t)v; }
+    LOAD_INT("mdw_auto_recenter", mdw_auto_recenter, 1);
+    LOAD_INT("mdw_use_rm", mdw_use_rm, 1);
     /* Recent destinations */
     LOAD_INT("recent_count", vkm_goto_count, 0);
     if (vkm_goto_count > VKM_GOTO_MAX) vkm_goto_count = VKM_GOTO_MAX;
@@ -17138,6 +17340,9 @@ static int vkt_init(const slop_api_t *a)
     vkt_load_settings();
     apply_theme_palette(current_theme);
     input_buf[0] = '\0';
+    /* Map Walker was persisted as visible → preload the bin so the window
+     * doesn't come up showing "Load a map database..." */
+    if (mdw_visible) mdw_try_load();
 
     mr_init();
 
