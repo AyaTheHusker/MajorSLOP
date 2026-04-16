@@ -783,7 +783,11 @@ static int ttf_loaded[MAX_TTF_FONTS] = {0};
 #define VKM_SUB_XTRA2    8
 #define VKM_X2_VIZ       0   /* Visualizations > */
 #define VKM_X2_BG        1   /* Backgrounds > */
-#define VKM_X2_COUNT     2
+#define VKM_X2_SEP1      2   /* separator */
+#define VKM_X2_RMSTEP    3   /* RM Every Step toggle (auto-room after walks) */
+#define VKM_X2_MAPWALK   4   /* Map Walker window toggle */
+#define VKM_X2_LOADDB    5   /* Load Map DB… (MDB file picker) */
+#define VKM_X2_COUNT     6
 
 /* Visualizations 3rd-level submenu */
 #define VKM_SUB_VIZ      9
@@ -801,6 +805,41 @@ static int ttf_loaded[MAX_TTF_FONTS] = {0};
 #define VKM_BG_COUNT       3
 
 static int megamud_hidden = 0; /* 1 = MegaMUD windows hidden, VK-only mode */
+
+/* ---- RM Every Step bridge (lives in msimg32_proxy.dll) ----
+ * The real toggle + polling thread is in msimg32_proxy.c. We resolve two
+ * small exports lazily so the menu can display the current state and flip
+ * it without duplicating the struct_base / OFF_CUR_PATH_STEP logic. */
+typedef int  (WINAPI *pfn_rm_get_t)(void);
+typedef void (WINAPI *pfn_rm_set_t)(int);
+static pfn_rm_get_t pfn_rm_every_step_get = NULL;
+static pfn_rm_set_t pfn_rm_every_step_set = NULL;
+static int          rm_bridge_resolved = 0;
+
+static void rm_bridge_resolve(void)
+{
+    if (rm_bridge_resolved) return;
+    rm_bridge_resolved = 1;
+    /* msimg32 is our host DLL — it's guaranteed to be loaded before us. */
+    HMODULE mm = GetModuleHandleA("msimg32.dll");
+    if (!mm) mm = GetModuleHandleA("msimg32");
+    if (!mm) return;
+    pfn_rm_every_step_get = (pfn_rm_get_t)GetProcAddress(mm, "rm_every_step_get");
+    pfn_rm_every_step_set = (pfn_rm_set_t)GetProcAddress(mm, "rm_every_step_set");
+}
+
+static int rm_every_step_get_safe(void)
+{
+    rm_bridge_resolve();
+    return pfn_rm_every_step_get ? pfn_rm_every_step_get() : 0;
+}
+
+static void rm_every_step_toggle_safe(void)
+{
+    rm_bridge_resolve();
+    if (!pfn_rm_every_step_get || !pfn_rm_every_step_set) return;
+    pfn_rm_every_step_set(pfn_rm_every_step_get() ? 0 : 1);
+}
 
 /* ---- PTT Voice Overlay ---- */
 /* Pointers into voice.dll exported data (resolved lazily) */
@@ -4143,6 +4182,12 @@ static void push_text_ui(int px, int py, const char *str,
     #undef UT2Y
 }
 
+/* Vulkan-rendered Map Walker panel (defined in vk_mudmap.h). Must be included
+ * after ui_font_ready, push_solid_ui, push_text_ui, ui_themes, and VSB_CHAR_*
+ * are declared. */
+#include "vk_filepicker.h"
+#include "vk_mudmap.h"
+
 /* ---- Vulkan menu rendering ---- */
 
 static int vkm_is_sep(int idx) { return idx == VKM_ITEM_SEP || idx == VKM_ITEM_SEP2; }
@@ -5910,6 +5955,20 @@ static void vkm_draw(int vp_w, int vp_h)
                     label = "Visualizations  \x10"; has_arrow = 1;
                 } else if (i == VKM_X2_BG) {
                     label = "Backgrounds  \x10"; has_arrow = 1;
+                } else if (i == VKM_X2_SEP1) {
+                    label = "";
+                } else if (i == VKM_X2_RMSTEP) {
+                    int on = rm_every_step_get_safe();
+                    label = on ? "\x04 RM Every Step" : "  RM Every Step";
+                    is_active = on;
+                } else if (i == VKM_X2_MAPWALK) {
+                    if (!mdw_bin_exists())
+                        label = "  Map Walker (no DB)";
+                    else
+                        label = mdw_visible ? "\x04 Map Walker" : "  Map Walker";
+                    is_active = mdw_visible;
+                } else if (i == VKM_X2_LOADDB) {
+                    label = "Load Map DB...";
                 }
             } else if (vkm_sub == VKM_SUB_BG) {
                 if (i == VKM_BG_SETTINGS) {
@@ -7746,6 +7805,7 @@ static void vkt_build_vertices(void)
     vxb_draw(vp_w, vp_h);
     pl_draw(vp_w, vp_h);
     pst_draw(vp_w, vp_h);
+    mdw_draw(vp_w, vp_h);
     stw_draw(vp_w, vp_h, 0, 0, 0);  /* draw only, clicks handled in WM_LBUTTONDOWN */
     bsp_draw(vp_w, vp_h);
     mr_draw(vp_w, vp_h);
@@ -7763,6 +7823,9 @@ static void vkt_build_vertices(void)
 
     /* Draw context menu on top of UI chrome */
     vkm_draw(vp_w, vp_h);
+
+    /* File picker sits above every panel & context menu — modal */
+    fp_draw(vp_w, vp_h);
 
     /* Floating text on top of EVERYTHING (last = topmost, uses ui font atlas) */
     vft_quad_start = quad_count;
@@ -7783,9 +7846,14 @@ static void input_send_raw(const char *str)
 
 /* Numpad direction handler — returns 1 if handled.
  * NumLock must be on. Ctrl=pick, Alt=disarm trap, Shift=bash.
- * Mixed modifiers = ignore. */
+ * Mixed modifiers = ignore.
+ *
+ * When Map Walker is focused, numpad routes to map pan/zoom instead of
+ * being sent to the MUD. */
 static int numpad_handle(WPARAM vk, int ctrl, int alt, int shift)
 {
+    /* Map Walker steals numpad while focused (numlock still required). */
+    if (mdw_key_down((unsigned int)vk)) { mdw_swallow_char = 1; return 1; }
     /* Check NumLock state */
     if (!(GetKeyState(VK_NUMLOCK) & 1)) return 0;
 
@@ -7804,9 +7872,9 @@ static int numpad_handle(WPARAM vk, int ctrl, int alt, int shift)
     default: return 0;
     }
 
-    /* Reject mixed modifiers */
+    /* Reject mixed modifiers — consume so WM_CHAR eats the digit either way */
     int mods = (ctrl ? 1 : 0) + (alt ? 1 : 0) + (shift ? 1 : 0);
-    if (mods > 1) return 1; /* consume but do nothing */
+    if (mods > 1) { mdw_swallow_char = 1; return 1; }
 
     char cmd[64];
     if (ctrl)
@@ -7820,6 +7888,10 @@ static int numpad_handle(WPARAM vk, int ctrl, int alt, int shift)
     cmd[sizeof(cmd) - 1] = '\0';
 
     input_send_raw(cmd);
+    /* Swallow the WM_CHAR that TranslateMessage will generate — otherwise
+     * "8" also lands in the terminal input box while we're also sending "n"
+     * to the MUD. */
+    mdw_swallow_char = 1;
     return 1;
 }
 
@@ -10034,6 +10106,8 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         return 0;
 
     case WM_KEYDOWN: {
+        /* File picker absorbs all keys when modal */
+        if (fp_visible() && fp_key_down((unsigned int)wParam)) return 0;
         int ctrl = GetKeyState(VK_CONTROL) & 0x8000;
         int alt  = GetKeyState(VK_MENU) & 0x8000;
         int shift = GetKeyState(VK_SHIFT) & 0x8000;
@@ -10215,6 +10289,12 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         }
         break;
     case WM_CHAR:
+        /* Map Walker consumed the preceding WM_KEYDOWN — eat the WM_CHAR
+         * that TranslateMessage generates so numpad walking doesn't also
+         * type "4" into the terminal input. */
+        if (mdw_swallow_char) { mdw_swallow_char = 0; return 0; }
+        /* File picker absorbs character input when modal */
+        if (fp_visible()) return 0;
         /* Suppress Ctrl+chars (already handled in WM_KEYDOWN) */
         if (wParam < 32 && wParam != '\r' && wParam != '\b') return 0;
         /* Direct terminal mode: forward all chars to MMANSI */
@@ -10273,6 +10353,7 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
     case WM_MOUSEMOVE: {
         int mx2 = mouse_tx((short)LOWORD(lParam));
         int my2 = mouse_ty((short)HIWORD(lParam));
+        if (fp_visible()) { fp_mouse_move(mx2, my2); return 0; }
         vkm_mouse_x = mx2;
         vkm_mouse_y = my2;
         /* Paths & Loops window drag */
@@ -10337,6 +10418,11 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         if (pst_dragging) {
             pst_x = (float)mx2 - pst_drag_ox;
             pst_y = (float)my2 - pst_drag_oy;
+            return 0;
+        }
+        /* Map Walker drag/resize/pan */
+        if (mdw_dragging || mdw_resizing || mdw_panning) {
+            mdw_mouse_move(mx2, my2);
             return 0;
         }
         /* Backscroll panel drag/resize */
@@ -10480,6 +10566,12 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
     case WM_LBUTTONDOWN: {
         int mx = mouse_tx((short)LOWORD(lParam));
         int my = mouse_ty((short)HIWORD(lParam));
+        /* FILE PICKER IS MODAL — nothing else can grab this click. */
+        if (fp_visible()) { fp_mouse_down(mx, my); return 0; }
+        /* Z-ORDER GATE: when the root context menu is open, swallow the
+         * LBUTTONDOWN so it can't bleed through to MudAMP / panels beneath.
+         * The actual menu item selection fires on LBUTTONUP. */
+        if (vkm_open) return 0;
         /* Floating window context menu click */
         if (vkw_ctx_open) {
             int mcw = 10, mch = 18;
@@ -10650,6 +10742,8 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             stw_draw(vp_w, vp_h, mx, my, 1);
             return 0;
         }
+        /* Map Walker — claims focus before MudAMP so it can't bleed clicks */
+        if (mdw_visible && mdw_mouse_down(mx, my)) return 0;
         /* MUDRadio panel click — AFTER all settings/child windows */
         if (mr_mouse_down(mx, my)) return 0;
         /* Icon bar click (includes pin button at -2) */
@@ -10729,6 +10823,7 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
     case WM_LBUTTONUP: {
         int mx = mouse_tx((short)LOWORD(lParam));
         int my = mouse_ty((short)HIWORD(lParam));
+        if (fp_visible()) { fp_mouse_up(); return 0; }
         if (pl_dragging) { pl_dragging = 0; return 0; }
         if (scm_dragging || scm_resizing) { scm_mouse_up(); return 0; }
         if (mr_dragging || mr_resizing || mr_vol_dragging) { mr_mouse_up(); return 0; }
@@ -10741,6 +10836,7 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         if (fnt_dragging || fnt_active_slider >= 0) { fnt_mouse_up(); return 0; }
         if (stw_dragging) { stw_dragging = 0; return 0; }
         if (pst_dragging) { pst_dragging = 0; return 0; }
+        if (mdw_dragging || mdw_resizing || mdw_panning) { mdw_mouse_up(); return 0; }
         if (bsp_dragging || bsp_resizing || bsp_selecting) { bsp_mouse_up(); return 0; }
         if (vrt_dragging) { vrt_dragging = 0; return 0; }
         /* Icon bar: fire click on button release */
@@ -10756,6 +10852,7 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         }
         vkw_mouse_up(); /* end any drag/resize */
 
+vkm_click_handler:
         if (!vkm_open) return 0;
 
         /* Check submenu click first */
@@ -10926,10 +11023,31 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             return 0;
         }
 
-        /* Extras > submenu click — opens 3rd-level submenus */
+        /* Extras > submenu click — opens 3rd-level submenus / direct toggles */
         if (si >= 0 && vkm_sub == VKM_SUB_XTRA2) {
-            if (si == VKM_X2_VIZ) { vkm_sub = VKM_SUB_VIZ; vkm_sub_hover = -1; }
-            else if (si == VKM_X2_BG) { vkm_sub = VKM_SUB_BG; vkm_sub_hover = -1; }
+            if (si == VKM_X2_VIZ) { vkm_sub = VKM_SUB_VIZ; vkm_sub_hover = -1; return 0; }
+            if (si == VKM_X2_BG)  { vkm_sub = VKM_SUB_BG;  vkm_sub_hover = -1; return 0; }
+            if (si == VKM_X2_RMSTEP) {
+                rm_every_step_toggle_safe();
+                if (api) api->log("[vk_terminal] RM Every Step: %s\n",
+                                  rm_every_step_get_safe() ? "ON" : "OFF");
+                vkm_open = 0;
+                vkm_sub = VKM_SUB_NONE;
+                return 0;
+            }
+            if (si == VKM_X2_MAPWALK) {
+                if (mdw_bin_exists()) mdw_toggle();
+                else if (api) api->log("[vk_terminal] Map Walker: no mmud.bin — use Load Map DB first.\n");
+                vkm_open = 0;
+                vkm_sub = VKM_SUB_NONE;
+                return 0;
+            }
+            if (si == VKM_X2_LOADDB) {
+                mdw_pick_and_load_mdb();
+                vkm_open = 0;
+                vkm_sub = VKM_SUB_NONE;
+                return 0;
+            }
             return 0;
         }
 
@@ -11017,6 +11135,8 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
     case WM_RBUTTONUP: {
         int rmx = mouse_tx((short)LOWORD(lParam));
         int rmy = mouse_ty((short)HIWORD(lParam));
+        /* File picker is modal — swallow right-clicks too */
+        if (fp_visible()) return 0;
         /* Right-click on floating window → font size context menu */
         {
             int wnd = vkw_hit_test(rmx, rmy);
@@ -11060,6 +11180,21 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         return 0;
     }
     case WM_MOUSEWHEEL: {
+        /* File picker scroll has absolute priority when open */
+        if (fp_visible()) {
+            int fmx = mouse_tx((short)LOWORD(lParam));
+            int fmy = mouse_ty((short)HIWORD(lParam));
+            int fd = GET_WHEEL_DELTA_WPARAM(wParam);
+            fp_wheel(fmx, fmy, fd);
+            return 0;
+        }
+        /* Map Walker zoom — check BEFORE any panel so it wins over MudAMP */
+        {
+            int wmx = mouse_tx((short)LOWORD(lParam));
+            int wmy = mouse_ty((short)HIWORD(lParam));
+            int wd = (short)HIWORD(wParam);
+            if (mdw_wheel(wmx, wmy, wd)) return 0;
+        }
         /* Scroll plasma settings panel */
         if (bgp_visible) {
             int wmx = mouse_tx((short)LOWORD(lParam));
@@ -11375,7 +11510,13 @@ static DWORD WINAPI vkt_thread(LPVOID param)
         if (vkt_visible && (i % 5) == 0) DISMISS_MEGAMUD_DIALOGS();
         if (!mmansi_hwnd) Sleep(100);
     }
-    if (!mmansi_hwnd) { api->log("[vk_terminal] MMANSI not found\n"); return 1; }
+    if (!mmansi_hwnd) {
+        api->log("[vk_terminal] MMANSI not found\n");
+        /* Kill the splash so it doesn't linger as a TOPMOST popup blocking input */
+        HWND sp = FindWindowA("SLOP_SPLASH", NULL);
+        if (sp) PostMessageA(sp, WM_CLOSE, 0, 0);
+        return 1;
+    }
 
     /* Vulkan/font/buffer/descriptor/icon init already ran on main thread in vkt_init.
      * Kept here as a fallback in case vkt_mt_init_done was not set (e.g. early error). */
@@ -11412,6 +11553,19 @@ static DWORD WINAPI vkt_thread(LPVOID param)
     vkt_running = 1;
     SPLASH_PROGRESS(100, "Ready!");
     api->log("[vk_terminal] Ready (F11 to toggle fullscreen)\n");
+
+    /* Bulletproof splash close — env-var polling races with splash WM_TIMER;
+     * directly post WM_CLOSE so the splash disappears the moment we're up.
+     * Was getting stuck at 45% when plugin-loop finished but MMANSI detection
+     * took >10s on Win11 (then WM_TIMER never saw >=100 and splash lingered,
+     * forced KDE taskbar visible on every terminal click). */
+    {
+        HWND sp = FindWindowA("SLOP_SPLASH", NULL);
+        if (sp) {
+            PostMessageA(sp, WM_CLOSE, 0, 0);
+            api->log("[vk_terminal] Posted WM_CLOSE to splash hwnd=%p\n", sp);
+        }
+    }
 
 
     /* --autoconnect/--loop: run in background so Vulkan window opens immediately */
@@ -11508,6 +11662,14 @@ static DWORD WINAPI vkt_thread(LPVOID param)
                 DestroyWindow(vkt_hwnd); vkt_hwnd = NULL;
                 vkt_visible = 0;
                 continue;
+            }
+
+            /* Kill splash — safety net. If WM_CLOSE from vkt_thread startup
+             * didn't land (splash thread not pumping yet), this catches it
+             * when the Vulkan window actually appears. */
+            {
+                HWND sp = FindWindowA("SLOP_SPLASH", NULL);
+                if (sp) PostMessageA(sp, WM_CLOSE, 0, 0);
             }
 
             /* Close MegaMUD owned popup windows (Conversations etc.) to prevent focus stealing */

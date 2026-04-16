@@ -3690,6 +3690,32 @@ static DWORD WINAPI pro_step_thread(LPVOID param)
     return 0;
 }
 
+/* ---- Public exports so vk_terminal can show/flip the toggle from its own
+ * right-click menu (without knowing the internal IDM/struct layout). */
+int WINAPI rm_every_step_get(void)
+{
+    return pro_every_step ? 1 : 0;
+}
+
+void WINAPI rm_every_step_set(int on)
+{
+    on = on ? 1 : 0;
+    if (pro_every_step == on) return;
+    pro_every_step = on;
+    if (on && struct_base) {
+        pro_last_checksum = *(DWORD *)(struct_base + OFF_ROOM_CHECKSUM);
+        pro_last_step     = *(int   *)(struct_base + OFF_CUR_PATH_STEP);
+    }
+    /* Keep msimg32's own menu text in sync. */
+    if (slop_menu) {
+        ModifyMenuA(slop_menu, IDM_SLOP_PRO_STEP, MF_BYCOMMAND | MF_STRING,
+                    IDM_SLOP_PRO_STEP,
+                    on ? "RM Every Step  [ON]" : "RM Every Step  [OFF]");
+    }
+    cfg_save();
+    logmsg("[mudplugin] RM Every Step: %s (via vk_terminal)\n", on ? "ON" : "OFF");
+}
+
 /* ---- Auto struct finder thread ---- */
 /* Finds struct_base WITHOUT needing a player name by scanning for valid
    game data patterns (HP, MaxHP, Level, Mana at known offsets). */
