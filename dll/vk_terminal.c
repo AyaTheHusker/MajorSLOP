@@ -3332,6 +3332,11 @@ static float bg_alien_membrane      = 0.4f;
 static float bg_alien_wet           = 1.0f;
 static float bg_alien_fluid_speed   = 0.8f;
 static float bg_alien_specular      = 0.5f;
+static float bg_alien_cell_move     = 0.5f;
+static float bg_alien_bulge         = 0.6f;
+static int   bg_alien_cell_style    = 0;    /* 0=Voronoi 1=Hex 2=Hive 3=Geodesic 4=Mixed */
+static const char *bg_alien_style_names[] = { "Voronoi", "Hex", "Hive", "Geodesic", "Mixed" };
+#define BG_ALIEN_STYLE_COUNT 5
 static int   bg_alien_beat_bass     = BGP_BEAT_BRIGHT;
 static int   bg_alien_beat_mid      = BGP_BEAT_HUE;
 static int   bg_alien_beat_treble   = BGP_BEAT_ZOOM;
@@ -9911,7 +9916,7 @@ static int vkt_create_swapchain(void)
         VkPushConstantRange pcr = {0};
         pcr.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
         pcr.offset = 0;
-        pcr.size = sizeof(float) * 24;
+        pcr.size = sizeof(float) * 27;
 
         VkPipelineLayoutCreateInfo aplci = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
         aplci.setLayoutCount = 1;
@@ -10170,7 +10175,7 @@ static void vkt_render_frame(void)
                 if (bands[i].mode == BGP_BEAT_WAVE)     ab_zoom   += e * 0.05f;
             }
         }
-        float aw_pc[24] = {
+        float aw_pc[27] = {
             fx_time, bg_alien_speed, bg_alien_cell_scale, bg_alien_warp,
             bg_alien_hue, bg_alien_saturation, bg_alien_brightness, bg_alien_alpha,
             (float)vk_sc_extent.width, (float)vk_sc_extent.height,
@@ -10178,7 +10183,8 @@ static void vkt_render_frame(void)
             ab_hue, ab_bright, ab_zoom,
             bg_alien_roughness, bg_alien_membrane,
             (float)bg_tonemap_mode, bg_tonemap_exposure,
-            bg_alien_wet, bg_alien_fluid_speed, bg_alien_specular
+            bg_alien_wet, bg_alien_fluid_speed, bg_alien_specular,
+            bg_alien_cell_move, bg_alien_bulge, (float)bg_alien_cell_style
         };
         vkCmdPushConstants(vk_cmd_buf, vk_alien_pipe_layout,
                            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
@@ -15821,31 +15827,34 @@ static void star_reset_defaults(void) {
 
 /* ---- Alien Wall tab ---- */
 
-#define ALIEN_SLIDER_COUNT 16
+#define ALIEN_SLIDER_COUNT 18
 static const char *bg_alien_labels[ALIEN_SLIDER_COUNT] = {
     "Speed", "Cell Scale", "Warp Strength", "Hue Shift",
     "Saturation", "Brightness", "Opacity",
     "Vein Strength", "Pulse Speed", "Glow Intensity",
     "Depth Layers", "Roughness", "Membrane Mix",
-    "Wet/Glossy", "Fluid Speed", "Specular Tight"
+    "Wet/Glossy", "Fluid Speed", "Specular Tight",
+    "Cell Move Speed", "Bulge Strength"
 };
 static float bg_alien_slider_min[ALIEN_SLIDER_COUNT] = {
     0.1f, 1.0f, 0.0f, 0.0f,
     0.0f, 0.0f, 0.0f,
     0.0f, 0.0f, 0.0f,
     1.0f, 0.0f, 0.0f,
-    0.0f, 0.0f, 0.0f
+    0.0f, 0.0f, 0.0f,
+    0.0f, 0.0f
 };
 static float bg_alien_slider_max[ALIEN_SLIDER_COUNT] = {
     5.0f, 8.0f, 4.0f, 360.0f,
     2.0f, 2.0f, 1.0f,
     2.0f, 4.0f, 2.0f,
     4.0f, 1.0f, 1.0f,
-    2.0f, 2.0f, 1.0f
+    2.0f, 2.0f, 1.0f,
+    2.0f, 2.0f
 };
 static float *bg_alien_slider_ptr[ALIEN_SLIDER_COUNT];
 
-#define ALIEN_TOTAL_ROWS (ALIEN_SLIDER_COUNT + 7)
+#define ALIEN_TOTAL_ROWS (ALIEN_SLIDER_COUNT + 9)
 
 static void bgp_draw_alienwall_tab(float x0, float content_top, float content_bot,
                                    float pw, float sb_w, int vp_w, int vp_h,
@@ -15867,6 +15876,8 @@ static void bgp_draw_alienwall_tab(float x0, float content_top, float content_bo
     bg_alien_slider_ptr[13] = &bg_alien_wet;
     bg_alien_slider_ptr[14] = &bg_alien_fluid_speed;
     bg_alien_slider_ptr[15] = &bg_alien_specular;
+    bg_alien_slider_ptr[16] = &bg_alien_cell_move;
+    bg_alien_slider_ptr[17] = &bg_alien_bulge;
 
     float row_h = ch + 14;
     float content_h = content_bot - content_top;
@@ -15902,6 +15913,39 @@ static void bgp_draw_alienwall_tab(float x0, float content_top, float content_bo
         }
         ALIEN_NEXT;
     }
+
+    /* --- Cell Style section header --- */
+    if (ALIEN_VIS) {
+        push_solid((int)(x0 + 20), (int)(cy + row_h * 0.3f),
+                   (int)(x0 + pw - sb_w - 20), (int)(cy + row_h * 0.35f),
+                   t->accent[0], t->accent[1], t->accent[2], 0.3f, vp_w, vp_h);
+        push_text((int)(x0 + 20), (int)(cy + 2), "Cell Geometry",
+                  t->accent[0], t->accent[1], t->accent[2], vp_w, vp_h, cw, ch);
+    }
+    ALIEN_NEXT;
+
+    /* --- Cell Style dropdown --- */
+    if (ALIEN_VIS) {
+        push_text((int)(x0 + 20), (int)(cy + 2), "Cell Style:",
+                  t->text[0], t->text[1], t->text[2], vp_w, vp_h, cw, ch);
+        int dd_x = (int)(x0 + 20 + 11 * cw);
+        int dd_w = (int)(slider_w - 11 * cw - 2);
+        int dd_y = (int)cy;
+        int dd_h = ch + 4;
+        push_solid(dd_x, dd_y, dd_x + dd_w, dd_y + dd_h,
+                   t->bg[0] + 0.05f, t->bg[1] + 0.05f, t->bg[2] + 0.05f, 0.9f, vp_w, vp_h);
+        push_solid(dd_x, dd_y, dd_x + dd_w, dd_y + 1,
+                   1.0f, 1.0f, 1.0f, 0.08f, vp_w, vp_h);
+        push_solid(dd_x, dd_y + dd_h - 1, dd_x + dd_w, dd_y + dd_h,
+                   0.0f, 0.0f, 0.0f, 0.15f, vp_w, vp_h);
+        int sty = bg_alien_cell_style;
+        if (sty < 0 || sty >= BG_ALIEN_STYLE_COUNT) sty = 0;
+        push_text(dd_x + 4, dd_y + 2, bg_alien_style_names[sty],
+                  t->accent[0], t->accent[1], t->accent[2], vp_w, vp_h, cw, ch);
+        push_text(dd_x + dd_w - cw - 2, dd_y + 2, "\x1F",
+                  t->text[0] * 0.5f, t->text[1] * 0.5f, t->text[2] * 0.5f, vp_w, vp_h, cw, ch);
+    }
+    ALIEN_NEXT;
 
     /* --- Beat Response section header --- */
     if (ALIEN_VIS) {
@@ -16003,8 +16047,9 @@ static void bgp_draw_alienwall_tab(float x0, float content_top, float content_bo
 
 /* Alien Wall hit tests */
 #define ALIEN_SLIDER_BASE_ROW      0
-#define ALIEN_BEAT_DD_BASE_ROW     (ALIEN_SLIDER_COUNT + 1)
-#define ALIEN_DEFAULTS_BTN_ROW     (ALIEN_SLIDER_COUNT + 6)
+#define ALIEN_STYLE_DD_ROW         (ALIEN_SLIDER_COUNT + 1)
+#define ALIEN_BEAT_DD_BASE_ROW     (ALIEN_SLIDER_COUNT + 3)
+#define ALIEN_DEFAULTS_BTN_ROW     (ALIEN_SLIDER_COUNT + 8)
 
 static int alien_hit_slider(int mx, int my, float *out_pct) {
     if (bgp_tab != BGP_TAB_ALIENWALL) return -1;
@@ -16053,6 +16098,24 @@ static int alien_hit_dropdown(int mx, int my) {
     return -1;
 }
 
+static int alien_hit_style_dropdown(int mx, int my) {
+    if (bgp_tab != BGP_TAB_ALIENWALL) return 0;
+    int cw = (int)(VKM_CHAR_W * ui_scale), ch = (int)(VKM_CHAR_H * ui_scale);
+    int titlebar_h = ch + 10;
+    int tab_bar_h = ch + 10;
+    float row_h = ch + 14;
+    float sb_w = 10.0f;
+    float slider_w = bgp_w - 40 - sb_w;
+    float content_top = bgp_y + titlebar_h + tab_bar_h + 4;
+    int dd_x = (int)(bgp_x + 20 + 11 * cw);
+    int dd_w = (int)(slider_w - 11 * cw - 2);
+    if (mx < dd_x || mx >= dd_x + dd_w) return 0;
+    int vr = ALIEN_STYLE_DD_ROW - bgp_scroll;
+    if (vr < 0) return 0;
+    float ry = content_top + 4 + vr * row_h;
+    return (my >= (int)ry && my < (int)(ry + row_h));
+}
+
 static int alien_hit_defaults_button(int mx, int my) {
     if (bgp_tab != BGP_TAB_ALIENWALL) return 0;
     int cw = (int)(VKM_CHAR_W * ui_scale), ch = (int)(VKM_CHAR_H * ui_scale);
@@ -16081,6 +16144,8 @@ static void alien_reset_defaults(void) {
     bg_alien_depth_layers = 2.0f; bg_alien_roughness = 0.2f;
     bg_alien_membrane = 0.4f; bg_alien_wet = 1.0f;
     bg_alien_fluid_speed = 0.8f; bg_alien_specular = 0.5f;
+    bg_alien_cell_move = 0.5f; bg_alien_bulge = 0.6f;
+    bg_alien_cell_style = 0;
     bg_alien_beat_bass = BGP_BEAT_BRIGHT;
     bg_alien_beat_mid = BGP_BEAT_HUE;
     bg_alien_beat_treble = BGP_BEAT_ZOOM;
@@ -16286,6 +16351,10 @@ static int bgp_mouse_down(int mx, int my) {
             float val = bg_alien_slider_min[as] + apct *
                         (bg_alien_slider_max[as] - bg_alien_slider_min[as]);
             *bg_alien_slider_ptr[as] = val;
+            return 1;
+        }
+        if (alien_hit_style_dropdown(mx, my)) {
+            bg_alien_cell_style = (bg_alien_cell_style + 1) % BG_ALIEN_STYLE_COUNT;
             return 1;
         }
         int add = alien_hit_dropdown(mx, my);
@@ -16973,6 +17042,9 @@ __declspec(dllexport) void vkt_bg_alien_set_membrane(float v)   { bg_alien_membr
 __declspec(dllexport) void vkt_bg_alien_set_wet(float v)        { bg_alien_wet = v; }
 __declspec(dllexport) void vkt_bg_alien_set_fluid(float v)      { bg_alien_fluid_speed = v; }
 __declspec(dllexport) void vkt_bg_alien_set_specular(float v)   { bg_alien_specular = v; }
+__declspec(dllexport) void vkt_bg_alien_set_cell_move(float v)  { bg_alien_cell_move = v; }
+__declspec(dllexport) void vkt_bg_alien_set_bulge(float v)      { bg_alien_bulge = v; }
+__declspec(dllexport) void vkt_bg_alien_set_cell_style(int v)   { bg_alien_cell_style = v % BG_ALIEN_STYLE_COUNT; }
 
 __declspec(dllexport) void vkt_bg_show_settings(void) { bgp_visible = 1; }
 __declspec(dllexport) void vkt_bg_hide_settings(void) { bgp_visible = 0; }
@@ -17197,6 +17269,9 @@ static slop_command_t vkt_commands[] = {
     { "bg.alien.wet",         "vkt_bg_alien_set_wet",         "f", "v", "Set wet/glossy intensity (0-2)" },
     { "bg.alien.fluid",       "vkt_bg_alien_set_fluid",       "f", "v", "Set fluid flow speed (0-2)" },
     { "bg.alien.specular",    "vkt_bg_alien_set_specular",    "f", "v", "Set specular tightness (0-1)" },
+    { "bg.alien.cell_move",   "vkt_bg_alien_set_cell_move",   "f", "v", "Set cell crawl speed (0-2)" },
+    { "bg.alien.bulge",       "vkt_bg_alien_set_bulge",       "f", "v", "Set per-cell bulge variance (0-2)" },
+    { "bg.alien.cell_style",  "vkt_bg_alien_set_cell_style",  "i", "v", "Set cell geometry (0=Voronoi 1=Hex 2=Hive 3=Geodesic 4=Mixed)" },
     { "bg.show_settings",     "vkt_bg_show_settings",     "",        "v", "Show background settings panel" },
     { "bg.hide_settings",     "vkt_bg_hide_settings",     "",        "v", "Hide background settings panel" },
     { "bg.help",              "vkt_bg_help",              "",        "v", "Show background commands help" },
@@ -17551,6 +17626,9 @@ static void vkt_save_settings(void)
     SAVE_FLOAT("alien_wet", bg_alien_wet);
     SAVE_FLOAT("alien_fluid", bg_alien_fluid_speed);
     SAVE_FLOAT("alien_specular", bg_alien_specular);
+    SAVE_FLOAT("alien_cell_move", bg_alien_cell_move);
+    SAVE_FLOAT("alien_bulge", bg_alien_bulge);
+    SAVE_INT("alien_cell_style", bg_alien_cell_style);
     SAVE_INT("alien_beat_bass", bg_alien_beat_bass);
     SAVE_INT("alien_beat_mid", bg_alien_beat_mid);
     SAVE_INT("alien_beat_treb", bg_alien_beat_treble);
@@ -17722,6 +17800,9 @@ static void vkt_load_settings(void)
     LOAD_FLOAT("alien_wet", bg_alien_wet, 1.0);
     LOAD_FLOAT("alien_fluid", bg_alien_fluid_speed, 0.8);
     LOAD_FLOAT("alien_specular", bg_alien_specular, 0.5);
+    LOAD_FLOAT("alien_cell_move", bg_alien_cell_move, 0.5);
+    LOAD_FLOAT("alien_bulge", bg_alien_bulge, 0.6);
+    LOAD_INT("alien_cell_style", bg_alien_cell_style, 0);
     LOAD_INT("alien_beat_bass", bg_alien_beat_bass, BGP_BEAT_BRIGHT);
     LOAD_INT("alien_beat_mid", bg_alien_beat_mid, BGP_BEAT_HUE);
     LOAD_INT("alien_beat_treb", bg_alien_beat_treble, BGP_BEAT_ZOOM);
