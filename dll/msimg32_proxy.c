@@ -41,6 +41,7 @@
 #include <io.h>      /* _commit, _fileno — for force-flushing log file */
 
 #include "slop_plugin.h"
+#include "line_fsm.h"
 
 #pragma comment(lib, "ws2_32.lib")
 
@@ -607,6 +608,7 @@ typedef struct {
 static loaded_plugin_t plugins[SLOP_MAX_PLUGINS];
 static int plugin_count;
 static void plugins_on_line(const char *line);
+static void plugins_on_clean_line(const char *line);
 static void plugins_on_data(const char *data, int len);
 static void plugins_on_round(int round_num);
 static int plugins_on_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -1826,30 +1828,44 @@ static inline DWORD mega_va(DWORD va)
 static unsigned char orig_bytes_0041C8D0[5];  /* saved original bytes */
 static int hook_0041C8D0_installed = 0;
 
-/* Line buffer for accumulating incoming data into lines */
+/* Line buffer for accumulating incoming data into lines.
+ * The state machine is shared between the FUN_0041C8D0 hook path
+ * (incoming_feed_data) and the legacy recv-hook path (rd_feed_data) —
+ * both feed the same byte stream so a single FSM is correct and
+ * matches the old behavior where recv_line_pos/recv_line_buf were
+ * module-level globals shared across both entry points. */
 #define RECV_LINE_BUF 4096
 static char recv_line_buf[RECV_LINE_BUF];
-static int recv_line_pos = 0;
+static line_fsm_t recv_fsm;
+static int recv_fsm_inited = 0;
+
+/* Dispatch a completed line: raw → plugins → strip → clean → plugins → round.
+ * `line` points into recv_line_buf (writable), so we strip ANSI in place. */
+static void recv_on_line_cb(const char *line, void *user)
+{
+    (void)user;
+    plugins_on_line(line);               /* raw, ANSI intact */
+    char *mut = (char *)line;            /* owned by recv_fsm's backing store */
+    strip_ansi(mut);
+    plugins_on_clean_line(mut);
+    rd_process_line(mut);
+}
+
+static void recv_fsm_ensure(void)
+{
+    if (!recv_fsm_inited) {
+        line_fsm_init(&recv_fsm, recv_line_buf, RECV_LINE_BUF,
+                      LINE_FSM_STRIP_NONE, LINE_FSM_TERM_LF,
+                      recv_on_line_cb, NULL);
+        recv_fsm_inited = 1;
+    }
+}
 
 /* Feed raw incoming data (with ANSI) into line buffer, dispatch complete lines */
 static void incoming_feed_data(const char *data, int len)
 {
-    for (int i = 0; i < len; i++) {
-        char c = data[i];
-        if (c == '\n') {
-            recv_line_buf[recv_line_pos] = '\0';
-            if (recv_line_pos > 0 && recv_line_buf[recv_line_pos - 1] == '\r')
-                recv_line_buf[recv_line_pos - 1] = '\0';
-            /* Pass raw ANSI line to plugins */
-            plugins_on_line(recv_line_buf);
-            /* Strip ANSI for round detection */
-            strip_ansi(recv_line_buf);
-            rd_process_line(recv_line_buf);
-            recv_line_pos = 0;
-        } else if (recv_line_pos < RECV_LINE_BUF - 1) {
-            recv_line_buf[recv_line_pos++] = c;
-        }
-    }
+    recv_fsm_ensure();
+    line_fsm_feed(&recv_fsm, data, len);
 }
 
 /* Our hook — called instead of FUN_0041C8D0 */
@@ -2068,29 +2084,14 @@ static void rd_process_line(const char *line)
     /* plugins already notified with raw ANSI in rd_feed_data */
 }
 
-/* Feed raw recv data into line buffer, process complete lines */
+/* Feed raw recv data into line buffer, process complete lines.
+ * Legacy path (recv hook) — MegaMUD uses ReadFile in practice, so this is
+ * almost never called. Shares the FSM with incoming_feed_data to guarantee
+ * the two paths can't desync. */
 static void rd_feed_data(const char *data, int len)
 {
-    for (int i = 0; i < len; i++) {
-        char c = data[i];
-        if (c == '\n') {
-            /* Complete line — process it */
-            recv_line_buf[recv_line_pos] = '\0';
-            /* Strip trailing \r */
-            if (recv_line_pos > 0 && recv_line_buf[recv_line_pos - 1] == '\r')
-                recv_line_buf[recv_line_pos - 1] = '\0';
-            /* Pass raw line (with ANSI) to plugins first */
-            plugins_on_line(recv_line_buf);
-            /* Strip ANSI for round detection */
-            strip_ansi(recv_line_buf);
-            /* Process (round detection only, plugins already notified) */
-            rd_process_line(recv_line_buf);
-            recv_line_pos = 0;
-        } else if (recv_line_pos < RECV_LINE_BUF - 1) {
-            recv_line_buf[recv_line_pos++] = c;
-        }
-        /* else: line too long, silently truncate */
-    }
+    recv_fsm_ensure();
+    line_fsm_feed(&recv_fsm, data, len);
 }
 
 /* Track sockets to skip (our own DLL server connections) */
@@ -2122,7 +2123,7 @@ static int WSAAPI hooked_recv(SOCKET s, char *buf, int len, int flags)
         /* MUD socket closed/errored — reset so we re-detect on reconnect */
         logmsg("[recvhook] MUD socket %d closed (ret=%d)\n", (int)s, ret);
         mud_socket = INVALID_SOCKET;
-        recv_line_pos = 0;
+        if (recv_fsm_inited) line_fsm_reset(&recv_fsm);
         rd_last_event_ts = 0.0;
     }
     if (ret > 0) {
@@ -2624,6 +2625,13 @@ static void inject_server_data_impl(const char *data, int len)
 #define VA_UPDATE_ROAM   mega_va(0x004455b0)  /* void(int *struct) — update roaming state */
 #define VA_MM_STRICMP    mega_va(0x004a31f0)  /* int(void *s1, void *s2) — 0 = match */
 #define VA_NORMALIZE_STR mega_va(0x0047c870)  /* void(void *str) — normalize (lowercase/trim) */
+/* Path database management (Ghidra RE 2026-04-17) */
+#define VA_PATH_ALLOC    mega_va(0x0045f100)  /* void*(int struct) — alloc 0x84-byte path record slot */
+#define VA_PATH_EXISTS   mega_va(0x0045fe20)  /* uint(int struct, byte *filename) — 0 = not found */
+#define VA_PARSE_MP      mega_va(0x00460050)  /* uint(int struct, char *record, int 0) — parse .mp file */
+#define VA_UPDATE_PATHS  mega_va(0x00427d20)  /* void(int *struct, int flag) — rebuild Paths.md/menu */
+#define VA_INI_WRITE_INT mega_va(0x00435c30)  /* void(int struct, LPCSTR sect, LPCSTR key, uint val) */
+#define VA_LOAD_ALL_DATA mega_va(0x00427120)  /* uint(int *struct, uint flags) — master data reload */
 /* Reset update functions */
 #define VA_RESET_FN1     mega_va(0x00478a70)  /* void(int struct) */
 #define VA_RESET_FN2     mega_va(0x00478920)  /* void(int struct) */
@@ -2646,6 +2654,13 @@ static void inject_server_data_impl(const char *data, int len)
 #define OFF_FR_MODE       0x54BC   /* int32: 11=idle, 14=walking, 15=looping, 16=roaming */
 #define OFF_FR_STEPS_REM  0x54D8   /* int32: steps remaining in current path */
 #define OFF_FR_MMMAIN_HWND 0x0C   /* HWND: MMMAIN window handle in struct */
+#define OFF_FR_PATH_FILE   0x5834  /* char[76]: current .mp filename */
+#define OFF_FR_PATH_WP     0x5880  /* 32 bytes: waypoints + sentinel + total_steps + cur_step */
+#define OFF_FR_SEL_PATH    0x593C  /* char[14]: selected/queued path filename */
+#define OFF_FR_LOOP_RESUME_A 0x5988 /* int32: loop resume trigger A */
+#define OFF_FR_LOOP_RESUME_B 0x598C /* int32: loop resume trigger B */
+#define OFF_FR_PATH_DIRTY  0x571C  /* int32: path database dirty flag */
+#define OFF_FR_BASEDIR     0x06F7  /* char[257]: MegaMUD base directory */
 #define MEGAMUD_CMD_STOPGO 0x0803  /* WM_COMMAND ID for stop/go toggle */
 
 /* Loop entry struct (from Ghidra):
@@ -3550,9 +3565,13 @@ static DWORD WINAPI mmansi_scanner_thread(LPVOID param)
             }
             mark_seen(h);
             /* Only send via MMANSI poll if inline hook isn't active
-             * (hook sends raw ANSI; MMANSI rows are stripped text) */
-            if (!hook_0041C8D0_installed)
+             * (hook sends raw ANSI; MMANSI rows are stripped text). These
+             * rows are already ANSI-free (MMANSI strips at render), so
+             * both on_line and on_clean_line receive identical content. */
+            if (!hook_0041C8D0_installed) {
                 plugins_on_line(rows[r]);
+                plugins_on_clean_line(rows[r]);
+            }
             rd_process_line(rows[r]);
         }
 
@@ -4155,6 +4174,331 @@ static int api_fake_remote(const char *cmd)
     return fake_remote_impl(cmd);
 }
 
+/* ================================================================
+ * Path Auto-Import — add .mp file to MegaMUD's path database
+ * without triggering dialogs, with full pathing state preservation.
+ * Ghidra RE of FUN_00464c50 (scanner), FUN_0045f100 (alloc),
+ * FUN_0045fe20 (exists), FUN_00460050 (parse), FUN_00427d20 (menu).
+ * ================================================================ */
+
+typedef void  *(__cdecl *fn_path_alloc)(int);
+typedef unsigned int (__cdecl *fn_path_exists)(int, unsigned char *);
+typedef unsigned int (__cdecl *fn_parse_mp)(int, char *, int);
+typedef void  (__cdecl *fn_update_paths)(int *, int);
+typedef void  (__cdecl *fn_ini_write_int)(int, const char *, const char *, unsigned int);
+
+#define PATH_RECORD_SIZE 0x84
+#define PATH_RECORD_DWORDS 0x21
+
+struct path_state_snapshot {
+    int   on_entry;
+    int   mode;
+    int   steps_remaining;
+    int   pathing_active;
+    int   looping;
+    char  path_file[76];
+    char  path_wp[32];
+    char  loop_entry_buf[PATH_RECORD_SIZE];
+    int   loop_resume_a;
+    int   loop_resume_b;
+    char  sel_path[14];
+    int   cur_path_step;
+};
+
+static void save_path_state(unsigned char *sbp, struct path_state_snapshot *snap)
+{
+    snap->on_entry       = *(int *)(sbp + OFF_FR_ON_ENTRY);
+    snap->mode           = *(int *)(sbp + OFF_FR_MODE);
+    snap->steps_remaining= *(int *)(sbp + OFF_FR_STEPS_REM);
+    snap->pathing_active = *(int *)(sbp + OFF_FR_PATHING);
+    snap->looping        = *(int *)(sbp + OFF_FR_LOOPING);
+    memcpy(snap->path_file, sbp + OFF_FR_PATH_FILE, 76);
+    memcpy(snap->path_wp,   sbp + OFF_FR_PATH_WP, 32);
+    memcpy(snap->loop_entry_buf, sbp + OFF_FR_LOOP_DEST, PATH_RECORD_SIZE);
+    snap->loop_resume_a  = *(int *)(sbp + OFF_FR_LOOP_RESUME_A);
+    snap->loop_resume_b  = *(int *)(sbp + OFF_FR_LOOP_RESUME_B);
+    memcpy(snap->sel_path, sbp + OFF_FR_SEL_PATH, 14);
+    snap->cur_path_step  = *(int *)(sbp + OFF_CUR_PATH_STEP);
+}
+
+static void restore_path_state(unsigned char *sbp, const struct path_state_snapshot *snap)
+{
+    *(int *)(sbp + OFF_FR_ON_ENTRY)      = snap->on_entry;
+    *(int *)(sbp + OFF_FR_MODE)          = snap->mode;
+    *(int *)(sbp + OFF_FR_STEPS_REM)     = snap->steps_remaining;
+    *(int *)(sbp + OFF_FR_PATHING)       = snap->pathing_active;
+    *(int *)(sbp + OFF_FR_LOOPING)       = snap->looping;
+    memcpy(sbp + OFF_FR_PATH_FILE, snap->path_file, 76);
+    memcpy(sbp + OFF_FR_PATH_WP,   snap->path_wp, 32);
+    memcpy(sbp + OFF_FR_LOOP_DEST, snap->loop_entry_buf, PATH_RECORD_SIZE);
+    *(int *)(sbp + OFF_FR_LOOP_RESUME_A) = snap->loop_resume_a;
+    *(int *)(sbp + OFF_FR_LOOP_RESUME_B) = snap->loop_resume_b;
+    memcpy(sbp + OFF_FR_SEL_PATH, snap->sel_path, 14);
+    *(int *)(sbp + OFF_CUR_PATH_STEP)    = snap->cur_path_step;
+}
+
+static int api_import_path(const char *mp_filepath)
+{
+    if (!struct_base || !mp_filepath || !mp_filepath[0]) return -1;
+
+    int sb = (int)struct_base;
+    unsigned char *sbp = (unsigned char *)struct_base;
+
+    const char *basedir = (const char *)(sbp + OFF_FR_BASEDIR);
+    if (!basedir[0]) {
+        logmsg("[import] No MegaMUD base directory\n");
+        return -2;
+    }
+
+    /* Extract just the filename from the full path */
+    const char *fname = mp_filepath;
+    for (const char *p = mp_filepath; *p; p++) {
+        if (*p == '\\' || *p == '/') fname = p + 1;
+    }
+    if (!fname[0] || strlen(fname) > 13) {
+        logmsg("[import] Invalid filename: %s\n", fname);
+        return -3;
+    }
+
+    /* Copy .mp to Default\ so VA_PARSE_MP can find it */
+    char dest_path[MAX_PATH];
+    wsprintfA(dest_path, "%s\\Default\\%s", basedir, fname);
+    if (!CopyFileA(mp_filepath, dest_path, FALSE)) {
+        logmsg("[import] Failed to copy %s -> %s (err=%lu)\n",
+               mp_filepath, dest_path, GetLastError());
+        return -4;
+    }
+    logmsg("[import] Copied %s -> %s\n", mp_filepath, dest_path);
+
+    /* Check if already registered */
+    fn_path_exists path_exists = (fn_path_exists)VA_PATH_EXISTS;
+    unsigned int existing = path_exists(sb, (unsigned char *)fname);
+    if (existing) {
+        logmsg("[import] Path %s already registered, re-parsing\n", fname);
+        /* Re-parse into existing record */
+        fn_parse_mp parse_mp = (fn_parse_mp)VA_PARSE_MP;
+        parse_mp(sb, (char *)existing, 0);
+        fn_update_paths update = (fn_update_paths)VA_UPDATE_PATHS;
+        update((int *)sbp, 1);
+        return 0;
+    }
+
+    /* Save pathing state */
+    struct path_state_snapshot snap;
+    save_path_state(sbp, &snap);
+    logmsg("[import] Saved pathing state (mode=%d step=%d path=%s)\n",
+           snap.mode, snap.cur_path_step, snap.path_file);
+
+    /* Build local 0x84-byte record and parse */
+    char record[PATH_RECORD_SIZE];
+    memset(record, 0, PATH_RECORD_SIZE);
+    record[0] = 0;  /* type = Default */
+    strncpy(record + 0x0C, fname, 14);
+    record[0x0C + 13] = '\0';
+
+    fn_parse_mp parse_mp = (fn_parse_mp)VA_PARSE_MP;
+    unsigned int parse_ok = parse_mp(sb, record, 0);
+    if (!parse_ok) {
+        logmsg("[import] VA_PARSE_MP failed for %s\n", fname);
+        restore_path_state(sbp, &snap);
+        return -5;
+    }
+
+    /* Set imported flag */
+    *(unsigned int *)(record + 0x60) |= 0x10000000;
+
+    /* Allocate slot and copy record */
+    fn_path_alloc path_alloc = (fn_path_alloc)VA_PATH_ALLOC;
+    void *slot = path_alloc(sb);
+    if (!slot) {
+        logmsg("[import] VA_PATH_ALLOC failed\n");
+        restore_path_state(sbp, &snap);
+        return -6;
+    }
+
+    unsigned int *dst = (unsigned int *)slot;
+    unsigned int *src = (unsigned int *)record;
+    for (int i = 0; i < PATH_RECORD_DWORDS; i++)
+        dst[i] = src[i];
+
+    *(int *)(sbp + OFF_FR_PATH_DIRTY) = 1;
+
+    /* Restore pathing state before menu update */
+    restore_path_state(sbp, &snap);
+    logmsg("[import] Restored pathing state\n");
+
+    /* Refresh Paths menu (skip VA_PATH_FINALIZE to avoid room dialogs) */
+    fn_update_paths update = (fn_update_paths)VA_UPDATE_PATHS;
+    update((int *)sbp, 1);
+
+    logmsg("[import] Path %s imported successfully\n", fname);
+    return 0;
+}
+
+/* ---- In-memory Rooms.md lookup table ---- */
+
+typedef struct {
+    unsigned int cksum;
+    char code[5];
+    char area[48];
+    char name[64];
+} room_entry_t;
+
+static room_entry_t *room_table = NULL;
+static int room_table_count = 0;
+static int room_table_cap = 0;
+static int room_table_loaded = 0;
+
+static void room_table_load_file(const char *path)
+{
+    FILE *f = fopen(path, "r");
+    if (!f) return;
+    char line[512];
+    while (fgets(line, sizeof(line), f)) {
+        if (strlen(line) < 10 || line[8] != ':') continue;
+        unsigned int ck = 0;
+        for (int i = 0; i < 8; i++) {
+            char c = line[i];
+            int v = 0;
+            if (c >= '0' && c <= '9') v = c - '0';
+            else if (c >= 'A' && c <= 'F') v = c - 'A' + 10;
+            else if (c >= 'a' && c <= 'f') v = c - 'a' + 10;
+            else goto skip;
+            ck = (ck << 4) | v;
+        }
+        {
+            /* Parse colon fields: cksum:flags:0:0:0:CODE:AREA:NAME */
+            char *fields[8] = {0};
+            char buf[512];
+            lstrcpynA(buf, line, sizeof(buf));
+            char *p = buf;
+            int fi = 0;
+            fields[0] = p;
+            while (*p && fi < 7) {
+                if (*p == ':') { *p = '\0'; fi++; fields[fi] = p + 1; }
+                p++;
+            }
+            /* Trim trailing newline from last field */
+            if (fields[fi]) {
+                char *nl = strchr(fields[fi], '\n');
+                if (nl) *nl = '\0';
+                nl = strchr(fields[fi], '\r');
+                if (nl) *nl = '\0';
+            }
+
+            if (room_table_count >= room_table_cap) {
+                room_table_cap = room_table_cap ? room_table_cap * 2 : 1024;
+                room_table = realloc(room_table, room_table_cap * sizeof(room_entry_t));
+            }
+            room_entry_t *e = &room_table[room_table_count++];
+            e->cksum = ck;
+            e->code[0] = 0;
+            e->area[0] = 0;
+            e->name[0] = 0;
+            if (fields[5]) lstrcpynA(e->code, fields[5], 5);
+            if (fields[6]) lstrcpynA(e->area, fields[6], sizeof(e->area));
+            if (fields[7]) lstrcpynA(e->name, fields[7], sizeof(e->name));
+        }
+        skip:;
+    }
+    fclose(f);
+}
+
+static void room_table_reload(void)
+{
+    room_table_count = 0;
+    unsigned int sb = struct_base;
+    if (!sb) return;
+    unsigned char *sbp = (unsigned char *)sb;
+    const char *basedir = (const char *)(sbp + OFF_FR_BASEDIR);
+
+    char path[MAX_PATH];
+    wsprintfA(path, "%s\\Default\\Rooms.md", basedir);
+    room_table_load_file(path);
+    wsprintfA(path, "%s\\Chars\\All\\Rooms.md", basedir);
+    room_table_load_file(path);
+    logmsg("[rooms] Loaded %d room entries into RAM\n", room_table_count);
+    room_table_loaded = 1;
+}
+
+static int room_table_find(unsigned int cksum, char *out_code, int out_sz)
+{
+    if (!room_table_loaded) room_table_reload();
+    for (int i = 0; i < room_table_count; i++) {
+        if (room_table[i].cksum == cksum) {
+            if (out_code) lstrcpynA(out_code, room_table[i].code, out_sz);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* ---- Code Room: add room to MegaMUD's Rooms.md and reload ---- */
+
+typedef unsigned int (__attribute__((stdcall)) *fn_load_all)(int *st, unsigned int flags);
+
+static int api_code_room(unsigned int cksum, const char *code,
+                         const char *area, const char *room_name)
+{
+    unsigned int sb = struct_base;
+    if (!sb) return -1;
+    unsigned char *sbp = (unsigned char *)sb;
+    const char *basedir = (const char *)(sbp + OFF_FR_BASEDIR);
+
+    if (!code || strlen(code) < 1 || strlen(code) > 4) {
+        logmsg("[code_room] Invalid code '%s'\n", code ? code : "NULL");
+        return -2;
+    }
+
+    char existing[8] = "";
+    if (room_table_find(cksum, existing, sizeof(existing))) {
+        logmsg("[code_room] Room %08X already known as '%s'\n", cksum, existing);
+        return 1;
+    }
+
+    /* Append to Chars/All/Rooms.md */
+    char chars_dir[MAX_PATH], custom_rooms[MAX_PATH];
+    wsprintfA(chars_dir, "%s\\Chars", basedir);
+    CreateDirectoryA(chars_dir, NULL);
+    wsprintfA(chars_dir, "%s\\Chars\\All", basedir);
+    CreateDirectoryA(chars_dir, NULL);
+    wsprintfA(custom_rooms, "%s\\Chars\\All\\Rooms.md", basedir);
+
+    FILE *f = fopen(custom_rooms, "a");
+    if (!f) {
+        logmsg("[code_room] Failed to open %s for append\n", custom_rooms);
+        return -3;
+    }
+    fprintf(f, "%08X:00000000:0:0:0:%s:%s:%s\n",
+            cksum,
+            code,
+            area ? area : "Unknown",
+            room_name ? room_name : "Unknown Room");
+    fclose(f);
+    logmsg("[code_room] Added %08X:%s:%s:%s\n", cksum, code,
+           area ? area : "", room_name ? room_name : "");
+
+    /* Save pathing state, reload all data, restore state */
+    struct path_state_snapshot snap;
+    save_path_state(sbp, &snap);
+
+    fn_load_all loader = (fn_load_all)VA_LOAD_ALL_DATA;
+    loader((int *)sbp, 1);
+
+    restore_path_state(sbp, &snap);
+
+    /* Refresh our in-memory table too */
+    room_table_reload();
+
+    logmsg("[code_room] Done — state restored, %d rooms in table\n", room_table_count);
+    return 0;
+}
+
+static int api_room_is_known(unsigned int cksum, char *out_code, int out_sz)
+{
+    return room_table_find(cksum, out_code, out_sz);
+}
+
 /* The API struct that gets passed to every plugin */
 static slop_api_t slop_api = {0};
 
@@ -4178,6 +4522,10 @@ static void slop_api_init(void)
     slop_api.on_terminal_line  = api_on_terminal_line;
     slop_api.inject_server_data = api_inject_server_data;
     slop_api.fake_remote        = api_fake_remote;
+    slop_api.strip_ansi         = strip_ansi;
+    slop_api.import_path        = api_import_path;
+    slop_api.code_room          = api_code_room;
+    slop_api.room_is_known      = api_room_is_known;
 }
 
 /* Notify all plugins + registered callbacks of a terminal line */
@@ -4189,6 +4537,16 @@ static void plugins_on_line(const char *line)
     }
     for (int i = 0; i < plugin_line_cb_count; i++) {
         if (plugin_line_cbs[i]) plugin_line_cbs[i](line);
+    }
+}
+
+/* Notify plugins that implement on_clean_line with ANSI already stripped.
+ * Plugins doing substring/prefix matching should prefer this over on_line. */
+static void plugins_on_clean_line(const char *line)
+{
+    for (int i = 0; i < plugin_count; i++) {
+        if (plugins[i].loaded && plugins[i].desc->on_clean_line)
+            plugins[i].desc->on_clean_line(line);
     }
 }
 

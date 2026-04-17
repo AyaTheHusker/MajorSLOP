@@ -131,8 +131,12 @@ Entity array element:
 |---|---|---|---|
 | 0x2C18 | i32 | ROOM_DB_COUNT | Number of rooms in database |
 | 0x2C20 | ptr | ROOM_DB_PTR | Pointer to room entry array (see Room Entry Struct below) |
-| 0x2C58 | i32 | LOOP_DB_COUNT | Number of loops in database |
-| 0x2C60 | ptr | LOOP_DB_PTR | Pointer to loop entry array (see Loop Entry Struct below) |
+| 0x2C58 | i32 | PATH_DB_COUNT | Number of paths in database |
+| 0x2C5C | i32 | PATH_DB_CAPACITY | Allocated capacity (grows by 100) |
+| 0x2C60 | ptr | PATH_DB_PTR | Pointer to path entry pointer array (see Path Entry Struct below) |
+| 0x2C74 | i32 | SORT_PATHS | Path sort mode (saved to INI as "SortPaths") |
+| 0x2C78 | char[14] | LAST_EDIT_PATH | Last edited path filename (saved to INI as "LastEditPath") |
+| 0x2C87 | char[257] | CUR_MAP | Current map name (saved to INI as "CurMap") |
 | 0x2D9C | char[] | ROOM_NAME | Current room name (null-terminated ASCII) |
 | 0x2E70 | u32 | ROOM_CHECKSUM | Current room checksum/hash |
 | 0x2E78 | i32[10] | ROOM_EXITS | Exit types per direction (0=none, 2=closed, 3=open, 4=special, 5=unlocked) |
@@ -316,6 +320,7 @@ Gated by AUTO_CASH (0x4D14) and AUTO_GET (0x4D18).
 |---|---|---|---|
 | 0x54B4 | i32 | ON_ENTRY_ACTION | 0=nothing, 1=resume loop, 2=auto-roam, 3=? |
 | 0x54BC | i32 | MODE | 11=idle/manual, 14=walking/running, 15=looping, 16=auto-roaming, 17=lost (re-syncing). Missing "Obvious exits:" drops to 11 (not 17). |
+| 0x54C0 | i32 | ACTIVITY_STATE | Activity state machine from status bar display (FUN_0047b2d0): 0=idle, 1=?, 2/3=resting, 4/5=meditating, 6=poisoned, 7=hanging, 8=relogging, 9=multi-cast, 10=pre-cast, 11/17=casting, 12=blessing, 13=attacking, 14=BS'ing, 15=hiding, 18=moving/running, 19=bashing, 20=picking, 21=disarming, 22=opening, 23=sneaking, 24=getting, 25=dropping, 26=stashing, 27=equipping, 28=looking, 29=searching, 30=tracking, 31/32/39=checking, 33=inventory, 34=depositing, 35=withdrawing, 36=buying, 37=selling, 38=teleported, 40=training, 41=other |
 | 0x54D4 | i32 | MSG_CODE | Last WM_ message code received |
 | 0x54D8 | i32 | STEPS_REMAINING | Countdown of steps remaining in current path segment |
 | 0x54DC | i32 | LOOP_STATS | Set to -1 before loop, zeroed (4 bytes at 0x54DC–0x54DF) on @loop start to clear session stats |
@@ -324,6 +329,8 @@ Gated by AUTO_CASH (0x4D14) and AUTO_GET (0x4D18).
 
 | Offset | Size | Name | Description |
 |---|---|---|---|
+| 0x5617 | char[] | DEFAULT_LOOP | Default loop path name (saved to INI as "DefaultLoop") |
+| 0x5630 | i32 | SOUND | Sound enabled flag |
 | 0x563C | i32 | CONNECTED | Non-zero if connected to BBS |
 | 0x5640 | i32 | CONNECT_UNK | Cleared to 0 on connect |
 | 0x5644 | i32 | IN_GAME | Non-zero if in the game world |
@@ -799,8 +806,9 @@ BBS Server → [ReadFile on ???] → Buffer at struct+0x863D
 | 0x58A0 | i32 | UNK_58A0 | Observed 9 |
 | 0x58A4 | i32 | UNK_58A4 | Observed 0x0409 |
 | 0x58AC | ptr | UNK_58AC | Pointer (0x01B21778 observed) |
+| 0x593C | char[14] | SEL_PATH | Selected/queued path filename (saved to INI as "SelPath") |
 
-### Loop Entry Buffer (0x5930, 0x84 bytes)
+### Path Entry Buffer (0x5930, 0x84 bytes)
 
 Internal buffer used by VA_VERIFY_PATH for loop resume decisions.
 Populated by VA_LOAD_PATH (FUN_0045F860) when loading .mp path files.
@@ -1071,6 +1079,86 @@ Functions discovered via Ghidra disassembly of megamud.exe. All are cdecl unless
 | 0x00478920 | VA_RESET_FN2 | void(?) | Part of @reset handler chain |
 | 0x00478B10 | VA_RESET_FN3 | void(?) | Part of @reset handler chain |
 | 0x0040E8D0 | VA_RESET_FN4 | void(?) | Part of @reset handler chain |
+| 0x00464C50 | VA_SCAN_PATHS | uint(int struct) | Scan Default\*.MP and Chars\All\*.MP for new paths. Adds to DB, sorts, saves INI. |
+| 0x0045F100 | VA_PATH_ALLOC | void*(int struct) | Allocate 0x84-byte path record slot. Grows array by 100 if full. Sets dirty flag. |
+| 0x0045FE20 | VA_PATH_EXISTS | uint(int struct, byte *filename) | Check if path already in DB by comparing filename at +0xC. Returns entry ptr or 0. |
+| 0x00460050 | VA_PARSE_MP | uint(int struct, char *record, int 0) | Parse .mp file into 0x84-byte record. Opens file, reads header/steps. |
+| 0x0045F520 | VA_PATH_FINALIZE | uint(int struct) | Sort paths, verify start/end rooms exist, prompt to add missing rooms. Opens dialogs! |
+| 0x00427D20 | VA_UPDATE_PATHS_MD | void(int *struct, int flag) | Rebuild Paths.md display (menu, file). flag=1 after scan. |
+| 0x00435C30 | VA_INI_WRITE_INT | void(int struct, LPCSTR section, LPCSTR key, uint value) | Write int to INI file at struct+0x1303 |
+| 0x00435CF0 | VA_INI_WRITE_STR | void(int struct, LPCSTR section, LPCSTR key, LPCSTR value) | Write string to INI file |
+| 0x00427120 | VA_LOAD_ALL_DATA | uint(int *struct, uint flags) | Master data loader. Loads rooms, paths, macros, etc. Calls VA_SCAN_PATHS. |
+
+---
+
+## Path Scanner (VA_SCAN_PATHS / FUN_00464C50)
+
+**Decompiled 2026-04-17 via Ghidra headless.** Scans `Default\*.MP` and `Chars\All\*.MP`.
+
+```
+for each .mp file found by FindFirstFileA/FindNextFileA:
+  1. Extract filename from WIN32_FIND_DATA (prefer cAlternateFileName, fall back to cFileName)
+  2. Zero a local 0x84-byte record buffer
+  3. Strip path prefix, copy up to 14 chars into record+0x0C
+  4. Call VA_PATH_EXISTS(struct, filename) — skip if already registered
+  5. Call VA_PATH_ALLOC(struct) — allocate new 0x84-byte slot
+  6. Set record[0] = 0x00 (Default) or 0x01 (Chars\All)
+  7. Call VA_PARSE_MP(struct, record, 0) — parse .mp header
+  8. Set record+0x60 |= 0x10000000 (imported flag)
+  9. memcpy 0x21 dwords (0x84 bytes) from local record into allocated slot
+  10. Set dirty flag at struct+0x571C = 1
+After scan:
+  - VA_PATH_FINALIZE(struct) — sort, verify rooms (OPENS DIALOGS)
+  - VA_INI_WRITE_INT(struct, "MegaMud", "ScanPaths", 0)
+  - If dirty: VA_UPDATE_PATHS_MD(struct, 1)
+```
+
+**To import a single path without rescan/dialogs:** copy .mp to Default\, then
+directly call VA_PATH_ALLOC + VA_PARSE_MP + memcpy + VA_UPDATE_PATHS_MD,
+skipping VA_PATH_FINALIZE (which opens room-definition dialogs).
+
+### Path Entry Struct (0x84 bytes each, stored in pointer array at struct+0x2C60)
+
+| Offset | Size | Type | Description |
+|---|---|---|---|
+| +0x00 | 1 | byte | Source: 0=Default, 1=Chars\All |
+| +0x04 | 4 | ptr | Title string (heap-allocated, nullable) |
+| +0x08 | 4 | ptr | Description string (heap-allocated, nullable) |
+| +0x0C | 14 | char[] | Filename (e.g. "STONMAXM.MP") |
+| +0x1A | 31 | char[] | Field A (from .mp header line 3, before first ':') |
+| +0x39 | 14 | char[] | Field B (from .mp header line 3, after first ':') |
+| +0x47 | 14 | char[] | Field C (from .mp header line 3, after second ':') |
+| +0x48 | 4 | u32 | Flags (bit 0x8000 = deleted, bit 0x10000000 = imported) |
+| +0x58 | 4 | u32 | Start room checksum |
+| +0x5C | 4 | u32 | End room checksum |
+| +0x64 | 4 | i32 | Value from .mp header (parsed by FUN_0047C150) |
+| +0x68 | 4 | i32 | Value from .mp header |
+| +0x6C | 4 | i32 | Value from .mp header |
+
+When start==end checksum, path is a loop. Title at +0x04 is displayed as "Current Loop: %s".
+
+### Pathing State Save/Restore (for safe import during active loop)
+
+To import a path while MegaMUD is actively looping without losing position:
+
+**Save these offsets before import:**
+```c
+// Active path execution state
+uint8_t  save_buf[0x200];
+memcpy(save_buf + 0x00, struct + 0x54B4, 4);   // ON_ENTRY_ACTION
+memcpy(save_buf + 0x04, struct + 0x54BC, 4);   // MODE
+memcpy(save_buf + 0x08, struct + 0x54D8, 4);   // STEPS_REMAINING
+memcpy(save_buf + 0x0C, struct + 0x5664, 4);   // PATHING
+memcpy(save_buf + 0x10, struct + 0x5668, 4);   // LOOPING
+memcpy(save_buf + 0x14, struct + 0x5834, 76);  // PATH_FILE_NAME
+memcpy(save_buf + 0x60, struct + 0x5880, 32);  // PATH_WP_0..3 + sentinel + total_steps + cur_step
+memcpy(save_buf + 0x80, struct + 0x5930, 0x84);// LOOP_ENTRY_BUF
+memcpy(save_buf + 0x104, struct + 0x5988, 8);  // LOOP_RESUME_A, B
+memcpy(save_buf + 0x10C, struct + 0x593C, 14); // SEL_PATH
+```
+
+**Restore after import** — write same offsets back. The path DB array (0x2C58/0x2C60) will have
+grown but existing entries are untouched, so the saved CUR_PATH_STEP/PATH_FILE_NAME remain valid.
 
 ---
 
@@ -1176,20 +1264,16 @@ Each entry in the room database array:
 | +0x06 | char[] | str | Full room name (e.g. "Bank of Godfrey") |
 | +0x44 | ptr | void* | Destination data pointer (used by start_path) |
 
-## Loop Entry Struct (array at struct+0x2C60)
+## Path Entry Struct Detail (array at struct+0x2C60, each 0x84 bytes)
 
-**IMPORTANT:** Loop/path filenames always include the `.mp` extension. When calling
+**IMPORTANT:** Path/loop filenames always include the `.mp` extension. When calling
 `fake_remote("loop <name>")` or `mud.remote.loop("<name>")`, the `.mp` extension is
 REQUIRED or the lookup will fail. Example: `mud.remote.loop('mustfull.mp')` works,
 `mud.remote.loop('MUSTFULL')` does NOT.
 
-Each entry in the loop database array:
+Lookup via VA_PATH_EXISTS (0x0045FE20) compares filename at +0x0C case-insensitively.
 
-| Offset | Size | Type | Description |
-|---|---|---|---|
-| +0x04 | ptr | char* | Pointer to filename string (e.g. "DCCWLOOP.mp") |
-| +0x0C | char[] | str | Inline display name (e.g. "Cave Worm Loop") |
-| +0x58 | ptr | void* | Destination data pointer (used by start_path) |
+See "Path Entry Struct" in Scanner section above for full field map.
 
 ---
 

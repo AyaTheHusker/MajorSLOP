@@ -127,8 +127,14 @@ static int history_idx = 0;
 #define MAX_LINE_READERS 8
 static char *line_buffer[MAX_LINE_BUF];
 static int line_buf_head = 0;
-static int line_buf_tail[MAX_LINE_READERS];  /* per-reader tail */
+static int line_buf_tail[MAX_LINE_READERS];  /* per-reader tail — raw stream */
 static int line_reader_active[MAX_LINE_READERS];
+/* Parallel clean (ANSI-stripped) line stream. Same capacity, same reader
+ * slots — a reader that registers gets tails into BOTH streams and can
+ * read from whichever it prefers via mmudpy_get_line / _get_clean_line. */
+static char *clean_line_buffer[MAX_LINE_BUF];
+static int clean_line_buf_head = 0;
+static int clean_line_buf_tail[MAX_LINE_READERS];
 static CRITICAL_SECTION line_lock;
 
 /* Debug counters */
@@ -1215,7 +1221,8 @@ __declspec(dllexport) int mmudpy_line_register(void)
     for (int i = 0; i < MAX_LINE_READERS; i++) {
         if (!line_reader_active[i]) {
             line_reader_active[i] = 1;
-            line_buf_tail[i] = line_buf_head;  /* start from current position */
+            line_buf_tail[i]        = line_buf_head;        /* raw stream */
+            clean_line_buf_tail[i]  = clean_line_buf_head;  /* clean stream */
             LeaveCriticalSection(&line_lock);
             return i;
         }
@@ -1251,6 +1258,30 @@ __declspec(dllexport) int mmudpy_get_line(int reader_id, char *out, int out_sz)
         dbg_get_line_count++;
         if (dbg_get_line_count <= 5)
             dbg("[get_line] #%d reader=%d: %.60s\n", dbg_get_line_count, reader_id, line);
+        strncpy(out, line, out_sz - 1);
+        out[out_sz - 1] = '\0';
+        return 1;
+    }
+    return 0;
+}
+
+__declspec(dllexport) int mmudpy_get_clean_line(int reader_id, char *out, int out_sz)
+{
+    /* Like mmudpy_get_line but returns the ANSI-stripped variant.
+     * Shares the reader slot with mmudpy_get_line — both streams advance
+     * independently, so a script can consume either or both. */
+    if (reader_id < 0 || reader_id >= MAX_LINE_READERS) return 0;
+    EnterCriticalSection(&line_lock);
+    if (!line_reader_active[reader_id] || clean_line_buf_head == clean_line_buf_tail[reader_id]) {
+        LeaveCriticalSection(&line_lock);
+        return 0;
+    }
+    int idx = clean_line_buf_tail[reader_id];
+    char *line = clean_line_buffer[idx];
+    clean_line_buf_tail[reader_id] = (idx + 1) % MAX_LINE_BUF;
+    LeaveCriticalSection(&line_lock);
+
+    if (line) {
         strncpy(out, line, out_sz - 1);
         out[out_sz - 1] = '\0';
         return 1;
@@ -1826,6 +1857,8 @@ static const char *py_bootstrap =
     "    _dll.mmudpy_line_unregister.argtypes = [ctypes.c_int]\n"
     "    _dll.mmudpy_get_line.restype = ctypes.c_int\n"
     "    _dll.mmudpy_get_line.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int]\n"
+    "    _dll.mmudpy_get_clean_line.restype = ctypes.c_int\n"
+    "    _dll.mmudpy_get_clean_line.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int]\n"
     "    _dll.mmudpy_get_round.restype = ctypes.c_int\n"
     "    _dll.mmudpy_get_round.argtypes = []\n"
     "    _dll.mmudpy_toggle_console.restype = None\n"
@@ -3076,6 +3109,31 @@ static void mmudpy_on_line(const char *line)
     LeaveCriticalSection(&line_lock);
 }
 
+static void mmudpy_on_clean_line(const char *line)
+{
+    /* Parallel buffer for ANSI-stripped lines. Reuses the same wrap /
+     * reader-tail-catchup logic as mmudpy_on_line but against the clean
+     * stream. */
+    EnterCriticalSection(&line_lock);
+    int next = (clean_line_buf_head + 1) % MAX_LINE_BUF;
+
+    if (clean_line_buffer[clean_line_buf_head]) {
+        free(clean_line_buffer[clean_line_buf_head]);
+        clean_line_buffer[clean_line_buf_head] = NULL;
+    }
+
+    clean_line_buffer[clean_line_buf_head] = _strdup(line);
+    clean_line_buf_head = next;
+
+    for (int i = 0; i < MAX_LINE_READERS; i++) {
+        if (line_reader_active[i] && clean_line_buf_tail[i] == next) {
+            clean_line_buf_tail[i] = (next + 1) % MAX_LINE_BUF;
+        }
+    }
+
+    LeaveCriticalSection(&line_lock);
+}
+
 static void mmudpy_on_round(int round_num)
 {
     last_round_num = round_num;
@@ -3477,6 +3535,7 @@ static slop_plugin_t plugin = {
     .init        = mmudpy_init,
     .shutdown    = mmudpy_shutdown,
     .on_line     = mmudpy_on_line,
+    .on_clean_line = mmudpy_on_clean_line,
     .on_round    = mmudpy_on_round,
     .on_wndproc  = mmudpy_on_wndproc,
 };

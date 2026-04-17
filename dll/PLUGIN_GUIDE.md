@@ -138,10 +138,17 @@ Every plugin must:
 | `version`     | `const char *`   | YES      | Version string (e.g. `"1.0.0"`)               |
 | `init`        | function ptr     | YES      | Called on load. Return 0 = success, else abort |
 | `shutdown`    | function ptr     | YES      | Called on unload / MegaMUD exit                |
-| `on_line`     | function ptr     | optional | Called for every new terminal line (NULL = skip)|
-| `on_round`    | function ptr     | optional | Called on each combat round tick (NULL = skip) |
-| `on_wndproc`  | function ptr     | optional | WndProc hook, return non-zero if handled       |
-| `_reserved`   | `void *[4]`      | -        | Zero-initialize. Future expansion.             |
+| `on_line`       | function ptr   | optional | Called for every new terminal line, **ANSI escapes intact** (NULL = skip) |
+| `on_round`      | function ptr   | optional | Called on each combat round tick (NULL = skip) |
+| `on_wndproc`    | function ptr   | optional | WndProc hook, return non-zero if handled       |
+| `on_data`       | function ptr   | optional | Raw byte stream, NOT split on `\n` (terminal emulators) |
+| `on_clean_line` | function ptr   | optional | Like `on_line` but ANSI has already been stripped — prefer for substring/prefix matching |
+| `_reserved`     | `void *[2]`    | -        | Zero-initialize. Future expansion.             |
+
+> **Note on ABI compatibility:** `on_clean_line` was added in place of
+> `_reserved[0]`, so `SLOP_API_VERSION` stayed at `1`. Plugins built against
+> older headers don't set it (it's NULL), and the loader skips NULL
+> callbacks — so old plugins keep working unchanged.
 
 ### Lifecycle
 
@@ -235,6 +242,29 @@ Use this for debugging — visible in the log file immediately.
 ```c
 api->log("[my_plugin] Player HP: %d/%d\n", cur_hp, max_hp);
 ```
+
+---
+
+### ANSI Stripper
+
+```c
+void (*strip_ansi)(char *line);
+```
+
+In-place strip of CSI (`ESC [ ... final`) and two-byte non-CSI escapes from a
+NUL-terminated string. Writes over the same buffer. Useful if you're
+processing lines from `on_line` (raw) or building your own line parser:
+
+```c
+char buf[1024];
+strncpy(buf, raw_line, sizeof buf); buf[sizeof buf - 1] = 0;
+api->strip_ansi(buf);
+/* now buf has clean text */
+```
+
+Most plugins should just use `on_clean_line` and skip this. Provided so
+byte-stream parsers (see "State-machine parsing" below) don't need to
+reinvent the stripper.
 
 ---
 
@@ -758,12 +788,62 @@ void dump_terminal(void) {
 
 ## Event Callbacks
 
+### State-machine parsing (READ THIS FIRST)
+
+**Rule:** Any parser that reads the MUD byte stream — combat events, chat
+channels, room descriptions, triggers, round detection — must be
+**line-buffered**, not chunk-level regex.
+
+**Why:** Network chunks split strings across boundaries (`Loc|ation:`),
+regex on concatenated scrollback matches stale data from prior rounds,
+and ANSI SGR sequences end up embedded mid-word. A byte-wise state
+machine that accumulates until `\n`, strips ANSI, and dispatches a clean
+line **avoids all three** by construction.
+
+**How:** prefer `on_clean_line` if you're a plugin; if you're writing
+a C parser that needs byte-level control, reuse `line_fsm.h`:
+
+```c
+#include "line_fsm.h"
+
+static char my_buf[2048];
+static line_fsm_t my_fsm;
+
+static void my_on_line(const char *line, void *user) {
+    (void)user;
+    /* parse substring-style — the line is whole and clean */
+    if (strstr(line, " damage!")) { /* ... */ }
+}
+
+/* once at init: */
+line_fsm_init(&my_fsm, my_buf, sizeof my_buf,
+              LINE_FSM_STRIP_INLINE, LINE_FSM_TERM_CRLF,
+              my_on_line, NULL);
+
+/* every time you get raw bytes: */
+line_fsm_feed(&my_fsm, raw, raw_len);
+```
+
+`line_fsm.h` is byte-for-byte validated against the two production
+parsers (`pst_feed` in vk\_terminal and `incoming_feed_data` in
+msimg32\_proxy) across chunk sizes 1..1M — see `/tmp/test_line_fsm.c`.
+
 ### `on_line(const char *line)`
 
 Called for every new line that appears in the MMANSI terminal. This is your primary
 way to react to game output.
 
-**What you get:** Plain ASCII text, trailing spaces stripped.
+**What you get:** **Raw line with ANSI escapes intact.** If you're doing
+substring/prefix matching, prefer `on_clean_line` instead — it delivers
+the same line already stripped, saving every plugin from re-implementing
+the stripper. Terminal emulators that render their own colors use
+`on_line` (or `on_data`) so they can see the original sequences.
+
+### `on_clean_line(const char *line)`
+
+Same as `on_line`, but the line has been run through `strip_ansi`
+first. This is the **preferred** callback for any parser doing
+`strstr`/`strncmp`/`starts_with` on the text.
 
 **Verified combat patterns** (from the working `is_combat_event()` in MajorSLOP and `parser.py`):
 

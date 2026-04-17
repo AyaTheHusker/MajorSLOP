@@ -15,6 +15,7 @@
 #define VK_USE_PLATFORM_WIN32_KHR
 #include "vulkan_headers/vulkan.h"
 #include "slop_plugin.h"
+#include "line_fsm.h"
 #include "cp437.h"          /* original 8x16 bitmap */
 #define STB_TRUETYPE_IMPLEMENTATION
 #include "stb_truetype.h"   /* runtime TTF rasterization */
@@ -144,6 +145,7 @@ static res_t resolutions[] = {
 #include "shaders/bg_plasma_frag.h"
 #include "shaders/bg_starfield_vert.h"
 #include "shaders/bg_starfield_frag.h"
+#include "shaders/bg_alienwall_frag.h"
 
 /* ---- Plugin state ---- */
 
@@ -803,7 +805,8 @@ static int ttf_loaded[MAX_TTF_FONTS] = {0};
 #define VKM_BG_SETTINGS    0  /* First item: opens unified Background Settings dialog */
 #define VKM_BG_PLASMA      1
 #define VKM_BG_STARFIELD   2
-#define VKM_BG_COUNT       3
+#define VKM_BG_ALIENWALL   3
+#define VKM_BG_COUNT       4
 
 static int megamud_hidden = 0; /* 1 = MegaMUD windows hidden, VK-only mode */
 
@@ -3217,6 +3220,7 @@ static float shadow_r = 0.0f, shadow_g = 0.0f, shadow_b = 0.0f; /* shadow color 
 #define BG_NONE      0
 #define BG_PLASMA    1
 #define BG_STARFIELD 2
+#define BG_ALIENWALL 3
 static int bg_mode = BG_NONE;
 static int bg_quad_end = 0;
 
@@ -3311,16 +3315,43 @@ static int   bg_star_beat_rms     = BGP_BEAT_BRIGHT;
 static VkPipelineLayout vk_star_pipe_layout = VK_NULL_HANDLE;
 static VkPipeline       vk_star_pipeline    = VK_NULL_HANDLE;
 
+/* ---- Alien Wall parameters ---- */
+static float bg_alien_speed         = 0.8f;
+static float bg_alien_cell_scale    = 3.0f;
+static float bg_alien_warp          = 1.5f;
+static float bg_alien_hue           = 120.0f;
+static float bg_alien_saturation    = 0.85f;
+static float bg_alien_brightness    = 0.7f;
+static float bg_alien_alpha         = 0.35f;
+static float bg_alien_vein          = 1.0f;
+static float bg_alien_pulse_speed   = 1.0f;
+static float bg_alien_glow          = 0.8f;
+static float bg_alien_depth_layers  = 2.0f;
+static float bg_alien_roughness     = 0.2f;
+static float bg_alien_membrane      = 0.4f;
+static float bg_alien_wet           = 1.0f;
+static float bg_alien_fluid_speed   = 0.8f;
+static float bg_alien_specular      = 0.5f;
+static int   bg_alien_beat_bass     = BGP_BEAT_BRIGHT;
+static int   bg_alien_beat_mid      = BGP_BEAT_HUE;
+static int   bg_alien_beat_treble   = BGP_BEAT_ZOOM;
+static int   bg_alien_beat_rms      = BGP_BEAT_NONE;
+
+/* Alien Wall pipeline */
+static VkPipelineLayout vk_alien_pipe_layout = VK_NULL_HANDLE;
+static VkPipeline       vk_alien_pipeline    = VK_NULL_HANDLE;
+
 /* Unified Background Settings dialog state
  * Single tabbed dialog: one tab per registered background plugin.
  * Plasma tab owns the static plasma sliders/dropdowns above; Starfield
  * tab is populated later with starfield sliders. */
 #define BGP_TAB_PLASMA    0
 #define BGP_TAB_STARFIELD 1
-#define BGP_TAB_COUNT     2
-static const char *bgp_tab_names[BGP_TAB_COUNT] = { "Fractal Plasma", "Parallax Starfield" };
+#define BGP_TAB_ALIENWALL 2
+#define BGP_TAB_COUNT     3
+static const char *bgp_tab_names[BGP_TAB_COUNT] = { "Fractal Plasma", "Parallax Starfield", "Alien Wall" };
 static int   bgp_tab = BGP_TAB_PLASMA;     /* active tab index */
-static int   bgp_tab_scroll[BGP_TAB_COUNT] = {0, 0}; /* per-tab scroll position */
+static int   bgp_tab_scroll[BGP_TAB_COUNT] = {0, 0, 0}; /* per-tab scroll position */
 
 static int   bgp_visible = 0;
 static float bgp_x = 140.0f, bgp_y = 100.0f;
@@ -6136,6 +6167,9 @@ static void vkm_draw(int vp_w, int vp_h)
                 } else if (i == VKM_BG_STARFIELD) {
                     label = "Parallax Starfield";
                     is_active = (bg_mode == BG_STARFIELD);
+                } else if (i == VKM_BG_ALIENWALL) {
+                    label = "Alien Wall";
+                    is_active = (bg_mode == BG_ALIENWALL);
                 }
             } else if (vkm_sub == VKM_SUB_VIZ) {
                 if (i == VKM_VIZ_BLADES) {
@@ -7966,7 +8000,7 @@ static void vkt_build_vertices(void)
      * recent `rm` command output (msimg32 maintains loc_map / loc_room).
      * Checksums are NOT unique per room, so matching by checksum silently
      * teleported the marker to dup rooms. Gated by [x] use rm. */
-    if (mdw_use_rm) {
+    if (mdw_use_rm && !mdw_path_focus) {
         unsigned int packed = get_location_safe();
         if (packed) {
             int map = (int)((packed >> 16) & 0xFFFF);
@@ -9871,6 +9905,53 @@ static int vkt_create_swapchain(void)
         else
             api->log("[vk_terminal] Starfield pipeline OK\n");
     }
+
+    /* ---- Alien Wall pipeline ---- */
+    {
+        VkPushConstantRange pcr = {0};
+        pcr.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+        pcr.offset = 0;
+        pcr.size = sizeof(float) * 24;
+
+        VkPipelineLayoutCreateInfo aplci = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+        aplci.setLayoutCount = 1;
+        aplci.pSetLayouts = &vk_desc_layout;
+        aplci.pushConstantRangeCount = 1;
+        aplci.pPushConstantRanges = &pcr;
+        vkCreatePipelineLayout(vk_dev, &aplci, NULL, &vk_alien_pipe_layout);
+
+        VkShaderModuleCreateInfo avsci = { VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO };
+        avsci.codeSize = bg_plasma_vert_spv_size;
+        avsci.pCode = bg_plasma_vert_spv;
+        VkShaderModule avs;
+        vkCreateShaderModule(vk_dev, &avsci, NULL, &avs);
+
+        VkShaderModuleCreateInfo afsci = { VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO };
+        afsci.codeSize = bg_alienwall_frag_spv_size;
+        afsci.pCode = (const uint32_t *)bg_alienwall_frag_spv;
+        VkShaderModule afs;
+        vkCreateShaderModule(vk_dev, &afsci, NULL, &afs);
+
+        VkPipelineShaderStageCreateInfo astages[2] = {
+            { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0,
+              VK_SHADER_STAGE_VERTEX_BIT, avs, "main", NULL },
+            { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, NULL, 0,
+              VK_SHADER_STAGE_FRAGMENT_BIT, afs, "main", NULL },
+        };
+
+        VkGraphicsPipelineCreateInfo agpci = gpci;
+        agpci.pStages = astages;
+        agpci.layout = vk_alien_pipe_layout;
+        res = vkCreateGraphicsPipelines(vk_dev, VK_NULL_HANDLE, 1, &agpci, NULL, &vk_alien_pipeline);
+
+        vkDestroyShaderModule(vk_dev, avs, NULL);
+        vkDestroyShaderModule(vk_dev, afs, NULL);
+
+        if (res != VK_SUCCESS)
+            api->log("[vk_terminal] Alien Wall pipeline failed: %d\n", res);
+        else
+            api->log("[vk_terminal] Alien Wall pipeline OK\n");
+    }
     api->log("[vk_terminal] Swapchain %dx%d, %d images\n",
              vk_sc_extent.width, vk_sc_extent.height, vk_sc_count);
     return 0;
@@ -9887,6 +9968,8 @@ static void vkt_destroy_swapchain(void)
     if (vk_bg_pipe_layout) { vkDestroyPipelineLayout(vk_dev, vk_bg_pipe_layout, NULL); vk_bg_pipe_layout = VK_NULL_HANDLE; }
     if (vk_star_pipeline) { vkDestroyPipeline(vk_dev, vk_star_pipeline, NULL); vk_star_pipeline = VK_NULL_HANDLE; }
     if (vk_star_pipe_layout) { vkDestroyPipelineLayout(vk_dev, vk_star_pipe_layout, NULL); vk_star_pipe_layout = VK_NULL_HANDLE; }
+    if (vk_alien_pipeline) { vkDestroyPipeline(vk_dev, vk_alien_pipeline, NULL); vk_alien_pipeline = VK_NULL_HANDLE; }
+    if (vk_alien_pipe_layout) { vkDestroyPipelineLayout(vk_dev, vk_alien_pipe_layout, NULL); vk_alien_pipe_layout = VK_NULL_HANDLE; }
     if (vk_renderpass) { vkDestroyRenderPass(vk_dev, vk_renderpass, NULL); vk_renderpass = VK_NULL_HANDLE; }
     if (vk_sc_fbs) {
         for (uint32_t i = 0; i < vk_sc_count; i++) vkDestroyFramebuffer(vk_dev, vk_sc_fbs[i], NULL);
@@ -10056,6 +10139,50 @@ static void vkt_render_frame(void)
         vkCmdPushConstants(vk_cmd_buf, vk_star_pipe_layout,
                            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                            0, sizeof(sp_pc), sp_pc);
+        vkCmdDrawIndexed(vk_cmd_buf, bg_quad_end * 6, 1, 0, 0, 0);
+        term_start = bg_quad_end;
+    } else if (bg_mode == BG_ALIENWALL && bg_quad_end > 0 && vk_alien_pipeline) {
+        vkCmdBindPipeline(vk_cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS, vk_alien_pipeline);
+        vkCmdBindDescriptorSets(vk_cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                vk_alien_pipe_layout, 0, 1, &vk_desc_set, 0, NULL);
+        float ab_hue = 0.0f, ab_bright = 0.0f, ab_zoom = 0.0f;
+        {
+            EnterCriticalSection(&mr_beat_lock);
+            float bass = mr_beat_snap.bass_energy;
+            float mid  = mr_beat_snap.mid_energy;
+            float treb = mr_beat_snap.treble_energy;
+            float rms  = (bass + mid + treb) * 0.33f;
+            LeaveCriticalSection(&mr_beat_lock);
+            struct { int mode; float energy; } bands[4] = {
+                { bg_alien_beat_bass, bass }, { bg_alien_beat_mid, mid },
+                { bg_alien_beat_treble, treb }, { bg_alien_beat_rms, rms }
+            };
+            for (int i = 0; i < 4; i++) {
+                float e = bands[i].energy;
+                if (bands[i].mode == BGP_BEAT_HUE)      ab_hue    += e * 140.0f;
+                if (bands[i].mode == BGP_BEAT_BRIGHT)   ab_bright += e * 1.1f;
+                if (bands[i].mode == BGP_BEAT_ZOOM)     ab_zoom   += e * 0.12f;
+                if (bands[i].mode == BGP_BEAT_PULSE)    ab_zoom   += e * 0.08f;
+                if (bands[i].mode == BGP_BEAT_JITTER)   ab_hue    += e * 40.0f;
+                if (bands[i].mode == BGP_BEAT_WARP)     ab_bright += e * 0.4f;
+                if (bands[i].mode == BGP_BEAT_TWINKLE)  ab_bright += e * 0.6f;
+                if (bands[i].mode == BGP_BEAT_DRIFT)    ab_hue    += e * 80.0f;
+                if (bands[i].mode == BGP_BEAT_WAVE)     ab_zoom   += e * 0.05f;
+            }
+        }
+        float aw_pc[24] = {
+            fx_time, bg_alien_speed, bg_alien_cell_scale, bg_alien_warp,
+            bg_alien_hue, bg_alien_saturation, bg_alien_brightness, bg_alien_alpha,
+            (float)vk_sc_extent.width, (float)vk_sc_extent.height,
+            bg_alien_vein, bg_alien_pulse_speed, bg_alien_glow, bg_alien_depth_layers,
+            ab_hue, ab_bright, ab_zoom,
+            bg_alien_roughness, bg_alien_membrane,
+            (float)bg_tonemap_mode, bg_tonemap_exposure,
+            bg_alien_wet, bg_alien_fluid_speed, bg_alien_specular
+        };
+        vkCmdPushConstants(vk_cmd_buf, vk_alien_pipe_layout,
+                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                           0, sizeof(aw_pc), aw_pc);
         vkCmdDrawIndexed(vk_cmd_buf, bg_quad_end * 6, 1, 0, 0, 0);
         term_start = bg_quad_end;
     }
@@ -11258,6 +11385,10 @@ vkm_click_handler:
                 bg_mode = (bg_mode == BG_STARFIELD) ? BG_NONE : BG_STARFIELD;
                 if (api) api->log("[vk_terminal] Parallax Starfield: %s\n",
                                   bg_mode == BG_STARFIELD ? "ON" : "OFF");
+            } else if (si == VKM_BG_ALIENWALL) {
+                bg_mode = (bg_mode == BG_ALIENWALL) ? BG_NONE : BG_ALIENWALL;
+                if (api) api->log("[vk_terminal] Alien Wall: %s\n",
+                                  bg_mode == BG_ALIENWALL ? "ON" : "OFF");
             }
             vkm_open = 0;
             vkm_sub = VKM_SUB_NONE;
@@ -12048,8 +12179,11 @@ static struct {
 
 /* ANSI line extraction buffer */
 static char pst_lbuf[1024];
-static int  pst_lpos = 0;
-static int  pst_esc  = 0;      /* inside ESC sequence */
+/* Line-buffered state machine. Replaces the hand-rolled loop that lived
+ * here; preserves behavior exactly (byte-for-byte validated in
+ * /tmp/test_line_fsm.c across chunk sizes 1..1M). */
+static line_fsm_t pst_fsm;
+static int        pst_fsm_inited = 0;
 
 static DWORD pst_last_poll = 0;
 #define PST_POLL_MS 1000
@@ -12406,27 +12540,21 @@ static void pst_parse_line(const char *line)
 
 /* ---- ANSI stripper + line extraction ---- */
 
+static void pst_fsm_cb(const char *line, void *user)
+{
+    (void)user;
+    pst_parse_line(line);
+}
+
 static void pst_feed(const char *data, int len)
 {
-    for (int i = 0; i < len; i++) {
-        char c = data[i];
-        if (c == '\x1b') { pst_esc = 1; continue; }
-        if (pst_esc) {
-            /* End of CSI sequence on letter */
-            if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')) pst_esc = 0;
-            continue;
-        }
-        if (c == '\n' || c == '\r') {
-            if (pst_lpos > 0) {
-                pst_lbuf[pst_lpos] = 0;
-                pst_parse_line(pst_lbuf);
-                pst_lpos = 0;
-            }
-            continue;
-        }
-        if (pst_lpos < (int)sizeof(pst_lbuf) - 1)
-            pst_lbuf[pst_lpos++] = c;
+    if (!pst_fsm_inited) {
+        line_fsm_init(&pst_fsm, pst_lbuf, (int)sizeof(pst_lbuf),
+                      LINE_FSM_STRIP_INLINE, LINE_FSM_TERM_CRLF,
+                      pst_fsm_cb, NULL);
+        pst_fsm_inited = 1;
     }
+    line_fsm_feed(&pst_fsm, data, len);
 }
 
 /* ---- Formatting helpers ---- */
@@ -14982,6 +15110,9 @@ static void bgp_draw_starfield_tab(float x0, float content_top, float content_bo
                                    float pw, float sb_w, int vp_w, int vp_h,
                                    const ui_theme_t *t, int cw, int ch);
 static int  bgp_starfield_total_rows(void);
+static void bgp_draw_alienwall_tab(float x0, float content_top, float content_bot,
+                                   float pw, float sb_w, int vp_w, int vp_h,
+                                   const ui_theme_t *t, int cw, int ch);
 
 static int bgp_scaled = 0;
 static void bgp_draw(int vp_w, int vp_h) {
@@ -15129,9 +15260,15 @@ static void bgp_draw(int vp_w, int vp_h) {
     float slider_w = pw - 40 - sb_w;
     char vbuf[32];
 
-    /* If Starfield tab is active, delegate and return early (its own scrolling). */
+    /* If Starfield or Alien Wall tab is active, delegate and return early. */
     if (bgp_tab == BGP_TAB_STARFIELD) {
         bgp_draw_starfield_tab(x0, content_top, content_bot, pw, sb_w,
+                               vp_w, vp_h, t, cw, ch);
+        bgp_tab_scroll[bgp_tab] = bgp_scroll;
+        return;
+    }
+    if (bgp_tab == BGP_TAB_ALIENWALL) {
+        bgp_draw_alienwall_tab(x0, content_top, content_bot, pw, sb_w,
                                vp_w, vp_h, t, cw, ch);
         bgp_tab_scroll[bgp_tab] = bgp_scroll;
         return;
@@ -15682,6 +15819,274 @@ static void star_reset_defaults(void) {
     bg_star_beat_rms = BGP_BEAT_BRIGHT;
 }
 
+/* ---- Alien Wall tab ---- */
+
+#define ALIEN_SLIDER_COUNT 16
+static const char *bg_alien_labels[ALIEN_SLIDER_COUNT] = {
+    "Speed", "Cell Scale", "Warp Strength", "Hue Shift",
+    "Saturation", "Brightness", "Opacity",
+    "Vein Strength", "Pulse Speed", "Glow Intensity",
+    "Depth Layers", "Roughness", "Membrane Mix",
+    "Wet/Glossy", "Fluid Speed", "Specular Tight"
+};
+static float bg_alien_slider_min[ALIEN_SLIDER_COUNT] = {
+    0.1f, 1.0f, 0.0f, 0.0f,
+    0.0f, 0.0f, 0.0f,
+    0.0f, 0.0f, 0.0f,
+    1.0f, 0.0f, 0.0f,
+    0.0f, 0.0f, 0.0f
+};
+static float bg_alien_slider_max[ALIEN_SLIDER_COUNT] = {
+    5.0f, 8.0f, 4.0f, 360.0f,
+    2.0f, 2.0f, 1.0f,
+    2.0f, 4.0f, 2.0f,
+    4.0f, 1.0f, 1.0f,
+    2.0f, 2.0f, 1.0f
+};
+static float *bg_alien_slider_ptr[ALIEN_SLIDER_COUNT];
+
+#define ALIEN_TOTAL_ROWS (ALIEN_SLIDER_COUNT + 7)
+
+static void bgp_draw_alienwall_tab(float x0, float content_top, float content_bot,
+                                   float pw, float sb_w, int vp_w, int vp_h,
+                                   const ui_theme_t *t, int cw, int ch)
+{
+    bg_alien_slider_ptr[0]  = &bg_alien_speed;
+    bg_alien_slider_ptr[1]  = &bg_alien_cell_scale;
+    bg_alien_slider_ptr[2]  = &bg_alien_warp;
+    bg_alien_slider_ptr[3]  = &bg_alien_hue;
+    bg_alien_slider_ptr[4]  = &bg_alien_saturation;
+    bg_alien_slider_ptr[5]  = &bg_alien_brightness;
+    bg_alien_slider_ptr[6]  = &bg_alien_alpha;
+    bg_alien_slider_ptr[7]  = &bg_alien_vein;
+    bg_alien_slider_ptr[8]  = &bg_alien_pulse_speed;
+    bg_alien_slider_ptr[9]  = &bg_alien_glow;
+    bg_alien_slider_ptr[10] = &bg_alien_depth_layers;
+    bg_alien_slider_ptr[11] = &bg_alien_roughness;
+    bg_alien_slider_ptr[12] = &bg_alien_membrane;
+    bg_alien_slider_ptr[13] = &bg_alien_wet;
+    bg_alien_slider_ptr[14] = &bg_alien_fluid_speed;
+    bg_alien_slider_ptr[15] = &bg_alien_specular;
+
+    float row_h = ch + 14;
+    float content_h = content_bot - content_top;
+    float slider_w = pw - 40 - sb_w;
+    int max_visible = (int)(content_h / row_h);
+    if (max_visible < 3) max_visible = 3;
+    int max_scroll = ALIEN_TOTAL_ROWS - max_visible;
+    if (max_scroll < 0) max_scroll = 0;
+    if (bgp_scroll > max_scroll) bgp_scroll = max_scroll;
+    if (bgp_scroll < 0) bgp_scroll = 0;
+
+    float cy = content_top + 4;
+    int drawn = 0;
+    int vrow = 0;
+    char vbuf[32];
+
+    #define ALIEN_VIS (vrow >= bgp_scroll && drawn < max_visible)
+    #define ALIEN_NEXT do { if (ALIEN_VIS) { cy += row_h; drawn++; } vrow++; } while(0)
+
+    /* --- Sliders --- */
+    for (int i = 0; i < ALIEN_SLIDER_COUNT; i++) {
+        if (ALIEN_VIS) {
+            float val = *bg_alien_slider_ptr[i];
+            if (i == 3)
+                _snprintf(vbuf, sizeof(vbuf), "%.0f\xF8", val);
+            else if (i == 10)
+                _snprintf(vbuf, sizeof(vbuf), "%.0f", val);
+            else
+                _snprintf(vbuf, sizeof(vbuf), "%.2f", val);
+            clr_draw_slider(x0 + 20, cy, slider_w, row_h, val,
+                            bg_alien_slider_min[i], bg_alien_slider_max[i],
+                            bg_alien_labels[i], vbuf, vp_w, vp_h, t);
+        }
+        ALIEN_NEXT;
+    }
+
+    /* --- Beat Response section header --- */
+    if (ALIEN_VIS) {
+        push_solid((int)(x0 + 20), (int)(cy + row_h * 0.3f),
+                   (int)(x0 + pw - sb_w - 20), (int)(cy + row_h * 0.35f),
+                   t->accent[0], t->accent[1], t->accent[2], 0.3f, vp_w, vp_h);
+        push_text((int)(x0 + 20), (int)(cy + 2), "Beat Response",
+                  t->accent[0], t->accent[1], t->accent[2], vp_w, vp_h, cw, ch);
+    }
+    ALIEN_NEXT;
+
+    /* --- Beat dropdowns --- */
+    {
+        struct { const char *label; int *val; } beats[4] = {
+            { "Bass/Kick:", &bg_alien_beat_bass },
+            { "Mid:",       &bg_alien_beat_mid },
+            { "Treble:",    &bg_alien_beat_treble },
+            { "RMS:",       &bg_alien_beat_rms }
+        };
+        for (int b = 0; b < 4; b++) {
+            if (ALIEN_VIS) {
+                push_text((int)(x0 + 20), (int)(cy + 2), beats[b].label,
+                          t->text[0], t->text[1], t->text[2], vp_w, vp_h, cw, ch);
+                int dd_x = (int)(x0 + 20 + 11 * cw);
+                int dd_w = (int)(slider_w - 11 * cw - 2);
+                int dd_y = (int)cy;
+                int dd_h = ch + 4;
+                push_solid(dd_x, dd_y, dd_x + dd_w, dd_y + dd_h,
+                           t->bg[0] + 0.05f, t->bg[1] + 0.05f, t->bg[2] + 0.05f, 0.9f, vp_w, vp_h);
+                push_solid(dd_x, dd_y, dd_x + dd_w, dd_y + 1,
+                           1.0f, 1.0f, 1.0f, 0.08f, vp_w, vp_h);
+                push_solid(dd_x, dd_y + dd_h - 1, dd_x + dd_w, dd_y + dd_h,
+                           0.0f, 0.0f, 0.0f, 0.15f, vp_w, vp_h);
+                int mode = *beats[b].val;
+                if (mode < 0 || mode >= BGP_BEAT_COUNT) mode = 0;
+                push_text(dd_x + 4, dd_y + 2, bgp_beat_names[mode],
+                          t->accent[0], t->accent[1], t->accent[2], vp_w, vp_h, cw, ch);
+                push_text(dd_x + dd_w - cw - 2, dd_y + 2, "\x1F",
+                          t->text[0] * 0.5f, t->text[1] * 0.5f, t->text[2] * 0.5f, vp_w, vp_h, cw, ch);
+            }
+            ALIEN_NEXT;
+        }
+    }
+
+    /* --- Defaults section header --- */
+    if (ALIEN_VIS) {
+        push_solid((int)(x0 + 20), (int)(cy + row_h * 0.3f),
+                   (int)(x0 + pw - sb_w - 20), (int)(cy + row_h * 0.35f),
+                   t->accent[0], t->accent[1], t->accent[2], 0.3f, vp_w, vp_h);
+        push_text((int)(x0 + 20), (int)(cy + 2), "Defaults",
+                  t->accent[0], t->accent[1], t->accent[2], vp_w, vp_h, cw, ch);
+    }
+    ALIEN_NEXT;
+
+    /* --- Reset button --- */
+    if (ALIEN_VIS) {
+        const char *btn = "[ Reset to Defaults ]";
+        int blen = (int)strlen(btn);
+        int bw = blen * cw + 16;
+        int bx = (int)(x0 + (pw - sb_w - bw) * 0.5f);
+        int by = (int)cy;
+        int bh = ch + 6;
+        push_solid(bx, by, bx + bw, by + bh,
+                   t->bg[0] + 0.08f, t->bg[1] + 0.08f, t->bg[2] + 0.08f, 0.9f, vp_w, vp_h);
+        push_solid(bx, by, bx + bw, by + 1, 1.0f, 1.0f, 1.0f, 0.15f, vp_w, vp_h);
+        push_solid(bx, by + bh - 1, bx + bw, by + bh, 0.0f, 0.0f, 0.0f, 0.25f, vp_w, vp_h);
+        push_solid(bx, by, bx + 1, by + bh,
+                   t->accent[0], t->accent[1], t->accent[2], 0.5f, vp_w, vp_h);
+        push_solid(bx + bw - 1, by, bx + bw, by + bh,
+                   t->accent[0], t->accent[1], t->accent[2], 0.5f, vp_w, vp_h);
+        push_text(bx + 8, by + 3, btn,
+                  t->text[0], t->text[1], t->text[2], vp_w, vp_h, cw, ch);
+    }
+    ALIEN_NEXT;
+
+    #undef ALIEN_VIS
+    #undef ALIEN_NEXT
+
+    /* Scrollbar */
+    {
+        float sb_x0 = x0 + pw - sb_w - 2;
+        push_solid((int)sb_x0, (int)content_top, (int)(sb_x0 + sb_w), (int)content_bot,
+                   0.0f, 0.0f, 0.0f, 0.15f, vp_w, vp_h);
+        if (max_scroll > 0) {
+            float track_h = content_bot - content_top;
+            float thumb_frac = (float)max_visible / (float)ALIEN_TOTAL_ROWS;
+            float thumb_h = track_h * thumb_frac;
+            if (thumb_h < 16.0f) thumb_h = 16.0f;
+            float thumb_pos = ((float)bgp_scroll / (float)max_scroll) * (track_h - thumb_h);
+            float ty0 = content_top + thumb_pos;
+            float ty1 = ty0 + thumb_h;
+            push_solid((int)(sb_x0 + 1), (int)ty0, (int)(sb_x0 + sb_w - 1), (int)ty1,
+                       t->accent[0], t->accent[1], t->accent[2], 0.4f, vp_w, vp_h);
+            push_solid((int)(sb_x0 + 1), (int)ty0, (int)(sb_x0 + sb_w - 1), (int)(ty0 + 1),
+                       1.0f, 1.0f, 1.0f, 0.1f, vp_w, vp_h);
+        }
+    }
+}
+
+/* Alien Wall hit tests */
+#define ALIEN_SLIDER_BASE_ROW      0
+#define ALIEN_BEAT_DD_BASE_ROW     (ALIEN_SLIDER_COUNT + 1)
+#define ALIEN_DEFAULTS_BTN_ROW     (ALIEN_SLIDER_COUNT + 6)
+
+static int alien_hit_slider(int mx, int my, float *out_pct) {
+    if (bgp_tab != BGP_TAB_ALIENWALL) return -1;
+    int cw = (int)(VKM_CHAR_W * ui_scale), ch = (int)(VKM_CHAR_H * ui_scale);
+    int titlebar_h = ch + 10;
+    int tab_bar_h = ch + 10;
+    float row_h = ch + 14;
+    float sb_w = 10.0f;
+    float slider_w = bgp_w - 40 - sb_w;
+    float sx0 = bgp_x + 20 + (float)(12 * cw);
+    float sx1 = bgp_x + 20 + slider_w - (float)(7 * cw) + 8;
+    float content_top = bgp_y + titlebar_h + tab_bar_h + 4;
+    for (int i = 0; i < ALIEN_SLIDER_COUNT; i++) {
+        int vr = ALIEN_SLIDER_BASE_ROW + i - bgp_scroll;
+        if (vr < 0) continue;
+        float sy = content_top + 4 + vr * row_h;
+        if (my >= (int)sy && my < (int)(sy + row_h) &&
+            mx >= (int)(sx0 - 4) && mx <= (int)(sx1 + 4)) {
+            float pct = ((float)mx - sx0) / (sx1 - sx0);
+            if (pct < 0) pct = 0; if (pct > 1) pct = 1;
+            *out_pct = pct;
+            return i;
+        }
+    }
+    return -1;
+}
+
+static int alien_hit_dropdown(int mx, int my) {
+    if (bgp_tab != BGP_TAB_ALIENWALL) return -1;
+    int cw = (int)(VKM_CHAR_W * ui_scale), ch = (int)(VKM_CHAR_H * ui_scale);
+    int titlebar_h = ch + 10;
+    int tab_bar_h = ch + 10;
+    float row_h = ch + 14;
+    float sb_w = 10.0f;
+    float slider_w = bgp_w - 40 - sb_w;
+    float content_top = bgp_y + titlebar_h + tab_bar_h + 4;
+    int dd_x = (int)(bgp_x + 20 + 11 * cw);
+    int dd_w = (int)(slider_w - 11 * cw - 2);
+    if (mx < dd_x || mx >= dd_x + dd_w) return -1;
+    for (int b = 0; b < 4; b++) {
+        int vr = ALIEN_BEAT_DD_BASE_ROW + b - bgp_scroll;
+        if (vr < 0) continue;
+        float ry = content_top + 4 + vr * row_h;
+        if (my >= (int)ry && my < (int)(ry + row_h)) return b;
+    }
+    return -1;
+}
+
+static int alien_hit_defaults_button(int mx, int my) {
+    if (bgp_tab != BGP_TAB_ALIENWALL) return 0;
+    int cw = (int)(VKM_CHAR_W * ui_scale), ch = (int)(VKM_CHAR_H * ui_scale);
+    int titlebar_h = ch + 10;
+    int tab_bar_h = ch + 10;
+    float row_h = ch + 14;
+    float sb_w = 10.0f;
+    float content_top = bgp_y + titlebar_h + tab_bar_h + 4;
+    int vr = ALIEN_DEFAULTS_BTN_ROW - bgp_scroll;
+    if (vr < 0) return 0;
+    float ry = content_top + 4 + vr * row_h;
+    const char *btn = "[ Reset to Defaults ]";
+    int blen = (int)strlen(btn);
+    int bw = blen * cw + 16;
+    int bx = (int)(bgp_x + (bgp_w - sb_w - bw) * 0.5f);
+    int bh = ch + 6;
+    return (mx >= bx && mx < bx + bw && my >= (int)ry && my < (int)ry + bh);
+}
+
+static void alien_reset_defaults(void) {
+    bg_alien_speed = 0.8f; bg_alien_cell_scale = 3.0f;
+    bg_alien_warp = 1.5f; bg_alien_hue = 120.0f;
+    bg_alien_saturation = 0.85f; bg_alien_brightness = 0.7f;
+    bg_alien_alpha = 0.35f; bg_alien_vein = 1.0f;
+    bg_alien_pulse_speed = 1.0f; bg_alien_glow = 0.8f;
+    bg_alien_depth_layers = 2.0f; bg_alien_roughness = 0.2f;
+    bg_alien_membrane = 0.4f; bg_alien_wet = 1.0f;
+    bg_alien_fluid_speed = 0.8f; bg_alien_specular = 0.5f;
+    bg_alien_beat_bass = BGP_BEAT_BRIGHT;
+    bg_alien_beat_mid = BGP_BEAT_HUE;
+    bg_alien_beat_treble = BGP_BEAT_ZOOM;
+    bg_alien_beat_rms = BGP_BEAT_NONE;
+}
+
 static int bgp_hit_slider(int mx, int my, float *out_pct) {
     if (bgp_tab != BGP_TAB_PLASMA) return -1;
     int cw = (int)(VKM_CHAR_W * ui_scale), ch = (int)(VKM_CHAR_H * ui_scale);
@@ -15859,13 +16264,40 @@ static int bgp_mouse_down(int mx, int my) {
         }
         return 1;
     }
-    /* Reset-to-Defaults button (plasma or starfield, tab-aware) */
+    /* Reset-to-Defaults button (any tab) */
     if (bgp_hit_defaults_button(mx, my)) {
         bgp_reset_current_tab_defaults();
         return 1;
     }
     if (star_hit_defaults_button(mx, my)) {
         star_reset_defaults();
+        return 1;
+    }
+    if (alien_hit_defaults_button(mx, my)) {
+        alien_reset_defaults();
+        return 1;
+    }
+    /* Alien Wall tab: its own slider + dropdown hit paths */
+    if (bgp_tab == BGP_TAB_ALIENWALL) {
+        float apct;
+        int as = alien_hit_slider(mx, my, &apct);
+        if (as >= 0) {
+            bgp_active_slider = 200 + as;
+            float val = bg_alien_slider_min[as] + apct *
+                        (bg_alien_slider_max[as] - bg_alien_slider_min[as]);
+            *bg_alien_slider_ptr[as] = val;
+            return 1;
+        }
+        int add = alien_hit_dropdown(mx, my);
+        if (add >= 0) {
+            int *val = NULL;
+            if (add == 0) val = &bg_alien_beat_bass;
+            else if (add == 1) val = &bg_alien_beat_mid;
+            else if (add == 2) val = &bg_alien_beat_treble;
+            else if (add == 3) val = &bg_alien_beat_rms;
+            if (val) *val = (*val + 1) % BGP_BEAT_COUNT;
+            return 1;
+        }
         return 1;
     }
     /* Starfield tab: its own slider + dropdown hit paths */
@@ -15953,7 +16385,12 @@ static void bgp_mouse_move(int mx, int my) {
         float sx1 = bgp_x + 20 + slider_w - (float)(7 * cw) + 8;
         float pct = ((float)mx - sx0) / (sx1 - sx0);
         if (pct < 0) pct = 0; if (pct > 1) pct = 1;
-        if (bgp_active_slider >= 100 && bgp_active_slider < 100 + STAR_SLIDER_COUNT) {
+        if (bgp_active_slider >= 200 && bgp_active_slider < 200 + ALIEN_SLIDER_COUNT) {
+            int ai = bgp_active_slider - 200;
+            float val = bg_alien_slider_min[ai] + pct *
+                        (bg_alien_slider_max[ai] - bg_alien_slider_min[ai]);
+            *bg_alien_slider_ptr[ai] = val;
+        } else if (bgp_active_slider >= 100 && bgp_active_slider < 100 + STAR_SLIDER_COUNT) {
             int si = bgp_active_slider - 100;
             float val = bg_star_slider_min[si] + pct *
                         (bg_star_slider_max[si] - bg_star_slider_min[si]);
@@ -16519,6 +16956,24 @@ __declspec(dllexport) void vkt_bg_plasma_set_all(float speed, float turbulence, 
     bg_plasma_alpha = alpha;
 }
 
+/* Alien Wall setters */
+__declspec(dllexport) void vkt_bg_alien_set_speed(float v)      { bg_alien_speed = v; }
+__declspec(dllexport) void vkt_bg_alien_set_cell_scale(float v) { bg_alien_cell_scale = v; }
+__declspec(dllexport) void vkt_bg_alien_set_warp(float v)       { bg_alien_warp = v; }
+__declspec(dllexport) void vkt_bg_alien_set_hue(float v)        { bg_alien_hue = v; }
+__declspec(dllexport) void vkt_bg_alien_set_saturation(float v) { bg_alien_saturation = v; }
+__declspec(dllexport) void vkt_bg_alien_set_brightness(float v) { bg_alien_brightness = v; }
+__declspec(dllexport) void vkt_bg_alien_set_alpha(float v)      { bg_alien_alpha = v; }
+__declspec(dllexport) void vkt_bg_alien_set_vein(float v)       { bg_alien_vein = v; }
+__declspec(dllexport) void vkt_bg_alien_set_pulse(float v)      { bg_alien_pulse_speed = v; }
+__declspec(dllexport) void vkt_bg_alien_set_glow(float v)       { bg_alien_glow = v; }
+__declspec(dllexport) void vkt_bg_alien_set_depth(float v)      { bg_alien_depth_layers = v; }
+__declspec(dllexport) void vkt_bg_alien_set_roughness(float v)  { bg_alien_roughness = v; }
+__declspec(dllexport) void vkt_bg_alien_set_membrane(float v)   { bg_alien_membrane = v; }
+__declspec(dllexport) void vkt_bg_alien_set_wet(float v)        { bg_alien_wet = v; }
+__declspec(dllexport) void vkt_bg_alien_set_fluid(float v)      { bg_alien_fluid_speed = v; }
+__declspec(dllexport) void vkt_bg_alien_set_specular(float v)   { bg_alien_specular = v; }
+
 __declspec(dllexport) void vkt_bg_show_settings(void) { bgp_visible = 1; }
 __declspec(dllexport) void vkt_bg_hide_settings(void) { bgp_visible = 0; }
 
@@ -16586,6 +17041,12 @@ __declspec(dllexport) void vkt_vk_plugins_list(void)
     vkw_print(vkw_console_idx, bg_mode == BG_PLASMA
         ? " \x1b[1;32m*\x1b[0m Fractal Plasma  [\x1b[1;32mACTIVE\x1b[0m]"
         : " \x1b[1;32m*\x1b[0m Fractal Plasma");
+    vkw_print(vkw_console_idx, bg_mode == BG_STARFIELD
+        ? " \x1b[1;32m*\x1b[0m Parallax Starfield  [\x1b[1;32mACTIVE\x1b[0m]"
+        : " \x1b[1;32m*\x1b[0m Parallax Starfield");
+    vkw_print(vkw_console_idx, bg_mode == BG_ALIENWALL
+        ? " \x1b[1;32m*\x1b[0m Alien Wall  [\x1b[1;32mACTIVE\x1b[0m]"
+        : " \x1b[1;32m*\x1b[0m Alien Wall");
     vkw_print(vkw_console_idx, "\x1b[1;37m---- Experimental ----\x1b[0m");
     vkw_print(vkw_console_idx, vk_experimental
         ? " \x1b[1;33m!\x1b[0m Wobbly Widgets  [\x1b[1;33mEXPERIMENTAL\x1b[0m]"
@@ -16673,7 +17134,7 @@ static slop_command_t vkt_commands[] = {
     { "vk_plugins.show_experimental", "vkt_vk_plugins_show_experimental", "i", "v", "Enable/disable experimental plugins (1=True, 0=False)" },
     { "vk_plugins.list", "vkt_vk_plugins_list", "", "v", "List all VK plugins and their status" },
     /* Backgrounds */
-    { "bg.set_mode",          "vkt_bg_set_mode",          "i",       "v", "Set background mode (0=off, 1=plasma)" },
+    { "bg.set_mode",          "vkt_bg_set_mode",          "i",       "v", "Set background mode (0=off, 1=plasma, 2=starfield, 3=alienwall)" },
     { "bg.get_mode",          "vkt_bg_get_mode",          "",        "i", "Get current background mode" },
     { "bg.plasma.speed",      "vkt_bg_plasma_set_speed",  "f",       "v", "Set plasma speed (0.1-5.0)" },
     { "bg.plasma.turbulence", "vkt_bg_plasma_set_turbulence","f",    "v", "Set plasma turbulence (0.0-2.0)" },
@@ -16719,6 +17180,23 @@ static slop_command_t vkt_commands[] = {
     { "bg.plasma.get_saturation", "vkt_bg_plasma_get_saturation",  "",  "f", "Get plasma saturation" },
     { "bg.plasma.get_brightness", "vkt_bg_plasma_get_brightness",  "",  "f", "Get plasma brightness" },
     { "bg.plasma.get_alpha",      "vkt_bg_plasma_get_alpha",       "",  "f", "Get plasma opacity" },
+    /* Alien Wall */
+    { "bg.alien.speed",       "vkt_bg_alien_set_speed",       "f", "v", "Set alien wall speed (0.1-5.0)" },
+    { "bg.alien.cell_scale",  "vkt_bg_alien_set_cell_scale",  "f", "v", "Set cell scale (1-8)" },
+    { "bg.alien.warp",        "vkt_bg_alien_set_warp",        "f", "v", "Set warp strength (0-4)" },
+    { "bg.alien.hue",         "vkt_bg_alien_set_hue",         "f", "v", "Set hue shift (0-360)" },
+    { "bg.alien.saturation",  "vkt_bg_alien_set_saturation",  "f", "v", "Set saturation (0-2)" },
+    { "bg.alien.brightness",  "vkt_bg_alien_set_brightness",  "f", "v", "Set brightness (0-2)" },
+    { "bg.alien.alpha",       "vkt_bg_alien_set_alpha",       "f", "v", "Set opacity (0-1)" },
+    { "bg.alien.vein",        "vkt_bg_alien_set_vein",        "f", "v", "Set vein strength (0-2)" },
+    { "bg.alien.pulse",       "vkt_bg_alien_set_pulse",       "f", "v", "Set pulse speed (0-4)" },
+    { "bg.alien.glow",        "vkt_bg_alien_set_glow",        "f", "v", "Set glow intensity (0-2)" },
+    { "bg.alien.depth",       "vkt_bg_alien_set_depth",       "f", "v", "Set depth layers (1-4)" },
+    { "bg.alien.roughness",   "vkt_bg_alien_set_roughness",   "f", "v", "Set roughness (0-1, 0=wet)" },
+    { "bg.alien.membrane",    "vkt_bg_alien_set_membrane",    "f", "v", "Set membrane mix (0-1)" },
+    { "bg.alien.wet",         "vkt_bg_alien_set_wet",         "f", "v", "Set wet/glossy intensity (0-2)" },
+    { "bg.alien.fluid",       "vkt_bg_alien_set_fluid",       "f", "v", "Set fluid flow speed (0-2)" },
+    { "bg.alien.specular",    "vkt_bg_alien_set_specular",    "f", "v", "Set specular tightness (0-1)" },
     { "bg.show_settings",     "vkt_bg_show_settings",     "",        "v", "Show background settings panel" },
     { "bg.hide_settings",     "vkt_bg_hide_settings",     "",        "v", "Hide background settings panel" },
     { "bg.help",              "vkt_bg_help",              "",        "v", "Show background commands help" },
@@ -17056,6 +17534,27 @@ static void vkt_save_settings(void)
     SAVE_INT("star_beat_mid", bg_star_beat_mid);
     SAVE_INT("star_beat_treb", bg_star_beat_treble);
     SAVE_INT("star_beat_rms", bg_star_beat_rms);
+    /* Alien Wall */
+    SAVE_FLOAT("alien_speed", bg_alien_speed);
+    SAVE_FLOAT("alien_cell_scale", bg_alien_cell_scale);
+    SAVE_FLOAT("alien_warp", bg_alien_warp);
+    SAVE_FLOAT("alien_hue", bg_alien_hue);
+    SAVE_FLOAT("alien_sat", bg_alien_saturation);
+    SAVE_FLOAT("alien_bright", bg_alien_brightness);
+    SAVE_FLOAT("alien_alpha", bg_alien_alpha);
+    SAVE_FLOAT("alien_vein", bg_alien_vein);
+    SAVE_FLOAT("alien_pulse", bg_alien_pulse_speed);
+    SAVE_FLOAT("alien_glow", bg_alien_glow);
+    SAVE_FLOAT("alien_depth", bg_alien_depth_layers);
+    SAVE_FLOAT("alien_rough", bg_alien_roughness);
+    SAVE_FLOAT("alien_membrane", bg_alien_membrane);
+    SAVE_FLOAT("alien_wet", bg_alien_wet);
+    SAVE_FLOAT("alien_fluid", bg_alien_fluid_speed);
+    SAVE_FLOAT("alien_specular", bg_alien_specular);
+    SAVE_INT("alien_beat_bass", bg_alien_beat_bass);
+    SAVE_INT("alien_beat_mid", bg_alien_beat_mid);
+    SAVE_INT("alien_beat_treb", bg_alien_beat_treble);
+    SAVE_INT("alien_beat_rms", bg_alien_beat_rms);
     /* Display / HDR */
     SAVE_INT("hdr_enabled", hdr_enabled);
     SAVE_INT("vk_vsync", vk_vsync);
@@ -17206,6 +17705,27 @@ static void vkt_load_settings(void)
     LOAD_INT("star_beat_mid", bg_star_beat_mid, BGP_BEAT_TWINKLE);
     LOAD_INT("star_beat_treb", bg_star_beat_treble, BGP_BEAT_JITTER);
     LOAD_INT("star_beat_rms", bg_star_beat_rms, BGP_BEAT_BRIGHT);
+    /* Alien Wall */
+    LOAD_FLOAT("alien_speed", bg_alien_speed, 0.8);
+    LOAD_FLOAT("alien_cell_scale", bg_alien_cell_scale, 3.0);
+    LOAD_FLOAT("alien_warp", bg_alien_warp, 1.5);
+    LOAD_FLOAT("alien_hue", bg_alien_hue, 120.0);
+    LOAD_FLOAT("alien_sat", bg_alien_saturation, 0.85);
+    LOAD_FLOAT("alien_bright", bg_alien_brightness, 0.7);
+    LOAD_FLOAT("alien_alpha", bg_alien_alpha, 0.35);
+    LOAD_FLOAT("alien_vein", bg_alien_vein, 1.0);
+    LOAD_FLOAT("alien_pulse", bg_alien_pulse_speed, 1.0);
+    LOAD_FLOAT("alien_glow", bg_alien_glow, 0.8);
+    LOAD_FLOAT("alien_depth", bg_alien_depth_layers, 2.0);
+    LOAD_FLOAT("alien_rough", bg_alien_roughness, 0.2);
+    LOAD_FLOAT("alien_membrane", bg_alien_membrane, 0.4);
+    LOAD_FLOAT("alien_wet", bg_alien_wet, 1.0);
+    LOAD_FLOAT("alien_fluid", bg_alien_fluid_speed, 0.8);
+    LOAD_FLOAT("alien_specular", bg_alien_specular, 0.5);
+    LOAD_INT("alien_beat_bass", bg_alien_beat_bass, BGP_BEAT_BRIGHT);
+    LOAD_INT("alien_beat_mid", bg_alien_beat_mid, BGP_BEAT_HUE);
+    LOAD_INT("alien_beat_treb", bg_alien_beat_treble, BGP_BEAT_ZOOM);
+    LOAD_INT("alien_beat_rms", bg_alien_beat_rms, BGP_BEAT_NONE);
     /* Display / HDR */
     LOAD_INT("hdr_enabled", hdr_enabled, 0);
     LOAD_INT("vk_vsync", vk_vsync, 1);

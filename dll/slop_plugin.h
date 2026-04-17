@@ -89,8 +89,36 @@ typedef struct slop_api {
      * Menu items are at menu_base_id+0, menu_base_id+1, etc. (up to +9) */
     int             menu_base_id;
 
+    /* Strip ANSI escape sequences (CSI and non-CSI) from a NUL-terminated
+     * string in place. Plugins that want to pattern-match against clean
+     * text can call this directly instead of re-implementing it. (Added
+     * in place of _reserved[0] — still ABI-compatible with v1 since
+     * _reserved slots were always unused by plugin code.) */
+    void          (*strip_ansi)(char *line);
+
+    /* Import a .mp path file into MegaMUD's path database.
+     * Copies file to Default\, parses it, adds to DB, refreshes menu.
+     * Preserves active pathing state (step, loop position, etc).
+     * Returns 0 on success, negative on error. */
+    int           (*import_path)(const char *mp_filepath);
+
+    /* Code a room into MegaMUD's Rooms.md and reload the database.
+     * cksum: 8-hex-char room checksum (e.g. 0xD4E00091)
+     * code: 4-char room code (e.g. "STON")
+     * area: area name (e.g. "Silvermere")
+     * room_name: full room name (e.g. "Town Square")
+     * Returns 0 on success, 1 if already known, negative on error.
+     * Preserves active pathing state across the reload. */
+    int           (*code_room)(unsigned int cksum, const char *code,
+                               const char *area, const char *room_name);
+
+    /* Check if a room checksum is known in MegaMUD's Rooms.md.
+     * If known, copies the 4-char code into out_code (up to out_sz).
+     * Returns 1 if found, 0 if not. */
+    int           (*room_is_known)(unsigned int cksum, char *out_code, int out_sz);
+
     /* Reserved for future expansion */
-    void          *_reserved[5];
+    void          *_reserved[1];
 } slop_api_t;
 
 
@@ -125,8 +153,16 @@ typedef struct slop_plugin {
      * byte-by-byte processing. */
     void          (*on_data)(const char *data, int len);
 
+    /* Optional: like on_line but the line has been run through strip_ansi
+     * first, so it's plain text. Prefer this over on_line for any parser
+     * that does substring/prefix matching — avoids having to re-implement
+     * the ANSI stripper in every plugin. (Added in place of _reserved[0] —
+     * ABI-compatible with v1; old plugins simply never set it so it's NULL
+     * and the dispatcher skips it.) */
+    void          (*on_clean_line)(const char *line);
+
     /* Reserved for future expansion */
-    void          *_reserved[3];
+    void          *_reserved[2];
 } slop_plugin_t;
 
 

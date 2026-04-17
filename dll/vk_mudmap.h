@@ -111,6 +111,11 @@ static float    mdw_zoom = 4.0f;          /* 1.0 = default CELL px */
 static uint32_t mdw_cur_ri = 0xFFFFFFFF;
 static DWORD    mdw_pulse_tick = 0;       /* GetTickCount() of most recent change */
 
+/* Cached room code from MegaMUD's Rooms.md (updated on room change) */
+static char     mdw_cur_room_code[8] = "";
+static int      mdw_cur_room_known = 0;   /* 1 = known in MegaMUD */
+static uint32_t mdw_cur_room_code_ri = 0xFFFFFFFF; /* which ri we last checked */
+
 /* Hover state — updated inside mdw_draw from vkm_mouse_x/y (always live,
  * not just during drag). The tooltip draws for mdw_hover_ri if valid. */
 static uint32_t mdw_hover_ri = 0xFFFFFFFF;
@@ -146,13 +151,132 @@ static uint32_t     mdw_rec_cap     = 0;
 static uint32_t     mdw_rec_start_ri = 0xFFFFFFFF;
 static int          mdw_rec_gen_mpx = 1;   /* checkbox — sidecar by default */
 static int          mdw_show_path_panel = 1;
+static int          mdw_path_focus = 0;
 
 /* Button hit rects (filled during draw, read during click). */
 static float mdw_btn_rec_x0 = 0, mdw_btn_rec_x1 = 0;
 static float mdw_btn_save_x0 = 0, mdw_btn_save_x1 = 0;
 static float mdw_btn_clear_x0 = 0, mdw_btn_clear_x1 = 0;
+static float mdw_btn_undo_x0 = 0, mdw_btn_undo_x1 = 0;
+static float mdw_btn_code_x0 = 0, mdw_btn_code_x1 = 0;
+
+/* ---- Code Room dialog state ---- */
+static int  mdw_code_showing = 0;
+static char mdw_code_input[5] = "";       /* 4-char code being typed */
+static char mdw_code_room_name[80] = "";  /* room name from mmud.bin */
+static char mdw_code_area[48] = "";       /* area from mmud.bin lookup */
+static uint32_t mdw_code_cksum = 0;       /* checksum of room being coded */
+static char mdw_code_status[80] = "";     /* status feedback */
+static DWORD mdw_code_status_tick = 0;
+static float mdw_cd_btn_ok_x0 = 0, mdw_cd_btn_ok_x1 = 0;
+static float mdw_cd_btn_cancel_x0 = 0, mdw_cd_btn_cancel_x1 = 0;
 static float mdw_btn_mpx_x0 = 0, mdw_btn_mpx_x1 = 0;
 static float mdw_btn_panel_x0 = 0, mdw_btn_panel_x1 = 0;
+
+/* Path panel scroll offset (how many steps scrolled up from bottom) */
+static int mdw_path_scroll = 0;
+
+/* Path panel button y range (for click routing) */
+static float mdw_pp_y0 = 0, mdw_pp_y1 = 0;
+static float mdw_pp_x0 = 0, mdw_pp_x1 = 0;
+
+/* ---- Save dialog state ---- */
+static int  mdw_save_showing = 0;
+static char mdw_save_title[128]  = "";
+static char mdw_save_name[128]   = "";
+static char mdw_save_author[64]  = "Custom";
+static char mdw_save_area[64]    = "";
+static int  mdw_save_field = 0;         /* 0=title, 1=filename, 2=author, 3=area */
+static int  mdw_save_is_loop = 0;       /* auto-detected: start==end room */
+static char mdw_save_warn[128]  = "";   /* warning if rooms unknown */
+static char mdw_save_status[128] = "";  /* feedback message after save */
+static DWORD mdw_save_status_tick = 0;
+static int  mdw_import_prompt = 0;     /* 1 = showing import dialog after save */
+static char mdw_import_mp_path[MAX_PATH] = ""; /* full path of saved .mp for import */
+static char mdw_import_title[128] = "";  /* path title for fake_remote("loop <title>") */
+static int  mdw_import_is_loop = 0;      /* 1 = saved path is a loop, show [Loop] btn */
+static float mdw_sd_btn_import_x0 = 0, mdw_sd_btn_import_x1 = 0;
+static float mdw_sd_btn_loop_x0 = 0, mdw_sd_btn_loop_x1 = 0;
+static float mdw_sd_btn_icancel_x0 = 0, mdw_sd_btn_icancel_x1 = 0;
+
+/* Area list (unique areas from _RoomsMD aux table) */
+static char  mdw_area_names[512][48];
+static int   mdw_area_count = 0;
+static int   mdw_area_scroll = 0;
+static int   mdw_area_sel = -1;  /* -1 = custom text, >=0 = index into mdw_area_names */
+
+/* Save dialog hit rects */
+static float mdw_sd_x0 = 0, mdw_sd_y0 = 0, mdw_sd_x1 = 0, mdw_sd_y1 = 0;
+static float mdw_sd_btn_save_x0 = 0, mdw_sd_btn_save_x1 = 0;
+static float mdw_sd_btn_cancel_x0 = 0, mdw_sd_btn_cancel_x1 = 0;
+static float mdw_sd_area_list_y0 = 0, mdw_sd_area_list_y1 = 0;
+static float mdw_sd_title_x0 = 0, mdw_sd_title_x1 = 0;
+static float mdw_sd_name_x0 = 0, mdw_sd_name_x1 = 0;
+static float mdw_sd_author_x0 = 0, mdw_sd_author_x1 = 0;
+static float mdw_sd_area_x0 = 0, mdw_sd_area_x1 = 0;
+
+/* ---- MPX-from-path verification ---- */
+typedef struct {
+    uint32_t cksum;
+    uint16_t flags;
+    char     dir[64];
+} MdwMpParsedStep;
+
+typedef struct {
+    uint16_t map, room;
+} MdwMpxCapture;
+
+static int   mdw_mpx_verify_active = 0;  /* 0=off, 1=capturing runs */
+static int   mdw_mpx_verify_run = 0;     /* current run 0..2 */
+static int   mdw_mpx_verify_step = 0;    /* step within current run */
+static MdwMpParsedStep *mdw_mpx_parsed = NULL;
+static int   mdw_mpx_parsed_n = 0;
+static MdwMpxCapture *mdw_mpx_caps[3] = {NULL, NULL, NULL};
+static char  mdw_mpx_mp_path[MAX_PATH] = "";
+static char  mdw_mpx_start_cksum[12] = "";
+static char  mdw_mpx_end_cksum[12]   = "";
+static char  mdw_mpx_header_lines[4][256];  /* first 3-4 lines of .mp for re-emit */
+static int   mdw_mpx_header_count = 0;
+static char  mdw_mpx_status[128] = "";
+static DWORD mdw_mpx_status_tick = 0;
+
+/* MegaMUD base directory (auto-detected from working dir) */
+static char mdw_megamud_dir[MAX_PATH] = "";
+
+/* Forward declarations for functions defined later in the file */
+static uint32_t mdw_room_lookup(uint16_t map, uint16_t room);
+
+/* ---- Auto-MPX: passive background .mpx generation ----
+ * Scans Default/ for .mp files without .mpx sidecar, watches room
+ * transitions, and after 3 identical runs writes the .mpx automatically.
+ * Works regardless of what causes movement — MegaMUD paths, loops, gotos,
+ * or mmudpy injected commands. Active when mdw_rec_gen_mpx == 1. */
+
+#define MDW_AUTO_MPX_MAX 256
+#define MDW_AUTO_MPX_RUNS 3
+
+typedef struct {
+    char     filename[64];
+    uint32_t *step_cksums;    /* checksum per step (room you're IN) */
+    uint16_t *step_flags;
+    char     (*step_dirs)[64];
+    int      step_count;
+    char     start_cksum[12];
+    char     end_cksum[12];
+    char     header_lines[4][256];
+    int      header_count;
+    char     mp_fullpath[MAX_PATH];
+
+    /* Per-run capture */
+    int      active;          /* currently tracking this path */
+    int      run;             /* current run 0..2 */
+    int      step;            /* current step within run */
+    MdwMpxCapture *caps[MDW_AUTO_MPX_RUNS];
+} MdwAutoMpx;
+
+static MdwAutoMpx  mdw_auto_mpx[MDW_AUTO_MPX_MAX];
+static int          mdw_auto_mpx_count = 0;
+static int          mdw_auto_mpx_scanned = 0;
 
 /* Cached shop Number → ShopType lookup. MME enum: 0=General, 1=Weapons,
  * 2=Armour, 3=Items, 4=Spells, 5=Hospital, 6=Tavern, 7=Bank, 8=Training,
@@ -336,6 +460,964 @@ static void mdw_rec_clear(void)
 {
     mdw_rec_n = 0;
     mdw_rec_start_ri = 0xFFFFFFFF;
+    mdw_path_scroll = 0;
+}
+
+static void mdw_log(const char *fmt, ...);
+
+static void mdw_rec_undo(void)
+{
+    if (mdw_rec_n == 0) return;
+    mdw_rec_n--;
+    /* Move map view back to the room of the last remaining step
+     * (or the start room if we undid everything) */
+    if (mdw_rec_n > 0) {
+        MdwRecStep *prev = &mdw_rec_path[mdw_rec_n - 1];
+        uint32_t ri = mdw_room_lookup(prev->map, prev->room);
+        if (ri < mdw_room_count) {
+            mdw_cur_ri = ri;
+            mdw_pulse_tick = GetTickCount();
+            if (mdw_auto_recenter && mdw_rooms[ri].gx != INT16_MIN) {
+                mdw_view_x = mdw_rooms[ri].gx * 20.0f;
+                mdw_view_y = mdw_rooms[ri].gy * 20.0f;
+            }
+        }
+    } else if (mdw_rec_start_ri != 0xFFFFFFFF && mdw_rec_start_ri < mdw_room_count) {
+        mdw_cur_ri = mdw_rec_start_ri;
+        mdw_pulse_tick = GetTickCount();
+        if (mdw_auto_recenter && mdw_rooms[mdw_rec_start_ri].gx != INT16_MIN) {
+            mdw_view_x = mdw_rooms[mdw_rec_start_ri].gx * 20.0f;
+            mdw_view_y = mdw_rooms[mdw_rec_start_ri].gy * 20.0f;
+        }
+        mdw_rec_start_ri = 0xFFFFFFFF;
+    }
+    mdw_log("[PATH] Undo step -> %u steps remain\n", mdw_rec_n);
+}
+
+/* ---- Logging (MPX operations) ---- */
+
+static void mdw_log(const char *fmt, ...)
+{
+    char buf[1024];
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    if (n < 0) return;
+    if (n >= (int)sizeof(buf)) n = (int)sizeof(buf) - 1;
+    OutputDebugStringA(buf);
+    FILE *f = fopen("mudplugin.log", "a");
+    if (f) { fwrite(buf, 1, n, f); fflush(f); fclose(f); }
+}
+
+/* ---- MegaMUD directory detection ---- */
+
+static void mdw_find_megamud_dir(void)
+{
+    if (mdw_megamud_dir[0]) return;
+    char cwd[MAX_PATH];
+    GetCurrentDirectoryA(MAX_PATH, cwd);
+    lstrcpynA(mdw_megamud_dir, cwd, MAX_PATH);
+    int len = (int)lstrlenA(mdw_megamud_dir);
+    if (len > 0 && mdw_megamud_dir[len-1] != '\\')
+        lstrcatA(mdw_megamud_dir, "\\");
+}
+
+/* ---- _RoomsMD aux table lookup ---- */
+
+static MdwAuxTable *mdw_roomsmd_table(void)
+{
+    static MdwAuxTable *cached = NULL;
+    if (cached) return cached;
+    for (uint32_t i = 0; i < mdw_aux_count; i++) {
+        if (strcmp(mdw_aux[i].name, "_RoomsMD") == 0) {
+            cached = &mdw_aux[i];
+            return cached;
+        }
+    }
+    return NULL;
+}
+
+static int mdw_roomsmd_lookup(uint32_t cksum,
+                              char *code, int code_sz,
+                              char *area, int area_sz,
+                              char *name, int name_sz)
+{
+    MdwAuxTable *t = mdw_roomsmd_table();
+    if (!t) return 0;
+    char hex[12];
+    wsprintfA(hex, "%08X", cksum);
+    int c_cksum = -1, c_code = -1, c_area = -1, c_name = -1;
+    for (int c = 0; c < t->col_count; c++) {
+        if (strcmp(t->col_names[c], "cksum") == 0) c_cksum = c;
+        if (strcmp(t->col_names[c], "code")  == 0) c_code  = c;
+        if (strcmp(t->col_names[c], "area")  == 0) c_area  = c;
+        if (strcmp(t->col_names[c], "name")  == 0) c_name  = c;
+    }
+    if (c_cksum < 0) return 0;
+    for (uint32_t r = 0; r < t->row_count; r++) {
+        MdwAuxCell *cc = &t->cells[r * t->col_count + c_cksum];
+        if (cc->len != 8) continue;
+        if (_strnicmp(cc->data, hex, 8) != 0) continue;
+        if (c_code >= 0 && code)
+            mdw_aux_cell_str(t, r, c_code, code, code_sz);
+        if (c_area >= 0 && area)
+            mdw_aux_cell_str(t, r, c_area, area, area_sz);
+        if (c_name >= 0 && name)
+            mdw_aux_cell_str(t, r, c_name, name, name_sz);
+        return 1;
+    }
+    return 0;
+}
+
+/* ---- Area list builder (unique areas from _RoomsMD) ---- */
+
+static void mdw_build_area_list(void)
+{
+    mdw_area_count = 0;
+    MdwAuxTable *t = mdw_roomsmd_table();
+    if (!t) return;
+    int c_area = -1;
+    for (int c = 0; c < t->col_count; c++)
+        if (strcmp(t->col_names[c], "area") == 0) { c_area = c; break; }
+    if (c_area < 0) return;
+    for (uint32_t r = 0; r < t->row_count && mdw_area_count < 512; r++) {
+        char buf[48];
+        mdw_aux_cell_str(t, r, c_area, buf, sizeof buf);
+        if (!buf[0]) continue;
+        int dup = 0;
+        for (int i = 0; i < mdw_area_count; i++) {
+            if (lstrcmpiA(mdw_area_names[i], buf) == 0) { dup = 1; break; }
+        }
+        if (!dup) lstrcpynA(mdw_area_names[mdw_area_count++], buf, 48);
+    }
+    /* Sort alphabetically */
+    for (int i = 0; i < mdw_area_count - 1; i++)
+        for (int j = i + 1; j < mdw_area_count; j++)
+            if (lstrcmpiA(mdw_area_names[i], mdw_area_names[j]) > 0) {
+                char tmp[48];
+                lstrcpynA(tmp, mdw_area_names[i], 48);
+                lstrcpynA(mdw_area_names[i], mdw_area_names[j], 48);
+                lstrcpynA(mdw_area_names[j], tmp, 48);
+            }
+}
+
+/* ---- Monster name lookup for MPX lair info ---- */
+
+static void mdw_lair_monsters_str(MdwRoom *room, char *out, int outsz)
+{
+    out[0] = 0;
+    if (!room->lair_raw) return;
+    MdwAuxTable *mt = NULL;
+    int mcol_num = -1, mcol_name = -1;
+    for (uint32_t a = 0; a < mdw_aux_count; a++) {
+        if (strcmp(mdw_aux[a].name, "Monsters") == 0) {
+            mt = &mdw_aux[a];
+            for (int c = 0; c < mt->col_count; c++) {
+                if (strcmp(mt->col_names[c], "Number") == 0) mcol_num  = c;
+                if (strcmp(mt->col_names[c], "Name")   == 0) mcol_name = c;
+            }
+            break;
+        }
+    }
+    if (!mt || mcol_num < 0 || mcol_name < 0) return;
+    int olen = 0;
+    const char *p = strchr(room->lair_raw, ':');
+    if (p) p++;
+    while (p && *p) {
+        while (*p == ' ' || *p == ',') p++;
+        if (*p == '[' || *p == 0) break;
+        int id = 0;
+        const char *q = p;
+        while (*q >= '0' && *q <= '9') { id = id * 10 + (*q - '0'); q++; }
+        if (q == p) break;
+        char nm[64];
+        nm[0] = 0;
+        int row = mdw_aux_row_by_number(mt, (uint32_t)id);
+        if (row >= 0) mdw_aux_cell_str(mt, row, mcol_name, nm, sizeof nm);
+        if (!nm[0]) wsprintfA(nm, "#%d", id);
+        int nl = (int)lstrlenA(nm);
+        if (olen + nl + 2 < outsz) {
+            if (olen > 0) { out[olen++] = ','; }
+            lstrcpynA(out + olen, nm, outsz - olen);
+            olen += nl;
+        }
+        p = q;
+    }
+}
+
+/* ---- NPC/Shop name lookup ---- */
+
+static void mdw_npc_name(uint16_t npc_id, char *out, int outsz)
+{
+    out[0] = 0;
+    if (!npc_id) return;
+    for (uint32_t a = 0; a < mdw_aux_count; a++) {
+        MdwAuxTable *t = &mdw_aux[a];
+        if (strcmp(t->name, "Monsters") != 0) continue;
+        int row = mdw_aux_row_by_number(t, npc_id);
+        if (row < 0) return;
+        for (int c = 0; c < t->col_count; c++)
+            if (strcmp(t->col_names[c], "Name") == 0)
+                { mdw_aux_cell_str(t, row, c, out, outsz); return; }
+    }
+}
+
+static void mdw_shop_name(uint16_t shop_id, char *out, int outsz)
+{
+    out[0] = 0;
+    if (!shop_id) return;
+    for (uint32_t a = 0; a < mdw_aux_count; a++) {
+        MdwAuxTable *t = &mdw_aux[a];
+        if (strcmp(t->name, "Shops") != 0) continue;
+        int row = mdw_aux_row_by_number(t, shop_id);
+        if (row < 0) return;
+        for (int c = 0; c < t->col_count; c++)
+            if (strcmp(t->col_names[c], "Name") == 0)
+                { mdw_aux_cell_str(t, row, c, out, outsz); return; }
+    }
+}
+
+/* ---- Save .mp file ---- */
+
+static int mdw_do_save_mp(const char *dir, const char *filename,
+                          const char *path_name, const char *author,
+                          const char *area_name)
+{
+    if (mdw_rec_n == 0 || mdw_rec_start_ri == 0xFFFFFFFF) return 0;
+
+    MdwRoom *start_room = &mdw_rooms[mdw_rec_start_ri];
+    MdwRecStep *last = &mdw_rec_path[mdw_rec_n - 1];
+    uint32_t end_ri = mdw_cur_ri;
+    MdwRoom *end_room = (end_ri < mdw_room_count) ? &mdw_rooms[end_ri] : NULL;
+
+    char start_code[8] = "FFFF", start_area[64] = "", start_name[80] = "";
+    char end_code[8]   = "FFFF", end_area[64]   = "", end_name[80]   = "";
+
+    mdw_roomsmd_lookup(start_room->checksum, start_code, 8, start_area, 64, start_name, 80);
+    if (end_room)
+        mdw_roomsmd_lookup(end_room->checksum, end_code, 8, end_area, 64, end_name, 80);
+
+    if (!start_name[0]) lstrcpynA(start_name, start_room->name, 80);
+    if (end_room && !end_name[0]) lstrcpynA(end_name, end_room->name, 80);
+    if (!start_area[0] && area_name[0]) lstrcpynA(start_area, area_name, 64);
+    if (!end_area[0] && area_name[0]) lstrcpynA(end_area, area_name, 64);
+
+    int is_loop = (end_room && start_room->checksum == end_room->checksum);
+
+    char fullpath[MAX_PATH];
+    wsprintfA(fullpath, "%s%s", dir, filename);
+
+    FILE *f = fopen(fullpath, "wb");
+    if (!f) {
+        mdw_log("[MPX] ERROR: cannot open %s for writing\n", fullpath);
+        return 0;
+    }
+
+    /* Header line 0: [loop_name][author] */
+    if (is_loop && path_name[0])
+        fprintf(f, "[%s][%s]\r\n", path_name, author);
+    else
+        fprintf(f, "[][%s]\r\n", author);
+
+    /* Header line 1: start room */
+    fprintf(f, "[%s:%s:%s]\r\n", start_code, start_area, start_name);
+
+    /* Header line 2: end room (absent for loops) */
+    if (!is_loop && end_room)
+        fprintf(f, "[%s:%s:%s]\r\n", end_code, end_area, end_name);
+
+    /* Header line 3: checksums + step count */
+    fprintf(f, "%08X:%08X:%u:-1:0:::\r\n",
+            start_room->checksum,
+            end_room ? end_room->checksum : start_room->checksum,
+            mdw_rec_n);
+
+    /* Steps */
+    for (uint32_t i = 0; i < mdw_rec_n; i++) {
+        MdwRecStep *s = &mdw_rec_path[i];
+        char dir_up[64];
+        for (int j = 0; j < 64 && s->dir[j]; j++)
+            dir_up[j] = (char)toupper((unsigned char)s->dir[j]);
+        dir_up[lstrlenA(s->dir)] = 0;
+        fprintf(f, "%08X:%04X:%s\r\n", s->cksum, s->flags, dir_up);
+    }
+    fclose(f);
+    mdw_log("[PATH] Saved .mp: %s (%u steps)\n", fullpath, mdw_rec_n);
+    return 1;
+}
+
+/* ---- Save .mpx sidecar ---- */
+
+static int mdw_do_save_mpx(const char *dir, const char *filename,
+                           const char *path_name, const char *author,
+                           const char *area_name)
+{
+    if (mdw_rec_n == 0 || mdw_rec_start_ri == 0xFFFFFFFF) return 0;
+
+    MdwRoom *start_room = &mdw_rooms[mdw_rec_start_ri];
+    uint32_t end_ri = mdw_cur_ri;
+    MdwRoom *end_room = (end_ri < mdw_room_count) ? &mdw_rooms[end_ri] : NULL;
+
+    char start_code[8] = "FFFF", start_area[64] = "", start_name[80] = "";
+    char end_code[8]   = "FFFF", end_area[64]   = "", end_name[80]   = "";
+    mdw_roomsmd_lookup(start_room->checksum, start_code, 8, start_area, 64, start_name, 80);
+    if (end_room)
+        mdw_roomsmd_lookup(end_room->checksum, end_code, 8, end_area, 64, end_name, 80);
+    if (!start_name[0]) lstrcpynA(start_name, start_room->name, 80);
+    if (end_room && !end_name[0]) lstrcpynA(end_name, end_room->name, 80);
+    if (!start_area[0] && area_name[0]) lstrcpynA(start_area, area_name, 64);
+    if (!end_area[0] && area_name[0]) lstrcpynA(end_area, area_name, 64);
+    int is_loop = (end_room && start_room->checksum == end_room->checksum);
+
+    char fullpath[MAX_PATH];
+    wsprintfA(fullpath, "%s%s", dir, filename);
+
+    FILE *f = fopen(fullpath, "wb");
+    if (!f) {
+        mdw_log("[MPX] ERROR: cannot open %s for writing\n", fullpath);
+        return 0;
+    }
+
+    fprintf(f, "MPX1\r\n");
+    if (is_loop && path_name[0])
+        fprintf(f, "[%s][%s]\r\n", path_name, author);
+    else
+        fprintf(f, "[][%s]\r\n", author);
+    fprintf(f, "[%s:%s:%s]\r\n", start_code, start_area, start_name);
+    if (!is_loop && end_room)
+        fprintf(f, "[%s:%s:%s]\r\n", end_code, end_area, end_name);
+    fprintf(f, "%08X:%08X:%u:-1:0:::\r\n",
+            start_room->checksum,
+            end_room ? end_room->checksum : start_room->checksum,
+            mdw_rec_n);
+    fprintf(f, "---\r\n");
+
+    for (uint32_t i = 0; i < mdw_rec_n; i++) {
+        MdwRecStep *s = &mdw_rec_path[i];
+        char dir_up[64];
+        for (int j = 0; j < 64 && s->dir[j]; j++)
+            dir_up[j] = (char)toupper((unsigned char)s->dir[j]);
+        dir_up[lstrlenA(s->dir)] = 0;
+
+        /* Look up the full room from bin by map/room */
+        uint32_t ri = mdw_room_lookup(s->map, s->room);
+        MdwRoom *rm = (ri < mdw_room_count) ? &mdw_rooms[ri] : NULL;
+
+        fprintf(f, "%08X:%04X:%s", s->cksum, s->flags, dir_up);
+        fprintf(f, "|map=%u|room=%u", (unsigned)s->map, (unsigned)s->room);
+
+        if (rm) {
+            fprintf(f, "|name=%s|illu=%d", rm->name, (int)rm->light);
+            if (rm->lair_count) {
+                fprintf(f, "|lair=%u", (unsigned)rm->lair_count);
+                char mobs[256];
+                mdw_lair_monsters_str(rm, mobs, sizeof mobs);
+                if (mobs[0]) fprintf(f, "|mobs=%s", mobs);
+            }
+            if (rm->npc) {
+                char nm[80]; mdw_npc_name(rm->npc, nm, sizeof nm);
+                fprintf(f, "|npc=%s", nm[0] ? nm : "?");
+            }
+            if (rm->shop) {
+                char nm[80]; mdw_shop_name(rm->shop, nm, sizeof nm);
+                fprintf(f, "|shop=%s", nm[0] ? nm : "?");
+                fprintf(f, "|shoptype=%d", mdw_shop_type_get(rm->shop));
+            }
+            if (rm->spell) fprintf(f, "|spell=%u", (unsigned)rm->spell);
+            if (rm->cmd)   fprintf(f, "|cmd=%u", (unsigned)rm->cmd);
+        }
+        fprintf(f, "\r\n");
+    }
+
+    /* End room info (the room you arrive at after the last step) */
+    if (end_room) {
+        fprintf(f, "---END\r\n");
+        fprintf(f, "map=%u|room=%u|name=%s|illu=%d",
+                (unsigned)end_room->map, (unsigned)end_room->room,
+                end_room->name, (int)end_room->light);
+        if (end_room->lair_count) {
+            fprintf(f, "|lair=%u", (unsigned)end_room->lair_count);
+            char mobs[256];
+            mdw_lair_monsters_str(end_room, mobs, sizeof mobs);
+            if (mobs[0]) fprintf(f, "|mobs=%s", mobs);
+        }
+        if (end_room->npc) {
+            char nm[80]; mdw_npc_name(end_room->npc, nm, sizeof nm);
+            fprintf(f, "|npc=%s", nm[0] ? nm : "?");
+        }
+        if (end_room->shop) {
+            char nm[80]; mdw_shop_name(end_room->shop, nm, sizeof nm);
+            fprintf(f, "|shop=%s", nm[0] ? nm : "?");
+        }
+        fprintf(f, "\r\n");
+    }
+
+    fclose(f);
+    mdw_log("[MPX] Saved .mpx: %s (%u steps, from recording)\n", fullpath, mdw_rec_n);
+    return 1;
+}
+
+/* ---- Open save dialog with auto-detection ---- */
+
+static void mdw_save_dialog_open(void)
+{
+    if (mdw_rec_n == 0 || mdw_rec_start_ri == 0xFFFFFFFF) return;
+    if (mdw_rec_start_ri >= mdw_room_count) return;
+
+    MdwRoom *start_room = &mdw_rooms[mdw_rec_start_ri];
+    MdwRoom *end_room = (mdw_cur_ri < mdw_room_count) ? &mdw_rooms[mdw_cur_ri] : NULL;
+
+    mdw_save_is_loop = (end_room && start_room->checksum == end_room->checksum);
+
+    char start_code[8] = "", end_code[8] = "";
+    char start_area[64] = "";
+    int start_known = mdw_roomsmd_lookup(start_room->checksum, start_code, 8,
+                                          start_area, 64, NULL, 0);
+    int end_known = end_room ?
+        mdw_roomsmd_lookup(end_room->checksum, end_code, 8, NULL, 0, NULL, 0) : 0;
+
+    mdw_save_title[0] = 0;
+    mdw_save_name[0] = 0;
+    mdw_save_warn[0] = 0;
+    mdw_save_area[0] = 0;
+    mdw_area_sel = -1;
+    mdw_save_field = 0;
+
+    if (mdw_save_is_loop && start_known) {
+        lstrcpynA(mdw_save_name, start_code, 5);
+    } else if (start_known && end_known) {
+        wsprintfA(mdw_save_name, "%.4s%.4s", start_code, end_code);
+    }
+
+    if (start_known && start_area[0]) {
+        lstrcpynA(mdw_save_area, start_area, sizeof(mdw_save_area));
+        for (int i = 0; i < mdw_area_count; i++) {
+            if (lstrcmpiA(mdw_area_names[i], start_area) == 0) {
+                mdw_area_sel = i;
+                break;
+            }
+        }
+    }
+
+    if (!start_known && !end_known)
+        wsprintfA(mdw_save_warn, "Start and end rooms are unknown");
+    else if (!start_known)
+        wsprintfA(mdw_save_warn, "Start room is unknown");
+    else if (!end_known && !mdw_save_is_loop)
+        wsprintfA(mdw_save_warn, "End room is unknown");
+
+    if (mdw_save_is_loop)
+        mdw_save_field = 0;
+    else if (mdw_save_name[0])
+        mdw_save_field = 0;
+
+    mdw_build_area_list();
+    mdw_save_showing = 1;
+}
+
+/* ---- Save entry point (called from save dialog) ---- */
+
+static void mdw_save_path(void)
+{
+    mdw_find_megamud_dir();
+
+    MdwRoom *start_room = &mdw_rooms[mdw_rec_start_ri];
+    MdwRoom *end_room = (mdw_cur_ri < mdw_room_count) ? &mdw_rooms[mdw_cur_ri] : NULL;
+
+    char start_code[8] = "FFFF", end_code[8] = "FFFF";
+    mdw_roomsmd_lookup(start_room->checksum, start_code, 8, NULL, 0, NULL, 0);
+    if (end_room)
+        mdw_roomsmd_lookup(end_room->checksum, end_code, 8, NULL, 0, NULL, 0);
+
+    int is_loop = (end_room && start_room->checksum == end_room->checksum);
+    char mp_name[64], mpx_name[64];
+    if (mdw_save_name[0]) {
+        /* User-chosen filename (8 chars max) */
+        char base[12] = "";
+        lstrcpynA(base, mdw_save_name, 9);
+        wsprintfA(mp_name, "%s.mp", base);
+    } else if (is_loop) {
+        wsprintfA(mp_name, "%sLOOP.mp", start_code);
+    } else {
+        wsprintfA(mp_name, "%s%s.mp", start_code, end_code);
+    }
+
+    lstrcpynA(mpx_name, mp_name, 60);
+    char *dot = strrchr(mpx_name, '.');
+    if (dot) lstrcpyA(dot, ".mpx");
+
+    char dir[MAX_PATH];
+    wsprintfA(dir, "%sPathsToImport\\", mdw_megamud_dir);
+    CreateDirectoryA(dir, NULL);
+
+    const char *area = mdw_save_area;
+    if (mdw_area_sel >= 0 && mdw_area_sel < mdw_area_count)
+        area = mdw_area_names[mdw_area_sel];
+
+    int ok = mdw_do_save_mp(dir, mp_name, mdw_save_title, mdw_save_author, area);
+    if (ok && mdw_rec_gen_mpx) {
+        char mpx_dir[MAX_PATH];
+        wsprintfA(mpx_dir, "%smpx\\", mdw_megamud_dir);
+        CreateDirectoryA(mpx_dir, NULL);
+        mdw_do_save_mpx(mpx_dir, mpx_name, mdw_save_title, mdw_save_author, area);
+    }
+
+    if (ok) {
+        wsprintfA(mdw_save_status, "Saved %s%s", mp_name,
+                  mdw_rec_gen_mpx ? " + .mpx" : "");
+        mdw_log("[PATH] Save complete: %s%s (%s, by %s, area %s)\n",
+                dir, mp_name, mdw_save_name, mdw_save_author, area);
+        wsprintfA(mdw_import_mp_path, "%s%s", dir, mp_name);
+        lstrcpynA(mdw_import_title, mdw_save_title, sizeof(mdw_import_title));
+        mdw_import_is_loop = is_loop;
+        mdw_import_prompt = 1;
+    } else {
+        wsprintfA(mdw_save_status, "SAVE FAILED — check log");
+    }
+    mdw_save_status_tick = GetTickCount();
+    mdw_save_showing = 0;
+}
+
+/* ---- MPX-from-path: parse .mp file ---- */
+
+static int mdw_mpx_parse_mp(const char *path)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f) return 0;
+    char line[512];
+    int header_lines = 0;
+    mdw_mpx_header_count = 0;
+    mdw_mpx_start_cksum[0] = 0;
+    mdw_mpx_end_cksum[0] = 0;
+
+    if (mdw_mpx_parsed) { free(mdw_mpx_parsed); mdw_mpx_parsed = NULL; }
+    mdw_mpx_parsed_n = 0;
+    int cap = 0;
+
+    while (fgets(line, sizeof line, f)) {
+        char *nl = strchr(line, '\r'); if (nl) *nl = 0;
+        nl = strchr(line, '\n'); if (nl) *nl = 0;
+        if (!line[0]) continue;
+
+        if (line[0] == '[' || header_lines < 3) {
+            if (mdw_mpx_header_count < 4)
+                lstrcpynA(mdw_mpx_header_lines[mdw_mpx_header_count++], line, 256);
+            header_lines++;
+            /* Parse the summary line: STARTCKSUM:ENDCKSUM:N:... */
+            if (strlen(line) >= 17 && line[8] == ':' && line[17] == ':') {
+                memcpy(mdw_mpx_start_cksum, line, 8);
+                mdw_mpx_start_cksum[8] = 0;
+                memcpy(mdw_mpx_end_cksum, line + 9, 8);
+                mdw_mpx_end_cksum[8] = 0;
+            }
+            continue;
+        }
+
+        /* Step line: CHECKSUM:FLAGS:DIRECTION */
+        if (strlen(line) < 14 || line[8] != ':') continue;
+        if (mdw_mpx_parsed_n >= cap) {
+            cap = cap ? cap * 2 : 64;
+            mdw_mpx_parsed = (MdwMpParsedStep *)realloc(mdw_mpx_parsed,
+                              cap * sizeof(MdwMpParsedStep));
+        }
+        MdwMpParsedStep *s = &mdw_mpx_parsed[mdw_mpx_parsed_n++];
+        char hex[9]; memcpy(hex, line, 8); hex[8] = 0;
+        s->cksum = (uint32_t)strtoul(hex, NULL, 16);
+        memcpy(hex, line + 9, 4); hex[4] = 0;
+        s->flags = (uint16_t)strtoul(hex, NULL, 16);
+        lstrcpynA(s->dir, line + 14, 64);
+    }
+    fclose(f);
+    mdw_log("[MPX] Parsed %s: %d steps, start=%s end=%s\n",
+            path, mdw_mpx_parsed_n, mdw_mpx_start_cksum, mdw_mpx_end_cksum);
+    return mdw_mpx_parsed_n > 0;
+}
+
+/* ---- MPX-from-path: start verification ---- */
+
+static void mdw_mpx_verify_start(const char *mp_path)
+{
+    if (!mdw_mpx_parse_mp(mp_path)) {
+        wsprintfA(mdw_mpx_status, "Failed to parse .mp file");
+        mdw_mpx_status_tick = GetTickCount();
+        return;
+    }
+    lstrcpynA(mdw_mpx_mp_path, mp_path, MAX_PATH);
+    for (int r = 0; r < 3; r++) {
+        if (mdw_mpx_caps[r]) { free(mdw_mpx_caps[r]); mdw_mpx_caps[r] = NULL; }
+        mdw_mpx_caps[r] = (MdwMpxCapture *)calloc(mdw_mpx_parsed_n, sizeof(MdwMpxCapture));
+    }
+    mdw_mpx_verify_active = 1;
+    mdw_mpx_verify_run = 0;
+    mdw_mpx_verify_step = 0;
+    wsprintfA(mdw_mpx_status, "MPX verify: waiting for path start (run 1/3)");
+    mdw_mpx_status_tick = GetTickCount();
+    mdw_log("[MPX] Verify started for %s (%d steps, 3 runs needed)\n",
+            mp_path, mdw_mpx_parsed_n);
+}
+
+/* ---- MPX-from-path: feed room transition ---- */
+
+static void mdw_mpx_verify_feed(uint16_t map, uint16_t room, uint32_t cksum)
+{
+    if (!mdw_mpx_verify_active || mdw_mpx_parsed_n == 0) return;
+
+    int step = mdw_mpx_verify_step;
+    int run  = mdw_mpx_verify_run;
+
+    if (step < mdw_mpx_parsed_n) {
+        if (cksum == mdw_mpx_parsed[step].cksum) {
+            mdw_mpx_caps[run][step].map  = map;
+            mdw_mpx_caps[run][step].room = room;
+            mdw_mpx_verify_step++;
+            mdw_log("[MPX] Run %d step %d/%d: map=%u room=%u cksum=%08X OK\n",
+                    run + 1, step + 1, mdw_mpx_parsed_n, map, room, cksum);
+
+            if (mdw_mpx_verify_step >= mdw_mpx_parsed_n) {
+                mdw_log("[MPX] Run %d/%d complete\n", run + 1, 3);
+                mdw_mpx_verify_run++;
+                mdw_mpx_verify_step = 0;
+
+                if (mdw_mpx_verify_run >= 3) {
+                    /* Check all 3 runs match */
+                    int match = 1;
+                    for (int s = 0; s < mdw_mpx_parsed_n && match; s++) {
+                        for (int r = 1; r < 3; r++) {
+                            if (mdw_mpx_caps[r][s].map  != mdw_mpx_caps[0][s].map ||
+                                mdw_mpx_caps[r][s].room != mdw_mpx_caps[0][s].room) {
+                                mdw_log("[MPX] MISMATCH at step %d: run1=(%u,%u) run%d=(%u,%u)\n",
+                                        s, mdw_mpx_caps[0][s].map, mdw_mpx_caps[0][s].room,
+                                        r + 1, mdw_mpx_caps[r][s].map, mdw_mpx_caps[r][s].room);
+                                match = 0;
+                            }
+                        }
+                    }
+                    if (match) {
+                        mdw_log("[MPX] All 3 runs MATCH — generating .mpx\n");
+                        /* Build mpx path in mpx\ folder */
+                        char mpx_dir[MAX_PATH];
+                        wsprintfA(mpx_dir, "%smpx\\", mdw_megamud_dir);
+                        CreateDirectoryA(mpx_dir, NULL);
+                        const char *mp_base = strrchr(mdw_mpx_mp_path, '\\');
+                        if (!mp_base) mp_base = mdw_mpx_mp_path; else mp_base++;
+                        char mpx_path[MAX_PATH];
+                        wsprintfA(mpx_path, "%s%s", mpx_dir, mp_base);
+                        char *dot = strrchr(mpx_path, '.');
+                        if (dot) lstrcpyA(dot, ".mpx");
+                        else lstrcatA(mpx_path, ".mpx");
+
+                        FILE *fp = fopen(mpx_path, "wb");
+                        if (fp) {
+                            fprintf(fp, "MPX1\r\n");
+                            for (int h = 0; h < mdw_mpx_header_count; h++)
+                                fprintf(fp, "%s\r\n", mdw_mpx_header_lines[h]);
+                            fprintf(fp, "---\r\n");
+                            for (int s = 0; s < mdw_mpx_parsed_n; s++) {
+                                MdwMpParsedStep *ps = &mdw_mpx_parsed[s];
+                                MdwMpxCapture *cap = &mdw_mpx_caps[0][s];
+                                fprintf(fp, "%08X:%04X:%s", ps->cksum, ps->flags, ps->dir);
+                                fprintf(fp, "|map=%u|room=%u", cap->map, cap->room);
+                                uint32_t ri = mdw_room_lookup(cap->map, cap->room);
+                                if (ri < mdw_room_count) {
+                                    MdwRoom *rm = &mdw_rooms[ri];
+                                    fprintf(fp, "|name=%s|illu=%d", rm->name, (int)rm->light);
+                                    if (rm->lair_count) {
+                                        fprintf(fp, "|lair=%u", (unsigned)rm->lair_count);
+                                        char mobs[256];
+                                        mdw_lair_monsters_str(rm, mobs, sizeof mobs);
+                                        if (mobs[0]) fprintf(fp, "|mobs=%s", mobs);
+                                    }
+                                    if (rm->npc) {
+                                        char nm[80]; mdw_npc_name(rm->npc, nm, 80);
+                                        fprintf(fp, "|npc=%s", nm[0] ? nm : "?");
+                                    }
+                                    if (rm->shop) {
+                                        char nm[80]; mdw_shop_name(rm->shop, nm, 80);
+                                        fprintf(fp, "|shop=%s", nm[0] ? nm : "?");
+                                        fprintf(fp, "|shoptype=%d", mdw_shop_type_get(rm->shop));
+                                    }
+                                    if (rm->spell) fprintf(fp, "|spell=%u", (unsigned)rm->spell);
+                                    if (rm->cmd) fprintf(fp, "|cmd=%u", (unsigned)rm->cmd);
+                                }
+                                fprintf(fp, "\r\n");
+                            }
+                            fclose(fp);
+                            mdw_log("[MPX] Written: %s\n", mpx_path);
+                            wsprintfA(mdw_mpx_status, "MPX verified and saved!");
+                        } else {
+                            wsprintfA(mdw_mpx_status, "MPX verify OK but write failed");
+                        }
+                        mdw_mpx_verify_active = 0;
+                    } else {
+                        mdw_log("[MPX] Runs did NOT match — restarting 3 runs\n");
+                        mdw_mpx_verify_run = 0;
+                        mdw_mpx_verify_step = 0;
+                        wsprintfA(mdw_mpx_status, "MPX runs mismatched — restarting");
+                    }
+                    mdw_mpx_status_tick = GetTickCount();
+                } else {
+                    wsprintfA(mdw_mpx_status, "MPX verify: run %d/3 starting...", mdw_mpx_verify_run + 1);
+                    mdw_mpx_status_tick = GetTickCount();
+                }
+            } else {
+                wsprintfA(mdw_mpx_status, "MPX run %d/3: step %d/%d",
+                          run + 1, mdw_mpx_verify_step, mdw_mpx_parsed_n);
+                mdw_mpx_status_tick = GetTickCount();
+            }
+        }
+    }
+}
+
+static void mdw_mpx_verify_stop(void)
+{
+    mdw_mpx_verify_active = 0;
+    for (int r = 0; r < 3; r++) {
+        if (mdw_mpx_caps[r]) { free(mdw_mpx_caps[r]); mdw_mpx_caps[r] = NULL; }
+    }
+    if (mdw_mpx_parsed) { free(mdw_mpx_parsed); mdw_mpx_parsed = NULL; }
+    mdw_mpx_parsed_n = 0;
+    wsprintfA(mdw_mpx_status, "MPX verify cancelled");
+    mdw_mpx_status_tick = GetTickCount();
+    mdw_log("[MPX] Verify cancelled by user\n");
+}
+
+/* ---- Auto-MPX: scan + feed ---- */
+
+static int mdw_auto_mpx_parse_one(const char *fullpath, MdwAutoMpx *out)
+{
+    FILE *f = fopen(fullpath, "rb");
+    if (!f) return 0;
+    char line[512];
+    int header_lines = 0;
+    out->header_count = 0;
+    out->start_cksum[0] = 0;
+    out->end_cksum[0] = 0;
+    out->step_count = 0;
+    int cap = 0;
+    out->step_cksums = NULL;
+    out->step_flags = NULL;
+    out->step_dirs = NULL;
+
+    while (fgets(line, sizeof line, f)) {
+        char *nl = strchr(line, '\r'); if (nl) *nl = 0;
+        nl = strchr(line, '\n'); if (nl) *nl = 0;
+        if (!line[0]) continue;
+
+        if (line[0] == '[' || header_lines < 3) {
+            if (out->header_count < 4)
+                lstrcpynA(out->header_lines[out->header_count++], line, 256);
+            header_lines++;
+            if (strlen(line) >= 17 && line[8] == ':' && line[17] == ':') {
+                memcpy(out->start_cksum, line, 8); out->start_cksum[8] = 0;
+                memcpy(out->end_cksum, line + 9, 8); out->end_cksum[8] = 0;
+            }
+            continue;
+        }
+        if (strlen(line) < 14 || line[8] != ':') continue;
+        if (out->step_count >= cap) {
+            cap = cap ? cap * 2 : 64;
+            out->step_cksums = (uint32_t *)realloc(out->step_cksums, cap * sizeof(uint32_t));
+            out->step_flags  = (uint16_t *)realloc(out->step_flags, cap * sizeof(uint16_t));
+            out->step_dirs   = realloc(out->step_dirs, cap * 64);
+        }
+        char hex[9]; memcpy(hex, line, 8); hex[8] = 0;
+        out->step_cksums[out->step_count] = (uint32_t)strtoul(hex, NULL, 16);
+        memcpy(hex, line + 9, 4); hex[4] = 0;
+        out->step_flags[out->step_count] = (uint16_t)strtoul(hex, NULL, 16);
+        lstrcpynA(out->step_dirs[out->step_count], line + 14, 64);
+        out->step_count++;
+    }
+    fclose(f);
+    return out->step_count > 0;
+}
+
+static void mdw_auto_mpx_scan(void)
+{
+    if (mdw_auto_mpx_scanned) return;
+    mdw_auto_mpx_scanned = 1;
+    mdw_auto_mpx_count = 0;
+    mdw_find_megamud_dir();
+
+    char search[MAX_PATH];
+    wsprintfA(search, "%sDefault\\*.mp", mdw_megamud_dir);
+    WIN32_FIND_DATAA fd;
+    HANDLE hf = FindFirstFileA(search, &fd);
+    if (hf == INVALID_HANDLE_VALUE) return;
+
+    int loaded = 0, skipped = 0;
+    do {
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+        int nlen = (int)lstrlenA(fd.cFileName);
+        if (nlen < 4) continue;
+        /* Skip non-.mp or .mpx files */
+        if (lstrcmpiA(fd.cFileName + nlen - 3, ".mp") != 0) continue;
+        if (lstrcmpiA(fd.cFileName + nlen - 4, ".mpx") == 0) continue;
+
+        /* Check if .mpx already exists */
+        char mpx_name[MAX_PATH];
+        wsprintfA(mpx_name, "%sDefault\\%s", mdw_megamud_dir, fd.cFileName);
+        char *dot = strrchr(mpx_name, '.');
+        if (dot) lstrcpyA(dot, ".mpx");
+        DWORD attr = GetFileAttributesA(mpx_name);
+        if (attr != INVALID_FILE_ATTRIBUTES) { skipped++; continue; }
+
+        if (mdw_auto_mpx_count >= MDW_AUTO_MPX_MAX) break;
+
+        MdwAutoMpx *am = &mdw_auto_mpx[mdw_auto_mpx_count];
+        memset(am, 0, sizeof(*am));
+        lstrcpynA(am->filename, fd.cFileName, 64);
+        wsprintfA(am->mp_fullpath, "%sDefault\\%s", mdw_megamud_dir, fd.cFileName);
+
+        if (mdw_auto_mpx_parse_one(am->mp_fullpath, am)) {
+            for (int r = 0; r < MDW_AUTO_MPX_RUNS; r++)
+                am->caps[r] = (MdwMpxCapture *)calloc(am->step_count, sizeof(MdwMpxCapture));
+            am->active = 0;
+            am->run = 0;
+            am->step = 0;
+            mdw_auto_mpx_count++;
+            loaded++;
+        }
+    } while (FindNextFileA(hf, &fd));
+    FindClose(hf);
+    mdw_log("[MPX-AUTO] Scanned Default/: %d .mp files loaded, %d skipped (have .mpx)\n",
+            loaded, skipped);
+}
+
+static void mdw_auto_mpx_write(MdwAutoMpx *am)
+{
+    char mpx_path[MAX_PATH];
+    lstrcpynA(mpx_path, am->mp_fullpath, MAX_PATH);
+    char *dot = strrchr(mpx_path, '.');
+    if (dot) lstrcpyA(dot, ".mpx");
+    else lstrcatA(mpx_path, ".mpx");
+
+    FILE *fp = fopen(mpx_path, "wb");
+    if (!fp) {
+        mdw_log("[MPX-AUTO] ERROR: cannot write %s\n", mpx_path);
+        return;
+    }
+    fprintf(fp, "MPX1\r\n");
+    for (int h = 0; h < am->header_count; h++)
+        fprintf(fp, "%s\r\n", am->header_lines[h]);
+    fprintf(fp, "---\r\n");
+
+    for (int s = 0; s < am->step_count; s++) {
+        MdwMpxCapture *cap = &am->caps[0][s];
+        fprintf(fp, "%08X:%04X:%s", am->step_cksums[s], am->step_flags[s], am->step_dirs[s]);
+        fprintf(fp, "|map=%u|room=%u", cap->map, cap->room);
+        uint32_t ri = mdw_room_lookup(cap->map, cap->room);
+        if (ri < mdw_room_count) {
+            MdwRoom *rm = &mdw_rooms[ri];
+            fprintf(fp, "|name=%s|illu=%d", rm->name, (int)rm->light);
+            if (rm->lair_count) {
+                fprintf(fp, "|lair=%u", (unsigned)rm->lair_count);
+                char mobs[256];
+                mdw_lair_monsters_str(rm, mobs, sizeof mobs);
+                if (mobs[0]) fprintf(fp, "|mobs=%s", mobs);
+            }
+            if (rm->npc) {
+                char nm[80]; mdw_npc_name(rm->npc, nm, 80);
+                fprintf(fp, "|npc=%s", nm[0] ? nm : "?");
+            }
+            if (rm->shop) {
+                char nm[80]; mdw_shop_name(rm->shop, nm, 80);
+                fprintf(fp, "|shop=%s", nm[0] ? nm : "?");
+                fprintf(fp, "|shoptype=%d", mdw_shop_type_get(rm->shop));
+            }
+            if (rm->spell) fprintf(fp, "|spell=%u", (unsigned)rm->spell);
+            if (rm->cmd) fprintf(fp, "|cmd=%u", (unsigned)rm->cmd);
+        }
+        fprintf(fp, "\r\n");
+    }
+    fclose(fp);
+    mdw_log("[MPX-AUTO] Written: %s (%d steps verified over 3 runs)\n",
+            mpx_path, am->step_count);
+}
+
+static void mdw_auto_mpx_feed(uint16_t map, uint16_t room, uint32_t cksum)
+{
+    if (!mdw_rec_gen_mpx || !mdw_auto_mpx_scanned) return;
+
+    for (int i = 0; i < mdw_auto_mpx_count; i++) {
+        MdwAutoMpx *am = &mdw_auto_mpx[i];
+        if (am->step_count == 0) continue;
+
+        if (!am->active) {
+            /* Check if this room matches step 0 — path might be starting */
+            if (cksum == am->step_cksums[0]) {
+                am->active = 1;
+                am->step = 0;
+                am->caps[am->run][0].map  = map;
+                am->caps[am->run][0].room = room;
+                am->step = 1;
+                mdw_log("[MPX-AUTO] %s: run %d started (step 1/%d, map=%u room=%u)\n",
+                        am->filename, am->run + 1, am->step_count, map, room);
+            }
+            continue;
+        }
+
+        /* Active — check if current room matches expected step */
+        int s = am->step;
+        if (s < am->step_count && cksum == am->step_cksums[s]) {
+            am->caps[am->run][s].map  = map;
+            am->caps[am->run][s].room = room;
+            am->step++;
+            mdw_log("[MPX-AUTO] %s: run %d step %d/%d (map=%u room=%u)\n",
+                    am->filename, am->run + 1, am->step, am->step_count, map, room);
+
+            if (am->step >= am->step_count) {
+                mdw_log("[MPX-AUTO] %s: run %d/%d complete\n",
+                        am->filename, am->run + 1, MDW_AUTO_MPX_RUNS);
+                am->run++;
+                am->step = 0;
+                am->active = 0;  /* wait for next path start */
+
+                if (am->run >= MDW_AUTO_MPX_RUNS) {
+                    /* Compare all runs */
+                    int match = 1;
+                    for (int ss = 0; ss < am->step_count && match; ss++) {
+                        for (int r = 1; r < MDW_AUTO_MPX_RUNS; r++) {
+                            if (am->caps[r][ss].map  != am->caps[0][ss].map ||
+                                am->caps[r][ss].room != am->caps[0][ss].room) {
+                                mdw_log("[MPX-AUTO] %s: MISMATCH step %d run1=(%u,%u) run%d=(%u,%u)\n",
+                                        am->filename, ss,
+                                        am->caps[0][ss].map, am->caps[0][ss].room,
+                                        r + 1, am->caps[r][ss].map, am->caps[r][ss].room);
+                                match = 0;
+                            }
+                        }
+                    }
+                    if (match) {
+                        mdw_log("[MPX-AUTO] %s: ALL %d RUNS MATCH — writing .mpx\n",
+                                am->filename, MDW_AUTO_MPX_RUNS);
+                        mdw_auto_mpx_write(am);
+                        wsprintfA(mdw_mpx_status, "Auto-MPX: %s done!", am->filename);
+                        mdw_mpx_status_tick = GetTickCount();
+                        /* Remove from list (swap with last) */
+                        free(am->step_cksums); free(am->step_flags); free(am->step_dirs);
+                        for (int r = 0; r < MDW_AUTO_MPX_RUNS; r++) free(am->caps[r]);
+                        if (i < mdw_auto_mpx_count - 1)
+                            *am = mdw_auto_mpx[mdw_auto_mpx_count - 1];
+                        mdw_auto_mpx_count--;
+                        i--;  /* re-check this slot */
+                    } else {
+                        mdw_log("[MPX-AUTO] %s: runs mismatched, restarting\n", am->filename);
+                        am->run = 0;
+                        am->step = 0;
+                    }
+                }
+            }
+        } else if (am->active) {
+            /* Checksum didn't match — path broken (got lost, teleported, etc.) */
+            mdw_log("[MPX-AUTO] %s: step %d expected %08X got %08X — resetting run %d\n",
+                    am->filename, s, am->step_cksums[s], cksum, am->run + 1);
+            am->active = 0;
+            am->step = 0;
+            /* Don't reset run counter — partial progress on earlier runs is still valid.
+             * Just restart this run from scratch. */
+        }
+    }
 }
 
 /* ---- Bottom-bar controls ---- */
@@ -543,6 +1625,9 @@ static int mdw_load_bin(const char *path)
     fclose(f);
     mdw_hash_build();
     mdw_loaded = 1;
+    /* Trigger auto-MPX scan now that bin data is loaded */
+    mdw_auto_mpx_scanned = 0;
+    if (mdw_rec_gen_mpx) mdw_auto_mpx_scan();
     return 0;
 }
 
@@ -625,16 +1710,13 @@ static int mdw_set_current(int map_num, int room_num)
     uint32_t ri = mdw_room_lookup((uint16_t)map_num, (uint16_t)room_num);
     if (ri == 0xFFFFFFFF) return 0;
     int changed = (mdw_cur_ri != ri);
-    /* Recorder: capture the transition FROM the previous room (mdw_cur_ri)
-     * VIA the matching exit to this (map_num, room_num). If recording just
-     * started, store the first room as the start anchor. */
-    if (mdw_rec_active && changed) {
-        if (mdw_rec_start_ri == 0xFFFFFFFF) mdw_rec_start_ri = mdw_cur_ri;
-        if (mdw_cur_ri != 0xFFFFFFFF) {
-            MdwExit *ex = mdw_exit_from_to(mdw_cur_ri,
-                                           (uint16_t)map_num, (uint16_t)room_num);
-            if (ex) mdw_rec_append(mdw_cur_ri, ex);
-        }
+    /* Feed MPX verifiers on every room change */
+    if (changed) {
+        uint32_t ck = mdw_rooms[ri].checksum;
+        if (mdw_mpx_verify_active)
+            mdw_mpx_verify_feed((uint16_t)map_num, (uint16_t)room_num, ck);
+        /* Auto-MPX: passively watch all room transitions */
+        mdw_auto_mpx_feed((uint16_t)map_num, (uint16_t)room_num, ck);
     }
     int map_switched = 0;
     if (mdw_rooms[ri].map != mdw_cur_map_view || mdw_rooms[ri].gx == INT16_MIN) {
@@ -990,10 +2072,21 @@ static void mdw_draw(int vp_w, int vp_h)
            1.0f, 1.0f, 1.0f, 0.06f, vp_w, vp_h);
     psolid(x0 + 2.0f, tb_y1 - 1.0f, x1 - 2.0f, tb_y1, acr, acg, acb, 0.5f, vp_w, vp_h);
 
+    /* Update cached room code when current room changes */
+    if (mdw_cur_ri != mdw_cur_room_code_ri) {
+        mdw_cur_room_code_ri = mdw_cur_ri;
+        mdw_cur_room_code[0] = 0;
+        mdw_cur_room_known = 0;
+        if (mdw_cur_ri != 0xFFFFFFFF && mdw_cur_ri < mdw_room_count && api && api->room_is_known) {
+            mdw_cur_room_known = api->room_is_known(
+                mdw_rooms[mdw_cur_ri].checksum, mdw_cur_room_code, sizeof(mdw_cur_room_code));
+        }
+    }
+
     /* Title text — "Map Walker │ Map N  Room M │ <room name>" */
     int title_tx = (int)x0 + pad;
     int title_ty = (int)tb_y0 + (titlebar_h - ch) / 2;
-    char tbuf[160];
+    char tbuf[200];
     if (mdw_loaded && mdw_cur_ri != 0xFFFFFFFF && mdw_cur_ri < mdw_room_count) {
         MdwRoom *cr = &mdw_rooms[mdw_cur_ri];
         _snprintf(tbuf, sizeof(tbuf), "Map Walker  \xB3  Map %u  Room %u  \xB3  %s",
@@ -1004,12 +2097,32 @@ static void mdw_draw(int vp_w, int vp_h)
         _snprintf(tbuf, sizeof(tbuf), "Map Walker  \xB3  (no map loaded)");
     }
     tbuf[sizeof(tbuf) - 1] = 0;
-    /* Clip title to not overlap the close [X] */
-    int title_max_cols = ((int)x1 - pad - cw - 4 - title_tx) / cw;
+    /* Clip title to not overlap divider + room code + close [X] */
+    int code_len = mdw_cur_room_known ? (int)strlen(mdw_cur_room_code) + 3 : 7;
+    int title_max_cols = ((int)x1 - pad - cw - 4 - title_tx - (5 + 18 + code_len) * cw - cw * 2) / cw;
     if (title_max_cols > 0 && (int)strlen(tbuf) > title_max_cols)
         tbuf[title_max_cols] = 0;
     ptext(title_tx + 1, title_ty + 1, tbuf, 0.0f, 0.0f, 0.0f, vp_w, vp_h, cw, ch);
     ptext(title_tx, title_ty, tbuf, txr, txg, txb, vp_w, vp_h, cw, ch);
+
+    /* Room code indicator: " │ (STON)" green or " │ (????)" red */
+    if (mdw_loaded && mdw_cur_ri != 0xFFFFFFFF && mdw_cur_ri < mdw_room_count) {
+        int code_tx = title_tx + ((int)strlen(tbuf)) * cw;
+        /* Divider + label */
+        ptext(code_tx, title_ty, "  \xB3  ", dmr, dmg, dmb, vp_w, vp_h, cw, ch);
+        code_tx += 5 * cw;
+        ptext(code_tx, title_ty, "MegaMUD Room Code ", dmr, dmg, dmb, vp_w, vp_h, cw, ch);
+        code_tx += 18 * cw;
+        char codebuf[12];
+        if (mdw_cur_room_known)
+            wsprintfA(codebuf, "(%s)", mdw_cur_room_code);
+        else
+            wsprintfA(codebuf, "(%s)", "????");
+        float cr2 = mdw_cur_room_known ? 0.2f : 1.0f;
+        float cg2 = mdw_cur_room_known ? 1.0f : 0.3f;
+        float cb2 = mdw_cur_room_known ? 0.3f : 0.3f;
+        ptext(code_tx, title_ty, codebuf, cr2, cg2, cb2, vp_w, vp_h, cw, ch);
+    }
 
     /* Close [X] */
     int close_tx = (int)x1 - pad - cw;
@@ -1021,9 +2134,14 @@ static void mdw_draw(int vp_w, int vp_h)
     float ctrl_y0 = y1 - 6 - (float)ctrl_h;
     float ctrl_y1 = y1 - 6;
 
-    /* ---- Content area ---- */
+    /* ---- Content area (shrink for path panel if visible) ---- */
+    int pp_cols = 30;  /* path panel width in characters */
+    int pp_w_px = mdw_show_path_panel ? (pp_cols * cw + 16) : 0;
     float c_x0 = x0 + 6, c_y0 = (float)tb_y1 + 3;
-    float c_x1 = x1 - 6, c_y1 = ctrl_y0 - 2;
+    float c_x1 = x1 - 6 - (float)pp_w_px, c_y1 = ctrl_y0 - 2;
+    float pp_x0f = c_x1, pp_x1f = x1 - 6;
+    mdw_pp_x0 = pp_x0f; mdw_pp_x1 = pp_x1f;
+    mdw_pp_y0 = c_y0;   mdw_pp_y1 = c_y1;
     /* Content bg — solid dark canvas like a terminal window */
     psolid(c_x0, c_y0, c_x1, c_y1,
            bgr * 0.35f, bgg * 0.35f, bgb * 0.35f, 0.98f, vp_w, vp_h);
@@ -1131,17 +2249,18 @@ static void mdw_draw(int vp_w, int vp_h)
         else if (r->lair_count){ rc = 0.90f; gc = 0.40f; bc = 0.10f; }
 
         /* Lair-number text color (yellow normally; on current tile we
-         * override below so it reads on the cyan player color). */
+         * override below to bright green on the violet player color). */
         float tr = 1.0f, tg = 0.95f, tb = 0.40f;
 
         float glow = 0.0f;
         if (i == mdw_cur_ri) {
             glow = pulse;
-            /* Player's current room uses a fixed bright cyan regardless of
-             * room type — so the "you are here" color is never confused
-             * with the room's own type coloring (especially lair orange). */
-            rc = 0.15f; gc = 0.90f; bc = 1.00f;
-            tr = 0.02f; tg = 0.10f; tb = 0.35f;
+            /* Player's current room: bright violet regardless of room type,
+             * so "you are here" is unmistakable. If the current room is a
+             * lair, its number is drawn in bright green (see tr/tg/tb) with
+             * the black drop shadow already applied below. */
+            rc = 0.85f; gc = 0.25f; bc = 1.00f;
+            tr = 0.30f; tg = 1.00f; tb = 0.35f;
         }
 
         /* Outer ring: accent color on current; theme dim otherwise */
@@ -1153,9 +2272,16 @@ static void mdw_draw(int vp_w, int vp_h)
                     bgdark_r, bgdark_g, bgdark_b, glow,
                     c_x0, c_y0, c_x1, c_y1, vp_w, vp_h);
 
+        /* Clip gate for all text/glyphs: the tile itself is shader-clipped
+         * to the content rect, but ptext/draw_skull/draw_cross aren't.
+         * Without this check, labels on tiles that straddle the top edge
+         * bleed over the window title bar. */
+        int text_ok = (sy - tile >= c_y0 && sy + tile <= c_y1 &&
+                       sx - tile >= c_x0 && sx + tile <= c_x1);
+
         /* Special-room glyphs — skip for current-room tile to avoid clashing
          * with the cyan player highlight. */
-        if (i != mdw_cur_ri) {
+        if (text_ok && i != mdw_cur_ri) {
             int is_trainer = r->shop && mdw_shop_is_trainer(r->shop);
             int is_healer  = r->shop && mdw_shop_is_healer(r->shop);
             if (r->npc && !r->shop && tile >= 5.0f) {
@@ -1201,7 +2327,7 @@ static void mdw_draw(int vp_w, int vp_h)
         }
 
         /* Lair size (monster cap) — bold, drop-shadowed, centered on tile */
-        if (r->lair_count) {
+        if (text_ok && r->lair_count) {
             char nb[8]; wsprintfA(nb, "%u", r->lair_count);
             int nlen = (int)strlen(nb);
             int nw = nlen * cw + 1; /* +1 for fake-bold double print */
@@ -1302,8 +2428,8 @@ static void mdw_draw(int vp_w, int vp_h)
         }
     }
 
-    /* ---- Hover tooltip ---- */
-    if (mdw_hover_ri != 0xFFFFFFFF && mdw_hover_ri < mdw_room_count) {
+    /* ---- Hover tooltip (suppressed when save dialog is open) ---- */
+    if (mdw_hover_ri != 0xFFFFFFFF && mdw_hover_ri < mdw_room_count && !mdw_save_showing) {
         MdwRoom *hr = &mdw_rooms[mdw_hover_ri];
         /* Collect up to ~9 lines of content */
         char lines[12][96];
@@ -1465,6 +2591,483 @@ static void mdw_draw(int vp_w, int vp_h)
         }
     }
 
+    /* ---- Path panel (right sidebar) ---- */
+    if (mdw_show_path_panel && pp_w_px > 0) {
+        /* Panel background */
+        psolid(pp_x0f, c_y0, pp_x1f, c_y1,
+               bgr * 0.25f, bgg * 0.25f, bgb * 0.28f, 0.95f, vp_w, vp_h);
+        /* Left accent stripe */
+        psolid(pp_x0f, c_y0, pp_x0f + 2, c_y1,
+               0.20f, 0.85f, 0.35f, 0.9f, vp_w, vp_h);
+        /* Separator from map area */
+        psolid(pp_x0f, c_y0, pp_x0f + 1, c_y1,
+               0.0f, 0.0f, 0.0f, 0.5f, vp_w, vp_h);
+
+        int pp_pad = 6;
+        int pp_tx = (int)pp_x0f + pp_pad + 3;
+        int pp_ty = (int)c_y0 + pp_pad;
+        int pp_max_cols = ((int)pp_x1f - pp_tx - pp_pad) / cw;
+        if (pp_max_cols < 8) pp_max_cols = 8;
+
+        /* Header: PATH N step(s) */
+        char pp_hdr[64];
+        if (mdw_rec_n > 0)
+            wsprintfA(pp_hdr, "PATH  %u step%s", mdw_rec_n, mdw_rec_n == 1 ? "" : "s");
+        else
+            wsprintfA(pp_hdr, "PATH  (empty)");
+        ptext(pp_tx, pp_ty, pp_hdr, txr, txg, txb, vp_w, vp_h, cw, ch);
+
+        /* REC indicator (blinking when active) */
+        if (mdw_rec_active) {
+            int blink = (GetTickCount() / 400) & 1;
+            if (blink)
+                ptext(pp_tx + (int)strlen(pp_hdr) * cw + cw, pp_ty,
+                      "REC", 1.0f, 0.15f, 0.15f, vp_w, vp_h, cw, ch);
+            /* Red dot */
+            float rdx = pp_x1f - pp_pad - (float)cw;
+            float rdy = (float)pp_ty + (float)ch * 0.3f;
+            psolid(rdx, rdy, rdx + (float)ch * 0.4f, rdy + (float)ch * 0.4f,
+                   1.0f, 0.1f, 0.1f, blink ? 1.0f : 0.4f, vp_w, vp_h);
+        }
+        pp_ty += ch + 4;
+
+        /* Buttons row: [REC] [CLR] [SAVE] [x]MPX */
+        {
+            int bh = ch + 4;
+            int bx = pp_tx;
+
+            /* [REC] / [STOP] */
+            const char *rec_lbl = mdw_rec_active ? "STOP" : "REC";
+            int rec_w = (int)strlen(rec_lbl) * cw + 8;
+            float br = mdw_rec_active ? 0.7f : 0.15f;
+            float bg2 = mdw_rec_active ? 0.1f : 0.55f;
+            float bb = mdw_rec_active ? 0.1f : 0.15f;
+            psolid((float)bx, (float)pp_ty, (float)(bx + rec_w), (float)(pp_ty + bh),
+                   br * 0.5f + bgr * 0.3f, bg2 * 0.5f + bgg * 0.3f, bb * 0.5f + bgb * 0.3f,
+                   1.0f, vp_w, vp_h);
+            psolid((float)bx, (float)pp_ty, (float)(bx + rec_w), (float)pp_ty + 1,
+                   br, bg2, bb, 0.9f, vp_w, vp_h);
+            ptext(bx + 4, pp_ty + 2, rec_lbl, txr, txg, txb, vp_w, vp_h, cw, ch);
+            mdw_btn_rec_x0 = (float)bx; mdw_btn_rec_x1 = (float)(bx + rec_w);
+            bx += rec_w + 4;
+
+            /* [CLR] */
+            int clr_w = 3 * cw + 8;
+            psolid((float)bx, (float)pp_ty, (float)(bx + clr_w), (float)(pp_ty + bh),
+                   bgr * 0.5f, bgg * 0.5f, bgb * 0.5f, 1.0f, vp_w, vp_h);
+            psolid((float)bx, (float)pp_ty, (float)(bx + clr_w), (float)pp_ty + 1,
+                   dmr, dmg, dmb, 0.9f, vp_w, vp_h);
+            ptext(bx + 4, pp_ty + 2, "CLR", txr, txg, txb, vp_w, vp_h, cw, ch);
+            mdw_btn_clear_x0 = (float)bx; mdw_btn_clear_x1 = (float)(bx + clr_w);
+            bx += clr_w + 4;
+
+            /* [UNDO] */
+            {
+                int undo_w = 4 * cw + 8;
+                float ua = (mdw_rec_n > 0) ? 1.0f : 0.4f;
+                psolid((float)bx, (float)pp_ty, (float)(bx + undo_w), (float)(pp_ty + bh),
+                       0.6f * 0.5f + bgr * 0.3f, 0.5f * 0.5f + bgg * 0.3f, 0.1f * 0.5f + bgb * 0.3f,
+                       ua, vp_w, vp_h);
+                psolid((float)bx, (float)pp_ty, (float)(bx + undo_w), (float)pp_ty + 1,
+                       0.6f, 0.5f, 0.1f, 0.9f * ua, vp_w, vp_h);
+                ptext(bx + 4, pp_ty + 2, "UNDO", txr, txg, txb, vp_w, vp_h, cw, ch);
+                mdw_btn_undo_x0 = (float)bx; mdw_btn_undo_x1 = (float)(bx + undo_w);
+                bx += undo_w + 4;
+            }
+
+            /* [SAVE] */
+            int sav_w = 4 * cw + 8;
+            float sav_a = (mdw_rec_n > 0) ? 1.0f : 0.4f;
+            psolid((float)bx, (float)pp_ty, (float)(bx + sav_w), (float)(pp_ty + bh),
+                   acr * 0.4f + bgr * 0.3f, acg * 0.4f + bgg * 0.3f, acb * 0.4f + bgb * 0.3f,
+                   sav_a, vp_w, vp_h);
+            psolid((float)bx, (float)pp_ty, (float)(bx + sav_w), (float)pp_ty + 1,
+                   acr, acg, acb, 0.9f * sav_a, vp_w, vp_h);
+            ptext(bx + 4, pp_ty + 2, "SAVE", txr, txg, txb, vp_w, vp_h, cw, ch);
+            mdw_btn_save_x0 = (float)bx; mdw_btn_save_x1 = (float)(bx + sav_w);
+            bx += sav_w + 6;
+
+            /* [x] MPX checkbox */
+            int cb_sz = ch;
+            psolid((float)bx, (float)pp_ty + 2, (float)(bx + cb_sz), (float)(pp_ty + 2 + cb_sz),
+                   bgr * 0.2f, bgg * 0.2f, bgb * 0.2f, 1.0f, vp_w, vp_h);
+            psolid((float)bx, (float)pp_ty + 2, (float)(bx + cb_sz), (float)pp_ty + 3,
+                   acr, acg, acb, 0.8f, vp_w, vp_h);
+            psolid((float)bx, (float)(pp_ty + 2 + cb_sz - 1), (float)(bx + cb_sz), (float)(pp_ty + 2 + cb_sz),
+                   acr, acg, acb, 0.8f, vp_w, vp_h);
+            psolid((float)bx, (float)pp_ty + 2, (float)bx + 1, (float)(pp_ty + 2 + cb_sz),
+                   acr, acg, acb, 0.8f, vp_w, vp_h);
+            psolid((float)(bx + cb_sz - 1), (float)pp_ty + 2, (float)(bx + cb_sz), (float)(pp_ty + 2 + cb_sz),
+                   acr, acg, acb, 0.8f, vp_w, vp_h);
+            if (mdw_rec_gen_mpx) {
+                psolid((float)bx + 3, (float)pp_ty + 5,
+                       (float)(bx + cb_sz - 3), (float)(pp_ty + 2 + cb_sz - 3),
+                       0.25f, 0.95f, 0.35f, 1.0f, vp_w, vp_h);
+            }
+            mdw_btn_mpx_x0 = (float)bx; mdw_btn_mpx_x1 = (float)(bx + cb_sz);
+            ptext(bx + cb_sz + 3, pp_ty + 2, "MPX", txr, txg, txb, vp_w, vp_h, cw, ch);
+        }
+        pp_ty += ch + 8;
+
+        /* Divider line */
+        psolid(pp_x0f + 4, (float)pp_ty, pp_x1f - 4, (float)pp_ty + 1,
+               dmr * 0.5f, dmg * 0.5f, dmb * 0.5f, 0.6f, vp_w, vp_h);
+        pp_ty += 4;
+
+        /* Step list area */
+        int pp_list_y0 = pp_ty;
+        int pp_list_y1 = (int)c_y1 - pp_pad - ch - 4; /* leave room for status */
+        int visible_rows = (pp_list_y1 - pp_list_y0) / (ch + 2);
+        if (visible_rows < 1) visible_rows = 1;
+
+        if (mdw_rec_n == 0) {
+            ptext(pp_tx, pp_ty + (pp_list_y1 - pp_list_y0) / 2 - ch,
+                  "C to record", dmr * 0.7f, dmg * 0.7f, dmb * 0.7f,
+                  vp_w, vp_h, cw, ch);
+            ptext(pp_tx, pp_ty + (pp_list_y1 - pp_list_y0) / 2,
+                  "walk to record", dmr * 0.7f, dmg * 0.7f, dmb * 0.7f,
+                  vp_w, vp_h, cw, ch);
+        } else {
+            /* Show most recent steps (auto-scroll to bottom) */
+            int start_idx = 0;
+            if ((int)mdw_rec_n > visible_rows) {
+                start_idx = (int)mdw_rec_n - visible_rows - mdw_path_scroll;
+                if (start_idx < 0) start_idx = 0;
+            }
+            int ly = pp_list_y0;
+            for (int i = start_idx; i < (int)mdw_rec_n && ly + ch < pp_list_y1; i++) {
+                MdwRecStep *s = &mdw_rec_path[i];
+                char line[80];
+                char dir_up[64];
+                for (int j = 0; j < 64 && s->dir[j]; j++)
+                    dir_up[j] = (char)toupper((unsigned char)s->dir[j]);
+                dir_up[lstrlenA(s->dir)] = 0;
+                wsprintfA(line, "%08X:%04X:%s", s->cksum, s->flags, dir_up);
+                if ((int)strlen(line) > pp_max_cols) line[pp_max_cols] = 0;
+
+                float sr = 0.65f, sg = 0.70f, sb = 0.75f;
+                if (i == (int)mdw_rec_n - 1) { sr = 0.30f; sg = 1.00f; sb = 0.45f; }
+                ptext(pp_tx, ly, line, sr, sg, sb, vp_w, vp_h, cw, ch);
+                ly += ch + 2;
+            }
+        }
+
+        /* Status / MPX verify status at bottom of panel */
+        {
+            int st_y = (int)c_y1 - pp_pad - ch;
+            const char *st = "";
+            float st_r = dmr, st_g = dmg, st_b = dmb;
+            DWORD now2 = GetTickCount();
+            if (mdw_mpx_verify_active) {
+                st = mdw_mpx_status;
+                st_r = 0.9f; st_g = 0.8f; st_b = 0.2f;
+            } else if (mdw_save_status[0] && (now2 - mdw_save_status_tick) < 5000) {
+                st = mdw_save_status;
+                st_r = 0.3f; st_g = 1.0f; st_b = 0.4f;
+            } else if (mdw_mpx_status[0] && (now2 - mdw_mpx_status_tick) < 5000) {
+                st = mdw_mpx_status;
+                st_r = 0.9f; st_g = 0.8f; st_b = 0.2f;
+            }
+            if (st[0]) {
+                char stbuf[64];
+                lstrcpynA(stbuf, st, pp_max_cols < 63 ? pp_max_cols + 1 : 64);
+                ptext(pp_tx, st_y, stbuf, st_r, st_g, st_b, vp_w, vp_h, cw, ch);
+            }
+        }
+    }
+
+    /* ---- Save dialog overlay ---- */
+    if (mdw_save_showing) {
+        float sd_w = 320.0f * ui_scale;
+        float sd_h = 300.0f * ui_scale;
+        float sd_x = (x0 + x1 - sd_w) * 0.5f;
+        float sd_y = (y0 + y1 - sd_h) * 0.5f;
+        float sd_x1 = sd_x + sd_w, sd_y1 = sd_y + sd_h;
+        mdw_sd_x0 = sd_x; mdw_sd_y0 = sd_y; mdw_sd_x1 = sd_x1; mdw_sd_y1 = sd_y1;
+
+        /* Dim background */
+        psolid(x0, y0, x1, y1, 0.0f, 0.0f, 0.0f, 0.5f, vp_w, vp_h);
+        /* Dialog panel */
+        psolid(sd_x, sd_y, sd_x1, sd_y1,
+               bgr + 0.06f, bgg + 0.06f, bgb + 0.06f, 0.98f, vp_w, vp_h);
+        /* Border */
+        psolid(sd_x, sd_y, sd_x1, sd_y + 1, acr, acg, acb, 0.9f, vp_w, vp_h);
+        psolid(sd_x, sd_y1 - 1, sd_x1, sd_y1, acr * 0.4f, acg * 0.4f, acb * 0.4f, 0.9f, vp_w, vp_h);
+        psolid(sd_x, sd_y, sd_x + 1, sd_y1, acr, acg, acb, 0.8f, vp_w, vp_h);
+        psolid(sd_x1 - 1, sd_y, sd_x1, sd_y1, acr * 0.4f, acg * 0.4f, acb * 0.4f, 0.8f, vp_w, vp_h);
+
+        int sd_pad = 10;
+        int sd_tx = (int)sd_x + sd_pad;
+        int sd_ty = (int)sd_y + sd_pad;
+
+        ptext(sd_tx, sd_ty, mdw_save_is_loop ? "Save Loop" : "Save Path",
+              acr, acg, acb, vp_w, vp_h, cw, ch);
+        sd_ty += ch + 4;
+        if (mdw_save_warn[0]) {
+            ptext(sd_tx, sd_ty, mdw_save_warn, 1.0f, 0.6f, 0.2f, vp_w, vp_h, cw, ch);
+            sd_ty += ch + 4;
+        }
+
+        int fw = (int)sd_w - sd_pad * 2;
+        float fb;
+
+        /* Title field (loop/path display name) */
+        ptext(sd_tx, sd_ty, "Title:", txr, txg, txb, vp_w, vp_h, cw, ch);
+        sd_ty += ch + 2;
+        fb = (mdw_save_field == 0) ? 0.25f : 0.12f;
+        psolid((float)sd_tx, (float)sd_ty, (float)(sd_tx + fw), (float)(sd_ty + ch + 4),
+               fb, fb, fb, 1.0f, vp_w, vp_h);
+        psolid((float)sd_tx, (float)sd_ty, (float)(sd_tx + fw), (float)sd_ty + 1,
+               dmr, dmg, dmb, 0.8f, vp_w, vp_h);
+        mdw_sd_title_x0 = (float)sd_tx; mdw_sd_title_x1 = (float)(sd_tx + fw);
+        ptext(sd_tx + 3, sd_ty + 2, mdw_save_title, txr, txg, txb, vp_w, vp_h, cw, ch);
+        if (mdw_save_field == 0 && (GetTickCount() / 500) & 1) {
+            int cx2 = sd_tx + 3 + (int)strlen(mdw_save_title) * cw;
+            psolid((float)cx2, (float)sd_ty + 2, (float)cx2 + 1, (float)(sd_ty + ch + 2),
+                   txr, txg, txb, 1.0f, vp_w, vp_h);
+        }
+        sd_ty += ch + 8;
+
+        /* Filename field (8 chars max, becomes .mp name) */
+        ptext(sd_tx, sd_ty, "Filename (8 chars):", txr, txg, txb, vp_w, vp_h, cw, ch);
+        sd_ty += ch + 2;
+        fb = (mdw_save_field == 1) ? 0.25f : 0.12f;
+        psolid((float)sd_tx, (float)sd_ty, (float)(sd_tx + fw), (float)(sd_ty + ch + 4),
+               fb, fb, fb, 1.0f, vp_w, vp_h);
+        psolid((float)sd_tx, (float)sd_ty, (float)(sd_tx + fw), (float)sd_ty + 1,
+               dmr, dmg, dmb, 0.8f, vp_w, vp_h);
+        mdw_sd_name_x0 = (float)sd_tx; mdw_sd_name_x1 = (float)(sd_tx + fw);
+        ptext(sd_tx + 3, sd_ty + 2, mdw_save_name, txr, txg, txb, vp_w, vp_h, cw, ch);
+        if (mdw_save_field == 1 && (GetTickCount() / 500) & 1) {
+            int cx2 = sd_tx + 3 + (int)strlen(mdw_save_name) * cw;
+            psolid((float)cx2, (float)sd_ty + 2, (float)cx2 + 1, (float)(sd_ty + ch + 2),
+                   txr, txg, txb, 1.0f, vp_w, vp_h);
+        }
+        sd_ty += ch + 8;
+
+        /* Author field */
+        ptext(sd_tx, sd_ty, "Author:", txr, txg, txb, vp_w, vp_h, cw, ch);
+        sd_ty += ch + 2;
+        fb = (mdw_save_field == 2) ? 0.25f : 0.12f;
+        psolid((float)sd_tx, (float)sd_ty, (float)(sd_tx + fw), (float)(sd_ty + ch + 4),
+               fb, fb, fb, 1.0f, vp_w, vp_h);
+        psolid((float)sd_tx, (float)sd_ty, (float)(sd_tx + fw), (float)sd_ty + 1,
+               dmr, dmg, dmb, 0.8f, vp_w, vp_h);
+        mdw_sd_author_x0 = (float)sd_tx; mdw_sd_author_x1 = (float)(sd_tx + fw);
+        ptext(sd_tx + 3, sd_ty + 2, mdw_save_author, txr, txg, txb, vp_w, vp_h, cw, ch);
+        if (mdw_save_field == 2 && (GetTickCount() / 500) & 1) {
+            int cx2 = sd_tx + 3 + (int)strlen(mdw_save_author) * cw;
+            psolid((float)cx2, (float)sd_ty + 2, (float)cx2 + 1, (float)(sd_ty + ch + 2),
+                   txr, txg, txb, 1.0f, vp_w, vp_h);
+        }
+        sd_ty += ch + 8;
+
+        /* Area field + dropdown list */
+        ptext(sd_tx, sd_ty, "Area:", txr, txg, txb, vp_w, vp_h, cw, ch);
+        sd_ty += ch + 2;
+        fb = (mdw_save_field == 3) ? 0.25f : 0.12f;
+        psolid((float)sd_tx, (float)sd_ty, (float)(sd_tx + fw), (float)(sd_ty + ch + 4),
+               fb, fb, fb, 1.0f, vp_w, vp_h);
+        psolid((float)sd_tx, (float)sd_ty, (float)(sd_tx + fw), (float)sd_ty + 1,
+               dmr, dmg, dmb, 0.8f, vp_w, vp_h);
+        mdw_sd_area_x0 = (float)sd_tx; mdw_sd_area_x1 = (float)(sd_tx + fw);
+        const char *area_disp = mdw_save_area;
+        if (mdw_area_sel >= 0 && mdw_area_sel < mdw_area_count)
+            area_disp = mdw_area_names[mdw_area_sel];
+        ptext(sd_tx + 3, sd_ty + 2, area_disp, txr, txg, txb, vp_w, vp_h, cw, ch);
+        if (mdw_save_field == 3 && (GetTickCount() / 500) & 1 && mdw_area_sel < 0) {
+            int cx2 = sd_tx + 3 + (int)strlen(mdw_save_area) * cw;
+            psolid((float)cx2, (float)sd_ty + 2, (float)cx2 + 1, (float)(sd_ty + ch + 2),
+                   txr, txg, txb, 1.0f, vp_w, vp_h);
+        }
+        sd_ty += ch + 6;
+
+        /* Area dropdown (show up to 6 rows when field 3 focused) */
+        if (mdw_save_field == 3 && mdw_area_count > 0) {
+            int max_vis = 6;
+            if (max_vis > mdw_area_count) max_vis = mdw_area_count;
+            int list_h = max_vis * (ch + 2) + 4;
+            float lx0 = (float)sd_tx, ly0 = (float)sd_ty;
+            float lx1 = (float)(sd_tx + fw), ly1 = ly0 + (float)list_h;
+            mdw_sd_area_list_y0 = ly0; mdw_sd_area_list_y1 = ly1;
+            psolid(lx0, ly0, lx1, ly1, bgr * 0.3f, bgg * 0.3f, bgb * 0.3f, 0.98f, vp_w, vp_h);
+            psolid(lx0, ly0, lx1, ly0 + 1, dmr, dmg, dmb, 0.5f, vp_w, vp_h);
+            int aly = (int)ly0 + 2;
+            int start_a = mdw_area_scroll;
+            if (start_a > mdw_area_count - max_vis) start_a = mdw_area_count - max_vis;
+            if (start_a < 0) start_a = 0;
+            for (int a = start_a; a < mdw_area_count && a < start_a + max_vis; a++) {
+                float ar = dmr, ag = dmg, ab = dmb;
+                if (a == mdw_area_sel) {
+                    psolid(lx0 + 1, (float)aly, lx1 - 1, (float)(aly + ch + 1),
+                           acr * 0.3f, acg * 0.3f, acb * 0.3f, 0.8f, vp_w, vp_h);
+                    ar = txr; ag = txg; ab = txb;
+                }
+                char abuf[48];
+                lstrcpynA(abuf, mdw_area_names[a], 44);
+                ptext(sd_tx + 4, aly, abuf, ar, ag, ab, vp_w, vp_h, cw, ch);
+                aly += ch + 2;
+            }
+            sd_ty += list_h + 2;
+        }
+
+        /* Buttons: [Save] [Cancel] */
+        int btn_y = (int)sd_y1 - sd_pad - ch - 6;
+        int btn_w = 7 * cw + 10;
+        int btn_x0 = (int)sd_x + sd_pad;
+        int btn_x1 = btn_x0 + btn_w;
+        psolid((float)btn_x0, (float)btn_y, (float)btn_x1, (float)(btn_y + ch + 4),
+               acr * 0.4f + bgr * 0.3f, acg * 0.4f + bgg * 0.3f, acb * 0.4f + bgb * 0.3f,
+               1.0f, vp_w, vp_h);
+        psolid((float)btn_x0, (float)btn_y, (float)btn_x1, (float)btn_y + 1,
+               acr, acg, acb, 0.9f, vp_w, vp_h);
+        ptext(btn_x0 + 5, btn_y + 2, "Save", txr, txg, txb, vp_w, vp_h, cw, ch);
+        mdw_sd_btn_save_x0 = (float)btn_x0; mdw_sd_btn_save_x1 = (float)btn_x1;
+
+        btn_x0 = btn_x1 + 8;
+        btn_x1 = btn_x0 + btn_w;
+        psolid((float)btn_x0, (float)btn_y, (float)btn_x1, (float)(btn_y + ch + 4),
+               bgr * 0.5f, bgg * 0.5f, bgb * 0.5f, 1.0f, vp_w, vp_h);
+        psolid((float)btn_x0, (float)btn_y, (float)btn_x1, (float)btn_y + 1,
+               dmr, dmg, dmb, 0.9f, vp_w, vp_h);
+        ptext(btn_x0 + 5, btn_y + 2, "Cancel", txr, txg, txb, vp_w, vp_h, cw, ch);
+        mdw_sd_btn_cancel_x0 = (float)btn_x0; mdw_sd_btn_cancel_x1 = (float)btn_x1;
+    }
+
+    /* ---- Import prompt overlay ---- */
+    if (mdw_import_prompt && !mdw_save_showing) {
+        float ip_w = 320.0f * ui_scale;
+        float ip_h = 90.0f * ui_scale;
+        float ip_x = (x0 + x1 - ip_w) * 0.5f;
+        float ip_y = (y0 + y1 - ip_h) * 0.5f;
+        float ip_x1g = ip_x + ip_w, ip_y1g = ip_y + ip_h;
+        int ip_pad = (int)(8 * ui_scale);
+
+        psolid(x0, y0, x1, y1, 0.0f, 0.0f, 0.0f, 0.4f, vp_w, vp_h);
+        psolid(ip_x, ip_y, ip_x1g, ip_y1g, bgr * 0.6f, bgg * 0.6f, bgb * 0.6f, 0.95f, vp_w, vp_h);
+        psolid(ip_x, ip_y, ip_x1g, ip_y + 1, acr, acg, acb, 1.0f, vp_w, vp_h);
+
+        int ip_tx = (int)ip_x + ip_pad;
+        int ip_ty = (int)ip_y + ip_pad;
+        ptext(ip_tx, ip_ty, "Import to MegaMUD?", txr, txg, txb, vp_w, vp_h, cw, ch);
+        ip_ty += ch + 4;
+        ptext(ip_tx, ip_ty, mdw_save_status, 0.3f, 1.0f, 0.4f, vp_w, vp_h, cw, ch);
+        ip_ty += ch + 8;
+
+        /* [Import] button */
+        int btn_w = 8 * cw + 10;
+        int bx0 = ip_tx;
+        int bx1 = bx0 + btn_w;
+        psolid((float)bx0, (float)ip_ty, (float)bx1, (float)(ip_ty + ch + 4),
+               0.1f, 0.4f, 0.15f, 1.0f, vp_w, vp_h);
+        psolid((float)bx0, (float)ip_ty, (float)bx1, (float)ip_ty + 1,
+               0.3f, 1.0f, 0.4f, 0.9f, vp_w, vp_h);
+        ptext(bx0 + 5, ip_ty + 2, "Import", txr, txg, txb, vp_w, vp_h, cw, ch);
+        mdw_sd_btn_import_x0 = (float)bx0; mdw_sd_btn_import_x1 = (float)bx1;
+
+        /* [Loop] button — only for loops */
+        mdw_sd_btn_loop_x0 = 0; mdw_sd_btn_loop_x1 = 0;
+        if (mdw_import_is_loop) {
+            bx0 = bx1 + 8;
+            btn_w = 6 * cw + 10;
+            bx1 = bx0 + btn_w;
+            psolid((float)bx0, (float)ip_ty, (float)bx1, (float)(ip_ty + ch + 4),
+                   0.15f, 0.2f, 0.45f, 1.0f, vp_w, vp_h);
+            psolid((float)bx0, (float)ip_ty, (float)bx1, (float)ip_ty + 1,
+                   0.4f, 0.5f, 1.0f, 0.9f, vp_w, vp_h);
+            ptext(bx0 + 5, ip_ty + 2, "Loop", txr, txg, txb, vp_w, vp_h, cw, ch);
+            mdw_sd_btn_loop_x0 = (float)bx0; mdw_sd_btn_loop_x1 = (float)bx1;
+        }
+
+        /* [Cancel] button */
+        bx0 = bx1 + 8;
+        btn_w = 8 * cw + 10;
+        bx1 = bx0 + btn_w;
+        psolid((float)bx0, (float)ip_ty, (float)bx1, (float)(ip_ty + ch + 4),
+               bgr * 0.5f, bgg * 0.5f, bgb * 0.5f, 1.0f, vp_w, vp_h);
+        psolid((float)bx0, (float)ip_ty, (float)bx1, (float)ip_ty + 1,
+               dmr, dmg, dmb, 0.9f, vp_w, vp_h);
+        ptext(bx0 + 5, ip_ty + 2, "Cancel", txr, txg, txb, vp_w, vp_h, cw, ch);
+        mdw_sd_btn_icancel_x0 = (float)bx0; mdw_sd_btn_icancel_x1 = (float)bx1;
+
+        mdw_sd_x0 = ip_x; mdw_sd_y0 = ip_y; mdw_sd_x1 = ip_x1g; mdw_sd_y1 = ip_y1g;
+    }
+
+    /* ---- Code Room dialog overlay ---- */
+    if (mdw_code_showing) {
+        float cd_w = 300.0f * ui_scale;
+        float cd_h = 140.0f * ui_scale;
+        float cd_x = (x0 + x1 - cd_w) * 0.5f;
+        float cd_y = (y0 + y1 - cd_h) * 0.5f;
+        float cd_x1g = cd_x + cd_w, cd_y1g = cd_y + cd_h;
+        int cd_pad = (int)(8 * ui_scale);
+
+        psolid(x0, y0, x1, y1, 0.0f, 0.0f, 0.0f, 0.4f, vp_w, vp_h);
+        psolid(cd_x, cd_y, cd_x1g, cd_y1g, bgr * 0.6f, bgg * 0.6f, bgb * 0.6f, 0.95f, vp_w, vp_h);
+        psolid(cd_x, cd_y, cd_x1g, cd_y + 1, acr, acg, acb, 1.0f, vp_w, vp_h);
+
+        int cd_tx = (int)cd_x + cd_pad;
+        int cd_ty = (int)cd_y + cd_pad;
+
+        ptext(cd_tx, cd_ty, "Code Room", acr, acg, acb, vp_w, vp_h, cw, ch);
+        cd_ty += ch + 6;
+
+        /* Room name + area */
+        ptext(cd_tx, cd_ty, mdw_code_room_name, txr, txg, txb, vp_w, vp_h, cw, ch);
+        cd_ty += ch + 2;
+        if (mdw_code_area[0]) {
+            ptext(cd_tx, cd_ty, mdw_code_area, dmr, dmg, dmb, vp_w, vp_h, cw, ch);
+            cd_ty += ch + 2;
+        }
+        cd_ty += 4;
+
+        /* 4-char code input */
+        ptext(cd_tx, cd_ty, "Code (4 chars):", txr, txg, txb, vp_w, vp_h, cw, ch);
+        int inp_x = cd_tx + 16 * cw;
+        int inp_w = 6 * cw + 6;
+        psolid((float)inp_x, (float)(cd_ty - 2), (float)(inp_x + inp_w), (float)(cd_ty + ch + 2),
+               0.25f, 0.25f, 0.25f, 1.0f, vp_w, vp_h);
+        psolid((float)inp_x, (float)(cd_ty - 2), (float)(inp_x + inp_w), (float)(cd_ty - 1),
+               dmr, dmg, dmb, 0.8f, vp_w, vp_h);
+        ptext(inp_x + 3, cd_ty, mdw_code_input, txr, txg, txb, vp_w, vp_h, cw, ch);
+        if ((GetTickCount() / 500) & 1) {
+            int cxp = inp_x + 3 + (int)strlen(mdw_code_input) * cw;
+            psolid((float)cxp, (float)cd_ty, (float)cxp + 1, (float)(cd_ty + ch),
+                   txr, txg, txb, 1.0f, vp_w, vp_h);
+        }
+        cd_ty += ch + 8;
+
+        /* Status line */
+        if (mdw_code_status[0]) {
+            ptext(cd_tx, cd_ty, mdw_code_status, 1.0f, 0.6f, 0.2f, vp_w, vp_h, cw, ch);
+            cd_ty += ch + 4;
+        }
+
+        /* [OK] [Cancel] buttons */
+        int btn_w = 6 * cw + 10;
+        int bx0 = cd_tx, bx1 = bx0 + btn_w;
+        int btn_y = (int)cd_y1g - cd_pad - ch - 6;
+        float ok_r = (strlen(mdw_code_input) == 4) ? 0.1f : 0.2f;
+        float ok_g = (strlen(mdw_code_input) == 4) ? 0.4f : 0.2f;
+        float ok_b = (strlen(mdw_code_input) == 4) ? 0.15f : 0.2f;
+        psolid((float)bx0, (float)btn_y, (float)bx1, (float)(btn_y + ch + 4),
+               ok_r, ok_g, ok_b, 1.0f, vp_w, vp_h);
+        psolid((float)bx0, (float)btn_y, (float)bx1, (float)btn_y + 1,
+               ok_r + 0.2f, ok_g + 0.2f, ok_b + 0.2f, 0.9f, vp_w, vp_h);
+        ptext(bx0 + 5, btn_y + 2, "OK", txr, txg, txb, vp_w, vp_h, cw, ch);
+        mdw_cd_btn_ok_x0 = (float)bx0; mdw_cd_btn_ok_x1 = (float)bx1;
+
+        bx0 = bx1 + 8; bx1 = bx0 + btn_w;
+        psolid((float)bx0, (float)btn_y, (float)bx1, (float)(btn_y + ch + 4),
+               bgr * 0.5f, bgg * 0.5f, bgb * 0.5f, 1.0f, vp_w, vp_h);
+        psolid((float)bx0, (float)btn_y, (float)bx1, (float)btn_y + 1,
+               dmr, dmg, dmb, 0.9f, vp_w, vp_h);
+        ptext(bx0 + 5, btn_y + 2, "Cancel", txr, txg, txb, vp_w, vp_h, cw, ch);
+        mdw_cd_btn_cancel_x0 = (float)bx0; mdw_cd_btn_cancel_x1 = (float)bx1;
+
+        mdw_sd_x0 = cd_x; mdw_sd_y0 = cd_y; mdw_sd_x1 = cd_x1g; mdw_sd_y1 = cd_y1g;
+    }
+
     /* ---- Bottom controls strip ---- */
     mdw_ctrl_y0 = ctrl_y0;
     mdw_ctrl_y1 = ctrl_y1;
@@ -1582,6 +3185,28 @@ static void mdw_draw(int vp_w, int vp_h)
         psolid((float)bx0, (float)by1 - 1, (float)bx1, (float)by1, acr * 0.3f, acg * 0.3f, acb * 0.3f, 0.9f, vp_w, vp_h);
         psolid((float)bx0, (float)by0, (float)bx0 + 1, (float)by1, acr, acg, acb, 0.8f, vp_w, vp_h);
         psolid((float)bx1 - 1, (float)by0, (float)bx1, (float)by1, acr * 0.3f, acg * 0.3f, acb * 0.3f, 0.8f, vp_w, vp_h);
+        ptext(bx0 + 5, cy, lbl, txr, txg, txb, vp_w, vp_h, cw, ch);
+        cx = bx1 + 8;
+    }
+
+    /* [Code Room] button — color changes based on known status */
+    {
+        const char *lbl = mdw_cur_room_known ? mdw_cur_room_code : "Code";
+        float cbr, cbg, cbb;
+        if (mdw_cur_room_known) {
+            cbr = 0.1f; cbg = 0.35f; cbb = 0.15f;
+        } else {
+            cbr = 0.4f; cbg = 0.12f; cbb = 0.12f;
+        }
+        int bw = (int)strlen(lbl) * cw + 10;
+        if (bw < 6 * cw + 10) bw = 6 * cw + 10;
+        int bx0 = cx, bx1 = cx + bw;
+        int by0 = cy - 2, by1 = cy + ch + 2;
+        mdw_btn_code_x0 = (float)bx0; mdw_btn_code_x1 = (float)bx1;
+        psolid((float)bx0, (float)by0, (float)bx1, (float)by1,
+               cbr, cbg, cbb, 1.0f, vp_w, vp_h);
+        psolid((float)bx0, (float)by0, (float)bx1, (float)by0 + 1,
+               cbr + 0.2f, cbg + 0.2f, cbb + 0.2f, 0.9f, vp_w, vp_h);
         ptext(bx0 + 5, cy, lbl, txr, txg, txb, vp_w, vp_h, cw, ch);
     }
 
@@ -1709,6 +3334,26 @@ static int mdw_mouse_down(int mx, int my)
             mdw_input_focus = 0;
             return 1;
         }
+        if (fmx >= mdw_btn_code_x0 && fmx <= mdw_btn_code_x1 &&
+            mdw_cur_ri != 0xFFFFFFFF && mdw_cur_ri < mdw_room_count) {
+            MdwRoom *cr = &mdw_rooms[mdw_cur_ri];
+            if (mdw_cur_room_known) {
+                wsprintfA(mdw_code_status, "Already known: %s", mdw_cur_room_code);
+                mdw_code_status_tick = GetTickCount();
+                wsprintfA(mdw_save_status, "Already known: %s", mdw_cur_room_code);
+                mdw_save_status_tick = GetTickCount();
+            } else {
+                mdw_code_showing = 1;
+                mdw_code_input[0] = 0;
+                mdw_code_cksum = cr->checksum;
+                lstrcpynA(mdw_code_room_name, cr->name, sizeof(mdw_code_room_name));
+                mdw_code_area[0] = 0;
+                mdw_roomsmd_lookup(cr->checksum, NULL, 0, mdw_code_area, sizeof(mdw_code_area), NULL, 0);
+                mdw_code_status[0] = 0;
+            }
+            mdw_input_focus = 0;
+            return 1;
+        }
         if (fmx >= mdw_btn_zoom_in_x0 && fmx <= mdw_btn_zoom_in_x1) {
             mdw_zoom *= 1.2f; if (mdw_zoom > 10.0f) mdw_zoom = 10.0f;
             mdw_input_focus = 0;
@@ -1723,7 +3368,181 @@ static int mdw_mouse_down(int mx, int my)
         mdw_input_focus = 0;
         return 1;
     }
-    /* Content area = start pan (and drop input focus) */
+    /* ---- Code Room dialog click handling ---- */
+    if (mdw_code_showing) {
+        float fmx = (float)mx, fmy = (float)my;
+        if (fmx >= mdw_sd_x0 && fmx <= mdw_sd_x1 &&
+            fmy >= mdw_sd_y0 && fmy <= mdw_sd_y1) {
+            /* [OK] */
+            if (fmx >= mdw_cd_btn_ok_x0 && fmx <= mdw_cd_btn_ok_x1) {
+                if (strlen(mdw_code_input) != 4) {
+                    lstrcpyA(mdw_code_status, "Code must be 4 characters");
+                } else if (api && api->code_room) {
+                    int r = api->code_room(mdw_code_cksum, mdw_code_input,
+                                           mdw_code_area[0] ? mdw_code_area : "Unknown",
+                                           mdw_code_room_name);
+                    if (r == 0) {
+                        wsprintfA(mdw_save_status, "Coded: %s", mdw_code_input);
+                        mdw_save_status_tick = GetTickCount();
+                        mdw_cur_room_code_ri = 0xFFFFFFFF; /* force re-check */
+                        mdw_code_showing = 0;
+                    } else if (r == 1) {
+                        lstrcpyA(mdw_code_status, "Room already coded");
+                    } else {
+                        wsprintfA(mdw_code_status, "Failed (%d)", r);
+                    }
+                } else {
+                    lstrcpyA(mdw_code_status, "API not available");
+                }
+                return 1;
+            }
+            /* [Cancel] */
+            if (fmx >= mdw_cd_btn_cancel_x0 && fmx <= mdw_cd_btn_cancel_x1) {
+                mdw_code_showing = 0;
+                return 1;
+            }
+        }
+        return 1;
+    }
+    /* ---- Save dialog click handling ---- */
+    if (mdw_save_showing) {
+        float fmx = (float)mx, fmy = (float)my;
+        /* Click in name field */
+        if (fmy >= mdw_sd_y0 && fmy <= mdw_sd_y1) {
+            if (fmx >= mdw_sd_btn_save_x0 && fmx <= mdw_sd_btn_save_x1 &&
+                fmy >= mdw_sd_y1 - 30 * ui_scale) {
+                mdw_save_path();
+                return 1;
+            }
+            if (fmx >= mdw_sd_btn_cancel_x0 && fmx <= mdw_sd_btn_cancel_x1 &&
+                fmy >= mdw_sd_y1 - 30 * ui_scale) {
+                mdw_save_showing = 0;
+                return 1;
+            }
+            /* Field focus by click */
+            if (fmx >= mdw_sd_title_x0 && fmx <= mdw_sd_title_x1 && fmy < mdw_sd_name_x0)
+                mdw_save_field = 0;
+            else if (fmx >= mdw_sd_name_x0 && fmx <= mdw_sd_name_x1 && fmy < mdw_sd_author_x0)
+                mdw_save_field = 1;
+            else if (fmx >= mdw_sd_author_x0 && fmx <= mdw_sd_author_x1)
+                mdw_save_field = 2;
+            else if (fmx >= mdw_sd_area_x0 && fmx <= mdw_sd_area_x1)
+                mdw_save_field = 3;
+            /* Area list click */
+            if (mdw_save_field == 3 && fmy >= mdw_sd_area_list_y0 && fmy <= mdw_sd_area_list_y1) {
+                int ch2 = (int)(VSB_CHAR_H * ui_scale);
+                int row = (int)(fmy - mdw_sd_area_list_y0 - 2) / (ch2 + 2);
+                int idx = mdw_area_scroll + row;
+                if (idx >= 0 && idx < mdw_area_count) mdw_area_sel = idx;
+            }
+            return 1;
+        }
+        return 1; /* swallow all clicks while dialog is up */
+    }
+    /* ---- Import prompt click handling ---- */
+    if (mdw_import_prompt) {
+        float fmx = (float)mx, fmy = (float)my;
+        if (fmx >= mdw_sd_x0 && fmx <= mdw_sd_x1 &&
+            fmy >= mdw_sd_y0 && fmy <= mdw_sd_y1) {
+            /* [Import] — import only */
+            if (fmx >= mdw_sd_btn_import_x0 && fmx <= mdw_sd_btn_import_x1) {
+                if (api && api->import_path && mdw_import_mp_path[0]) {
+                    int r = api->import_path(mdw_import_mp_path);
+                    if (r == 0)
+                        wsprintfA(mdw_save_status, "Imported!");
+                    else
+                        wsprintfA(mdw_save_status, "Import failed (%d)", r);
+                } else {
+                    wsprintfA(mdw_save_status, "Import not available");
+                }
+                mdw_save_status_tick = GetTickCount();
+                mdw_import_prompt = 0;
+                return 1;
+            }
+            /* [Loop] — import + start looping */
+            if (mdw_import_is_loop &&
+                fmx >= mdw_sd_btn_loop_x0 && fmx <= mdw_sd_btn_loop_x1) {
+                if (api && api->import_path && mdw_import_mp_path[0]) {
+                    int r = api->import_path(mdw_import_mp_path);
+                    if (r == 0 && api->fake_remote && mdw_import_title[0]) {
+                        char cmd[160];
+                        wsprintfA(cmd, "loop %s", mdw_import_title);
+                        int lr = api->fake_remote(cmd);
+                        if (lr == 0)
+                            wsprintfA(mdw_save_status, "Imported + looping!");
+                        else
+                            wsprintfA(mdw_save_status, "Imported, loop start failed (%d)", lr);
+                    } else if (r == 0) {
+                        wsprintfA(mdw_save_status, "Imported (loop unavailable)");
+                    } else {
+                        wsprintfA(mdw_save_status, "Import failed (%d)", r);
+                    }
+                } else {
+                    wsprintfA(mdw_save_status, "Import not available");
+                }
+                mdw_save_status_tick = GetTickCount();
+                mdw_import_prompt = 0;
+                return 1;
+            }
+            /* [Cancel] */
+            if (fmx >= mdw_sd_btn_icancel_x0 && fmx <= mdw_sd_btn_icancel_x1) {
+                mdw_import_prompt = 0;
+                return 1;
+            }
+        }
+        return 1; /* swallow clicks while prompt is up */
+    }
+
+    /* ---- Path panel button clicks ---- */
+    if (mdw_show_path_panel) {
+        float fmx = (float)mx, fmy = (float)my;
+        if (fmx >= mdw_pp_x0 && fmx <= mdw_pp_x1 &&
+            fmy >= mdw_pp_y0 && fmy <= mdw_pp_y1) {
+            /* REC button */
+            if (fmx >= mdw_btn_rec_x0 && fmx <= mdw_btn_rec_x1 &&
+                fmy >= mdw_pp_y0 && fmy <= mdw_pp_y0 + 60) {
+                mdw_rec_active = !mdw_rec_active;
+                if (mdw_rec_active)
+                    mdw_log("[PATH] Recording started (button)\n");
+                else
+                    mdw_log("[PATH] Recording stopped (%u steps)\n", mdw_rec_n);
+                return 1;
+            }
+            /* CLR button */
+            if (fmx >= mdw_btn_clear_x0 && fmx <= mdw_btn_clear_x1 &&
+                fmy >= mdw_pp_y0 && fmy <= mdw_pp_y0 + 60) {
+                mdw_rec_clear();
+                mdw_rec_active = 0;
+                mdw_log("[PATH] Path cleared\n");
+                return 1;
+            }
+            /* UNDO button */
+            if (fmx >= mdw_btn_undo_x0 && fmx <= mdw_btn_undo_x1 &&
+                fmy >= mdw_pp_y0 && fmy <= mdw_pp_y0 + 60 && mdw_rec_n > 0) {
+                mdw_rec_undo();
+                return 1;
+            }
+            /* SAVE button */
+            if (fmx >= mdw_btn_save_x0 && fmx <= mdw_btn_save_x1 &&
+                fmy >= mdw_pp_y0 && fmy <= mdw_pp_y0 + 60 && mdw_rec_n > 0) {
+                mdw_save_dialog_open();
+                return 1;
+            }
+            /* MPX checkbox */
+            if (fmx >= mdw_btn_mpx_x0 && fmx <= mdw_btn_mpx_x1 + 30 &&
+                fmy >= mdw_pp_y0 && fmy <= mdw_pp_y0 + 60) {
+                mdw_rec_gen_mpx = !mdw_rec_gen_mpx;
+                return 1;
+            }
+            /* Clicked in panel area — take focus, consume */
+            mdw_path_focus = 1;
+            mdw_input_focus = 0;
+            return 1;
+        }
+    }
+
+    /* Content area = start pan (and drop path/input focus) */
+    mdw_path_focus = 0;
     mdw_input_focus = 0;
     mdw_panning = 1;
     mdw_pan_anchor_mx = (float)mx;
@@ -1825,6 +3644,25 @@ static int mdw_wheel(int mx, int my, int delta)
 {
     if (!mdw_visible) return 0;
     if (!mdw_hit_window(mx, my)) return 0;
+    /* Save dialog area list scroll */
+    if (mdw_save_showing && mdw_save_field == 2) {
+        if (delta > 0) mdw_area_scroll -= 2;
+        else mdw_area_scroll += 2;
+        if (mdw_area_scroll < 0) mdw_area_scroll = 0;
+        if (mdw_area_scroll > mdw_area_count - 6) mdw_area_scroll = mdw_area_count - 6;
+        if (mdw_area_scroll < 0) mdw_area_scroll = 0;
+        return 1;
+    }
+    /* Path panel scroll */
+    if (mdw_show_path_panel && (float)mx >= mdw_pp_x0 && (float)mx <= mdw_pp_x1) {
+        if (delta > 0) mdw_path_scroll += 3;
+        else mdw_path_scroll -= 3;
+        if (mdw_path_scroll < 0) mdw_path_scroll = 0;
+        int max_scroll = (int)mdw_rec_n - 5;
+        if (mdw_path_scroll > max_scroll) mdw_path_scroll = max_scroll;
+        if (mdw_path_scroll < 0) mdw_path_scroll = 0;
+        return 1;
+    }
     float old = mdw_zoom;
     if (delta > 0) mdw_zoom *= 1.2f;
     else mdw_zoom /= 1.2f;
@@ -1883,7 +3721,211 @@ static int mdw_key_down(unsigned int vk)
         return 0;
     }
 
+    /* Save dialog captures all keys when visible */
+    if (mdw_save_showing) {
+        char *buf = NULL;
+        int cap = 0;
+        if (mdw_save_field == 0) { buf = mdw_save_title;  cap = (int)sizeof(mdw_save_title); }
+        if (mdw_save_field == 1) { buf = mdw_save_name;   cap = 9; }
+        if (mdw_save_field == 2) { buf = mdw_save_author; cap = (int)sizeof(mdw_save_author); }
+        if (mdw_save_field == 3 && mdw_area_sel < 0) { buf = mdw_save_area; cap = (int)sizeof(mdw_save_area); }
+
+        if (vk == VK_BACK && buf) {
+            int n = (int)strlen(buf);
+            if (n > 0) buf[n - 1] = 0;
+            mdw_swallow_char = 1; return 1;
+        }
+        if (vk == VK_TAB) {
+            mdw_save_field = (mdw_save_field + 1) % 4;
+            mdw_swallow_char = 1; return 1;
+        }
+        if (vk == VK_RETURN) {
+            mdw_save_path();
+            mdw_swallow_char = 1; return 1;
+        }
+        if (vk == VK_ESCAPE) {
+            mdw_save_showing = 0;
+            mdw_swallow_char = 1; return 1;
+        }
+        if (vk == VK_UP && mdw_save_field == 3) {
+            if (mdw_area_sel > 0) mdw_area_sel--;
+            else if (mdw_area_sel < 0 && mdw_area_count > 0) mdw_area_sel = mdw_area_count - 1;
+            mdw_swallow_char = 1; return 1;
+        }
+        if (vk == VK_DOWN && mdw_save_field == 3) {
+            if (mdw_area_sel < mdw_area_count - 1) mdw_area_sel++;
+            else mdw_area_sel = -1;  /* back to custom */
+            mdw_swallow_char = 1; return 1;
+        }
+        /* Let WM_CHAR handle text insertion */
+        return 0;
+    }
+    /* Code Room dialog keyboard */
+    if (mdw_code_showing) {
+        if (vk == VK_RETURN) {
+            if (strlen(mdw_code_input) == 4 && api && api->code_room) {
+                int r = api->code_room(mdw_code_cksum, mdw_code_input,
+                                       mdw_code_area[0] ? mdw_code_area : "Unknown",
+                                       mdw_code_room_name);
+                if (r == 0) {
+                    wsprintfA(mdw_save_status, "Coded: %s", mdw_code_input);
+                    mdw_save_status_tick = GetTickCount();
+                    mdw_cur_room_code_ri = 0xFFFFFFFF;
+                    mdw_code_showing = 0;
+                } else if (r == 1) {
+                    lstrcpyA(mdw_code_status, "Room already coded");
+                } else {
+                    wsprintfA(mdw_code_status, "Failed (%d)", r);
+                }
+            } else if (strlen(mdw_code_input) != 4) {
+                lstrcpyA(mdw_code_status, "Code must be 4 characters");
+            }
+            mdw_swallow_char = 1; return 1;
+        }
+        if (vk == VK_ESCAPE) {
+            mdw_code_showing = 0;
+            mdw_swallow_char = 1; return 1;
+        }
+        if (vk == VK_BACK) {
+            int l = (int)strlen(mdw_code_input);
+            if (l > 0) mdw_code_input[l - 1] = '\0';
+            mdw_swallow_char = 1; return 1;
+        }
+        /* Let WM_CHAR handle text input */
+        return 0;
+    }
+    /* Import prompt: I/Enter=Import, L=Loop, Esc=Cancel */
+    if (mdw_import_prompt) {
+        if (vk == 'I' || vk == VK_RETURN) {
+            if (api && api->import_path && mdw_import_mp_path[0]) {
+                int r = api->import_path(mdw_import_mp_path);
+                if (r == 0)
+                    wsprintfA(mdw_save_status, "Imported!");
+                else
+                    wsprintfA(mdw_save_status, "Import failed (%d)", r);
+            } else {
+                wsprintfA(mdw_save_status, "Import not available");
+            }
+            mdw_save_status_tick = GetTickCount();
+            mdw_import_prompt = 0;
+            mdw_swallow_char = 1; return 1;
+        }
+        if (vk == 'L' && mdw_import_is_loop) {
+            if (api && api->import_path && mdw_import_mp_path[0]) {
+                int r = api->import_path(mdw_import_mp_path);
+                if (r == 0 && api->fake_remote && mdw_import_title[0]) {
+                    char cmd[160];
+                    wsprintfA(cmd, "loop %s", mdw_import_title);
+                    int lr = api->fake_remote(cmd);
+                    if (lr == 0)
+                        wsprintfA(mdw_save_status, "Imported + looping!");
+                    else
+                        wsprintfA(mdw_save_status, "Imported, loop start failed (%d)", lr);
+                } else if (r == 0) {
+                    wsprintfA(mdw_save_status, "Imported (loop unavailable)");
+                } else {
+                    wsprintfA(mdw_save_status, "Import failed (%d)", r);
+                }
+            } else {
+                wsprintfA(mdw_save_status, "Import not available");
+            }
+            mdw_save_status_tick = GetTickCount();
+            mdw_import_prompt = 0;
+            mdw_swallow_char = 1; return 1;
+        }
+        if (vk == VK_ESCAPE) {
+            mdw_import_prompt = 0;
+            mdw_swallow_char = 1; return 1;
+        }
+        mdw_swallow_char = 1; return 1;
+    }
+
+    /* C = toggle recording */
+    if (vk == 'C' && !(GetKeyState(VK_CONTROL) & 0x8000)) {
+        mdw_rec_active = !mdw_rec_active;
+        if (mdw_rec_active) {
+            mdw_log("[PATH] Recording started\n");
+        } else {
+            mdw_log("[PATH] Recording stopped (%u steps)\n", mdw_rec_n);
+        }
+        mdw_swallow_char = 1;
+        return 1;
+    }
+
+    /* S = open save dialog (if we have steps) */
+    if (vk == 'S' && !(GetKeyState(VK_CONTROL) & 0x8000)) {
+        if (mdw_rec_n > 0 && !mdw_save_showing) {
+            mdw_save_dialog_open();
+        }
+        mdw_swallow_char = 1;
+        return 1;
+    }
+
+    /* U = undo last step */
+    if (vk == 'U' && !(GetKeyState(VK_CONTROL) & 0x8000)) {
+        if (mdw_rec_n > 0) mdw_rec_undo();
+        mdw_swallow_char = 1;
+        return 1;
+    }
+
+    /* P = toggle path panel */
+    if (vk == 'P' && !(GetKeyState(VK_CONTROL) & 0x8000)) {
+        mdw_show_path_panel = !mdw_show_path_panel;
+        mdw_swallow_char = 1;
+        return 1;
+    }
+
     if (!(GetKeyState(VK_NUMLOCK) & 1)) return 0;
+
+    /* Numpad walks the MAP when path panel has focus. If recording, also capture steps. */
+    if (mdw_path_focus && mdw_cur_ri < mdw_room_count) {
+        int dir = -1;
+        switch (vk) {
+        case VK_NUMPAD8: dir = 0; break; /* N  */
+        case VK_NUMPAD2: dir = 1; break; /* S  */
+        case VK_NUMPAD6: dir = 2; break; /* E  */
+        case VK_NUMPAD4: dir = 3; break; /* W  */
+        case VK_NUMPAD9: dir = 4; break; /* NE */
+        case VK_NUMPAD7: dir = 5; break; /* NW */
+        case VK_NUMPAD3: dir = 6; break; /* SE */
+        case VK_NUMPAD1: dir = 7; break; /* SW */
+        case VK_NUMPAD0: dir = 8; break; /* U  */
+        case VK_DECIMAL: dir = 9; break; /* D  */
+        }
+        if (dir >= 0) {
+            MdwRoom *r = &mdw_rooms[mdw_cur_ri];
+            MdwExit *found = NULL;
+            for (int i = 0; i < r->exit_count; i++) {
+                MdwExit *ex = &mdw_exits[r->exit_ofs + i];
+                if (ex->dir == dir) { found = ex; break; }
+            }
+            if (found) {
+                uint32_t tri = mdw_room_lookup(found->tmap, found->troom);
+                if (tri < mdw_room_count && tri != mdw_cur_ri) {
+                    if (mdw_rec_active) {
+                        if (mdw_rec_start_ri == 0xFFFFFFFF)
+                            mdw_rec_start_ri = mdw_cur_ri;
+                        mdw_rec_append(mdw_cur_ri, found);
+                    }
+                    if (mdw_rooms[tri].map != mdw_cur_map_view || mdw_rooms[tri].gx == INT16_MIN) {
+                        for (uint32_t k = 0; k < mdw_room_count; k++)
+                            mdw_rooms[k].gx = mdw_rooms[k].gy = INT16_MIN;
+                        mdw_layout_bfs(mdw_rooms[tri].map, tri);
+                        mdw_cur_map_view = mdw_rooms[tri].map;
+                    }
+                    mdw_cur_ri = tri;
+                    mdw_pulse_tick = GetTickCount();
+                    if (mdw_rooms[tri].gx != INT16_MIN) {
+                        mdw_view_x = mdw_rooms[tri].gx * 20.0f;
+                        mdw_view_y = mdw_rooms[tri].gy * 20.0f;
+                    }
+                }
+            }
+            mdw_swallow_char = 1;
+            return 1;
+        }
+    }
+
     switch (vk) {
     case VK_ADD:      mdw_zoom *= 1.2f; if (mdw_zoom > 10.0f) mdw_zoom = 10.0f; mdw_swallow_char = 1; return 1;
     case VK_SUBTRACT: mdw_zoom /= 1.2f; if (mdw_zoom < 0.25f) mdw_zoom = 0.25f; mdw_swallow_char = 1; return 1;
@@ -1894,6 +3936,45 @@ static int mdw_key_down(unsigned int vk)
 /* WM_CHAR router for the map-panel input boxes. Returns 1 if consumed. */
 static int mdw_char_input(unsigned int ch)
 {
+    /* Code Room dialog text input — uppercase alpha only, 4 chars max */
+    if (mdw_code_showing) {
+        if (ch >= 32 && ch < 127) {
+            char c = (char)ch;
+            if (c >= 'a' && c <= 'z') c -= 32; /* uppercase */
+            if ((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) {
+                int n = (int)strlen(mdw_code_input);
+                if (n < 4) { mdw_code_input[n] = c; mdw_code_input[n + 1] = 0; }
+            }
+            return 1;
+        }
+        if (ch == '\b') {
+            int n = (int)strlen(mdw_code_input);
+            if (n > 0) mdw_code_input[n - 1] = 0;
+            return 1;
+        }
+        return 1;
+    }
+    /* Save dialog text input */
+    if (mdw_save_showing) {
+        char *buf = NULL;
+        int cap = 0;
+        if (mdw_save_field == 0) { buf = mdw_save_title;  cap = (int)sizeof(mdw_save_title); }
+        if (mdw_save_field == 1) { buf = mdw_save_name;   cap = 9; }
+        if (mdw_save_field == 2) { buf = mdw_save_author; cap = (int)sizeof(mdw_save_author); }
+        if (mdw_save_field == 3 && mdw_area_sel < 0) { buf = mdw_save_area; cap = (int)sizeof(mdw_save_area); }
+        if (buf && ch >= 32 && ch < 127) {
+            int n = (int)strlen(buf);
+            if (n < cap - 1) { buf[n] = (char)ch; buf[n + 1] = 0; }
+            return 1;
+        }
+        if (ch == '\b' && buf) {
+            int n = (int)strlen(buf);
+            if (n > 0) buf[n - 1] = 0;
+            return 1;
+        }
+        return 1;  /* swallow all chars while dialog open */
+    }
+
     if (mdw_input_focus != 1 && mdw_input_focus != 2) return 0;
     char *buf = mdw_input_focus == 1 ? mdw_map_buf : mdw_room_buf;
     int cap = mdw_input_focus == 1 ? (int)sizeof(mdw_map_buf) : (int)sizeof(mdw_room_buf);
