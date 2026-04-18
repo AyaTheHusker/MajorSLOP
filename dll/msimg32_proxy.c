@@ -3858,7 +3858,6 @@ static void api_inject_command(const char *cmd);
 enum {
     DPW_DONE = 0,
     DPW_READY,
-    DPW_ARRIVE_SETTLE,
     DPW_SNEAK_WAIT,
     DPW_HIDE_WAIT,
     DPW_DIR_SENT,
@@ -3868,7 +3867,6 @@ enum {
 
 #define DPW_MOVE_TIMEOUT_MS   15000
 #define DPW_SNEAK_TIMEOUT_MS   5000
-#define DPW_ARRIVE_SETTLE_MS    600
 #define DPW_HIDE_TIMEOUT_MS    5000
 #define DPW_REST_CHECK_MS      1000
 #define DPW_COMBAT_SETTLE_MS    500
@@ -3893,6 +3891,49 @@ static unsigned int     dpw_dst   = 0;
 static unsigned int     dpw_last_cksum = 0;
 static DWORD            dpw_timeout = 0;
 static DWORD            dpw_combat_end_tick = 0;
+static int              dpw_last_hostiles = 0;
+static char             dpw_label[128] = "";
+
+static void dpw_update_statusbar(void)
+{
+    HWND mw = FindWindowA("MMMAIN", NULL);
+    if (!mw) return;
+    HWND sb = GetDlgItem(mw, MEGAMUD_STATUSBAR_ID);
+    if (!sb) return;
+
+    char text[256];
+    if (dpw_state != DPW_DONE && dpw_label[0]) {
+        sprintf(text, "%s (%d/%d)", dpw_label, dpw_step, dpw_count);
+    } else if (dpw_state != DPW_DONE) {
+        sprintf(text, "DynPath (%d/%d)", dpw_step, dpw_count);
+    } else {
+        sprintf(text, "No Path");
+    }
+
+    if (loc_map != 0 || loc_room != 0) {
+        char tmp[128];
+        sprintf(tmp, " | Map:%d Room:%d", loc_map, loc_room);
+        strcat(text, tmp);
+    }
+    SendMessageA(sb, SB_SETTEXTA, 0, (LPARAM)text);
+}
+
+/* Replicate FUN_00453960: count hostile entities in the current room.
+ * Entity list at struct+0x1ED4 (count) / struct+0x1EE0 (ptr array).
+ * Each entity is a pointer; entity[0]==2 means hostile target. */
+static int dpw_count_hostiles(unsigned char *sbp)
+{
+    int count = *(int *)(sbp + 0x1ED4);
+    if (count <= 0) return 0;
+    int **arr = *(int ***)(sbp + 0x1EE0);
+    if (!arr) return 0;
+    int hostiles = 0;
+    for (int i = 0; i < count; i++) {
+        int *ent = arr[i];
+        if (ent && ent[0] == 2) hostiles++;
+    }
+    return hostiles;
+}
 
 static void dpw_tick(void)
 {
@@ -3922,49 +3963,63 @@ static void dpw_tick(void)
     int is_hiding   = *(int *)(sbp + 0x5690);
     int busy_lock   = *(int *)(sbp + 0x4CFC);
     unsigned int room_ck = *(unsigned int *)(sbp + OFF_ROOM_CHECKSUM);
+    int hostiles    = dpw_count_hostiles(sbp);
+
+    if (hostiles != dpw_last_hostiles) {
+        logmsg("[dynpath] hostiles changed %d->%d, sending Enter to refresh\n",
+               dpw_last_hostiles, hostiles);
+        type_into_megamud("");
+        dpw_last_hostiles = hostiles;
+    }
+
+    int prev_state = dpw_state;
+    int prev_step  = dpw_step;
 
     switch (dpw_state) {
     case DPW_READY:
-        /* -- Path complete? -- */
         if (dpw_step >= dpw_count) {
             dpw_state = DPW_DONE;
             InterlockedExchange(&dp_active, 0);
             logmsg("[dynpath] arrived at %08X (%d steps)\n", room_ck, dpw_count);
+            dpw_update_statusbar();
             break;
         }
 
-        /* -- Exact MegaMUD early-exit checks from FUN_00404ed0 -- */
         if (busy_lock) break;
         if (cur_hp < 1) {
             logmsg("[dynpath] dead (HP=%d), aborting\n", cur_hp);
             dpw_state = DPW_DONE;
             InterlockedExchange(&dp_active, 0);
+            dpw_update_statusbar();
             break;
         }
         if (is_held) break;
         if (is_blinded && !ign_blind) break;
 
-        /* -- Combat check (mirrors FUN_004066b0 + main flow) -- */
-        if (in_combat) {
+        if (in_combat || (hostiles > 0 && auto_combat)) {
             if (auto_combat) {
+                logmsg("[dynpath] READY->COMBAT_WAIT (combat=%d hostiles=%d)\n",
+                       in_combat, hostiles);
                 dpw_state = DPW_COMBAT_WAIT;
             } else {
                 api_inject_command(dpw_steps[dpw_step].dir);
+                InterlockedIncrement(&auto_rm_queue_count);
+                type_into_megamud("rm");
                 dpw_last_cksum = room_ck;
                 dpw_timeout = GetTickCount();
                 dpw_step++;
                 dpw_state = DPW_DIR_SENT;
+                logmsg("[dynpath] READY->DIR_SENT (flee past, combat=%d hostiles=%d) step %d/%d '%s'\n",
+                       in_combat, hostiles, dpw_step, dpw_count, dpw_steps[dpw_step-1].dir);
             }
             break;
         }
 
-        /* -- Post-combat rest check ONLY --
-         * FUN_00404ed0 does NOT check IS_RESTING — sending a direction
-         * breaks rest automatically. We only wait for rest recovery
-         * after combat ends with low HP, so MegaMUD can auto-heal. */
         if (dpw_combat_end_tick) {
             int hp_rest_thresh = max_hp > 0 ? (max_hp * hp_rest_pct) / 100 : 0;
             if (cur_hp < hp_rest_thresh) {
+                logmsg("[dynpath] READY->REST_WAIT (HP=%d/%d thresh=%d)\n",
+                       cur_hp, max_hp, hp_rest_thresh);
                 dpw_state = DPW_REST_WAIT;
                 dpw_timeout = GetTickCount();
                 dpw_combat_end_tick = 0;
@@ -3975,35 +4030,39 @@ static void dpw_tick(void)
             }
         }
 
-        /* -- Sneak check (mirrors FUN_004066b0 lines 176-186) --
-         * FUN_004066b0 checks: if monsters present, don't try to sneak.
-         * We can't call FUN_00453960 but IN_COMBAT covers the main case. */
-        if (auto_sneak && !is_sneaking) {
+        if (auto_sneak && !is_sneaking && hostiles <= 0) {
+            logmsg("[dynpath] READY->SNEAK_WAIT\n");
             api_inject_command("sneak");
             dpw_timeout = GetTickCount();
             dpw_state = DPW_SNEAK_WAIT;
             break;
         }
 
-        /* -- Hide check -- */
-        if (auto_hide && !is_hiding) {
+        if (auto_hide && !is_hiding && hostiles <= 0) {
+            logmsg("[dynpath] READY->HIDE_WAIT\n");
             api_inject_command("hide");
             dpw_timeout = GetTickCount();
             dpw_state = DPW_HIDE_WAIT;
             break;
         }
 
-        /* -- All clear: send direction (mirrors FUN_00404ed0 line 1199) -- */
         api_inject_command(dpw_steps[dpw_step].dir);
+        InterlockedIncrement(&auto_rm_queue_count);
+        type_into_megamud("rm");
         dpw_last_cksum = room_ck;
         dpw_timeout = GetTickCount();
         dpw_step++;
         dpw_state = DPW_DIR_SENT;
+        logmsg("[dynpath] READY->DIR_SENT step %d/%d '%s'\n",
+               dpw_step, dpw_count, dpw_steps[dpw_step-1].dir);
+        dpw_update_statusbar();
         break;
 
     case DPW_SNEAK_WAIT:
         if (in_combat) {
             dpw_state = auto_combat ? DPW_COMBAT_WAIT : DPW_READY;
+            logmsg("[dynpath] SNEAK_WAIT->%s (combat)\n",
+                   dpw_state == DPW_COMBAT_WAIT ? "COMBAT_WAIT" : "READY");
             break;
         }
         if (is_sneaking) {
@@ -4017,6 +4076,7 @@ static void dpw_tick(void)
             break;
         }
         if (GetTickCount() - dpw_timeout > DPW_SNEAK_TIMEOUT_MS) {
+            logmsg("[dynpath] SNEAK_WAIT timeout -> READY\n");
             dpw_state = DPW_READY;
         }
         break;
@@ -4024,6 +4084,8 @@ static void dpw_tick(void)
     case DPW_HIDE_WAIT:
         if (in_combat) {
             dpw_state = auto_combat ? DPW_COMBAT_WAIT : DPW_READY;
+            logmsg("[dynpath] HIDE_WAIT->%s (combat)\n",
+                   dpw_state == DPW_COMBAT_WAIT ? "COMBAT_WAIT" : "READY");
             break;
         }
         if (is_hiding) {
@@ -4031,30 +4093,23 @@ static void dpw_tick(void)
             break;
         }
         if (GetTickCount() - dpw_timeout > DPW_HIDE_TIMEOUT_MS) {
-            dpw_state = DPW_READY;
-        }
-        break;
-
-    case DPW_ARRIVE_SETTLE:
-        if (in_combat) {
-            dpw_state = auto_combat ? DPW_COMBAT_WAIT : DPW_READY;
-            break;
-        }
-        if (GetTickCount() - dpw_timeout >= DPW_ARRIVE_SETTLE_MS) {
+            logmsg("[dynpath] HIDE_WAIT timeout -> READY\n");
             dpw_state = DPW_READY;
         }
         break;
 
     case DPW_DIR_SENT:
         if (room_ck != dpw_last_cksum && room_ck != 0) {
-            InterlockedIncrement(&auto_rm_queue_count);
-            type_into_megamud("rm");
-            dpw_timeout = GetTickCount();
-            dpw_state = DPW_ARRIVE_SETTLE;
+            logmsg("[dynpath] DIR_SENT->READY (room changed %08X->%08X) step %d/%d\n",
+                   dpw_last_cksum, room_ck, dpw_step, dpw_count);
+            dpw_state = DPW_READY;
+            dpw_update_statusbar();
             break;
         }
-        if (in_combat) {
+        if (in_combat || (hostiles > 0 && auto_combat)) {
             if (auto_combat) {
+                logmsg("[dynpath] DIR_SENT->COMBAT_WAIT (combat=%d hostiles=%d)\n",
+                       in_combat, hostiles);
                 dpw_state = DPW_COMBAT_WAIT;
             }
             break;
@@ -4063,19 +4118,20 @@ static void dpw_tick(void)
             logmsg("[dynpath] move timeout at step %d, aborting\n", dpw_step);
             dpw_state = DPW_DONE;
             InterlockedExchange(&dp_active, 0);
+            dpw_update_statusbar();
         }
         break;
 
     case DPW_COMBAT_WAIT:
         if (!in_combat) {
+            logmsg("[dynpath] COMBAT_WAIT->READY (combat ended, sending Enter to refresh)\n");
+            type_into_megamud("");
             dpw_combat_end_tick = GetTickCount();
             dpw_state = DPW_READY;
         }
         break;
 
     case DPW_REST_WAIT: {
-        /* Wait for HP >= HP_FULL_PCT and MANA >= MANA_FULL_PCT.
-         * Mirrors FUN_00479dc0 rest-completion check exactly. */
         int hp_full_thresh = max_hp > 0 ? (max_hp * hp_full_pct) / 100 : 0;
         int mn_full_thresh = max_mana > 0 ? (max_mana * mn_full_pct) / 100 : 0;
         int hp_done = (cur_hp >= hp_full_thresh);
@@ -4083,15 +4139,20 @@ static void dpw_tick(void)
 
         if (in_combat) {
             dpw_state = auto_combat ? DPW_COMBAT_WAIT : DPW_READY;
+            logmsg("[dynpath] REST_WAIT->%s (combat)\n",
+                   dpw_state == DPW_COMBAT_WAIT ? "COMBAT_WAIT" : "READY");
             break;
         }
 
         if (hp_done && mn_done) {
+            logmsg("[dynpath] REST_WAIT->READY (HP=%d/%d MANA=%d/%d, fully rested)\n",
+                   cur_hp, max_hp, cur_mana, max_mana);
             dpw_state = DPW_READY;
             break;
         }
 
         if (!is_resting && !is_medit && hp_done) {
+            logmsg("[dynpath] REST_WAIT->READY (not resting, HP OK)\n");
             dpw_state = DPW_READY;
             break;
         }
@@ -4120,6 +4181,7 @@ static void dynpath_do_inject(void)
     dpw_step  = 0;
     dpw_last_cksum = *(unsigned int *)((unsigned char *)struct_base + OFF_ROOM_CHECKSUM);
     dpw_timeout = GetTickCount();
+    dpw_last_hostiles = dpw_count_hostiles((unsigned char *)struct_base);
 
     dp_active_dst = dp_dst;
     InterlockedExchange(&dp_active, 1);
@@ -4127,6 +4189,7 @@ static void dynpath_do_inject(void)
 
     logmsg("[dynpath] walk started: %d steps, src=%08X dst=%08X\n",
            dpw_count, dp_src, dp_dst);
+    dpw_update_statusbar();
 }
 
 static void dynpath_check_arrival(void)
@@ -4164,6 +4227,23 @@ void WINAPI dynpath_set_suspend_events(int val)
 int WINAPI dynpath_get_suspend_events(void)
 {
     return (int)dp_suspend_events;
+}
+
+void WINAPI dynpath_get_progress(int *out_step, int *out_count, int *out_active)
+{
+    if (out_step)   *out_step   = dpw_step;
+    if (out_count)  *out_count  = dpw_count;
+    if (out_active) *out_active = (int)dp_active;
+}
+
+void WINAPI dynpath_set_label(const char *label)
+{
+    if (label) {
+        strncpy(dpw_label, label, sizeof(dpw_label) - 1);
+        dpw_label[sizeof(dpw_label) - 1] = 0;
+    } else {
+        dpw_label[0] = 0;
+    }
 }
 
 int WINAPI get_player_strength(void)

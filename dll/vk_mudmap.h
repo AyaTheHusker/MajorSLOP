@@ -1809,7 +1809,7 @@ static int mdw_goto_room(int map_num, int room_num)
  * ================================================================ */
 
 #define MDW_DYNPATH_MAX_STEPS 500
-#define MDW_DYNPATH_MAX_ROOMS 8192
+#define MDW_DYNPATH_MAX_ROOMS 65536
 #define MDW_DYNPATH_MAX_REQS  16
 
 typedef struct {
@@ -3533,18 +3533,34 @@ static void mdw_draw(int vp_w, int vp_h)
         mdw_sd_x0 = cd_x; mdw_sd_y0 = cd_y; mdw_sd_x1 = cd_x1g; mdw_sd_y1 = cd_y1g;
     }
 
-    /* Walk status message (fades after 5s) */
-    if (mdw_walk_status[0]) {
-        DWORD elapsed = GetTickCount() - mdw_walk_status_tick;
-        if (elapsed > 5000) {
-            mdw_walk_status[0] = 0;
-        } else {
-            float alpha = elapsed > 4000 ? (5000 - elapsed) / 1000.0f : 1.0f;
+    /* Live dynpath progress (persistent while walking) */
+    {
+        int dp_step = 0, dp_count = 0, dp_on = 0;
+        if (pfn_dynpath_get_progress)
+            pfn_dynpath_get_progress(&dp_step, &dp_count, &dp_on);
+
+        if (dp_on && dp_count > 0) {
+            char prog[128];
+            wsprintfA(prog, "DynPath  %d / %d", dp_step, dp_count);
             int sy = (int)(ctrl_y0 - ch - 4);
             psolid(c_x0, (float)sy - 1, c_x1, (float)sy + ch + 2,
-                   0.0f, 0.0f, 0.0f, 0.7f * alpha, vp_w, vp_h);
-            ptext((int)c_x0 + 6, sy, mdw_walk_status,
-                  1.0f, 0.9f, 0.3f, vp_w, vp_h, cw, ch);
+                   0.0f, 0.0f, 0.0f, 0.7f, vp_w, vp_h);
+            ptext((int)c_x0 + 6, sy, prog,
+                  0.3f, 1.0f, 0.5f, vp_w, vp_h, cw, ch);
+
+            mdw_walk_status[0] = 0;
+        } else if (mdw_walk_status[0]) {
+            DWORD elapsed = GetTickCount() - mdw_walk_status_tick;
+            if (elapsed > 5000) {
+                mdw_walk_status[0] = 0;
+            } else {
+                float alpha = elapsed > 4000 ? (5000 - elapsed) / 1000.0f : 1.0f;
+                int sy = (int)(ctrl_y0 - ch - 4);
+                psolid(c_x0, (float)sy - 1, c_x1, (float)sy + ch + 2,
+                       0.0f, 0.0f, 0.0f, 0.7f * alpha, vp_w, vp_h);
+                ptext((int)c_x0 + 6, sy, mdw_walk_status,
+                      1.0f, 0.9f, 0.3f, vp_w, vp_h, cw, ch);
+            }
         }
     }
 
@@ -4016,6 +4032,13 @@ static int mdw_mouse_down(int mx, int my)
                 MdwDynPath *cdp = &mdw_dynpath_result;
                 if (cdp->steps && cdp->count > 0 && pfn_dynpath_inject &&
                     mdw_confirm_dest_ri < mdw_room_count) {
+                    if (pfn_dynpath_set_label) {
+                        char lbl[128];
+                        wsprintfA(lbl, "%d,%d to %d,%d",
+                                  mdw_rooms[mdw_cur_ri].map, mdw_rooms[mdw_cur_ri].room,
+                                  mdw_rooms[mdw_confirm_dest_ri].map, mdw_rooms[mdw_confirm_dest_ri].room);
+                        pfn_dynpath_set_label(lbl);
+                    }
                     int rv = pfn_dynpath_inject(
                         (dynpath_step_t *)cdp->steps, cdp->count,
                         mdw_rooms[mdw_cur_ri].checksum,
@@ -4149,8 +4172,13 @@ static int mdw_rbutton_down(int mx, int my)
     float x0 = mdw_x, y0 = mdw_y;
     float x1 = x0 + mdw_w, y1 = y0 + mdw_h;
     float tb_y1 = y0 + (float)titlebar_h;
+    int cw = (int)(VSB_CHAR_W * ui_scale);
+    int ctrl_h_r = ch + 10;
+    float ctrl_y0_r = y1 - 6 - (float)ctrl_h_r;
+    int pp_cols_r = 30;
+    int pp_w_px_r = mdw_show_path_panel ? (pp_cols_r * cw + 16) : 0;
     float c_x0 = x0 + 6, c_y0 = tb_y1 + 3;
-    float c_x1 = x1 - 6, c_y1 = y1 - 6;
+    float c_x1 = x1 - 6 - (float)pp_w_px_r, c_y1 = ctrl_y0_r - 2;
     if ((float)mx < c_x0 || (float)mx > c_x1 ||
         (float)my < c_y0 || (float)my > c_y1) return 0;
 
@@ -4222,10 +4250,16 @@ static int mdw_dblclick(int mx, int my)
     float x0 = mdw_x, y0 = mdw_y;
     float x1 = x0 + mdw_w, y1 = y0 + mdw_h;
     float tb_y1 = y0 + (float)titlebar_h;
+    int ctrl_h = ch + 10;
+    float ctrl_y0 = y1 - 6 - (float)ctrl_h;
+    int pp_cols = 30;
+    int pp_w_px = mdw_show_path_panel ? (pp_cols * (int)(VSB_CHAR_W * ui_scale) + 16) : 0;
     float c_x0 = x0 + 6, c_y0 = tb_y1 + 3;
-    float c_x1 = x1 - 6, c_y1 = y1 - 6;
+    float c_x1 = x1 - 6 - (float)pp_w_px, c_y1 = ctrl_y0 - 2;
     if ((float)mx < c_x0 || (float)mx > c_x1 ||
-        (float)my < c_y0 || (float)my > c_y1) return 0;
+        (float)my < c_y0 || (float)my > c_y1) {
+        return 0;
+    }
 
     float cell = 20.0f * mdw_zoom;
     float tile = 7.0f * mdw_zoom;
@@ -4283,6 +4317,13 @@ static int mdw_dblclick(int mx, int my)
         return 1;
     }
 
+    if (pfn_dynpath_set_label) {
+        char lbl[128];
+        wsprintfA(lbl, "%d,%d to %d,%d",
+                  mdw_rooms[mdw_cur_ri].map, mdw_rooms[mdw_cur_ri].room,
+                  mdw_rooms[best_i].map, mdw_rooms[best_i].room);
+        pfn_dynpath_set_label(lbl);
+    }
     int rv = pfn_dynpath_inject((dynpath_step_t *)dp->steps, dp->count,
                                 mdw_rooms[mdw_cur_ri].checksum,
                                 mdw_rooms[best_i].checksum);
@@ -4460,6 +4501,14 @@ static int mdw_key_down(unsigned int vk)
             MdwDynPath *cdp = &mdw_dynpath_result;
             if (cdp->steps && cdp->count > 0 && pfn_dynpath_inject &&
                 mdw_confirm_dest_ri < mdw_room_count) {
+                if (api && api->inject_command) api->inject_command("stand");
+                if (pfn_dynpath_set_label) {
+                    char lbl[128];
+                    wsprintfA(lbl, "%d,%d to %d,%d",
+                              mdw_rooms[mdw_cur_ri].map, mdw_rooms[mdw_cur_ri].room,
+                              mdw_rooms[mdw_confirm_dest_ri].map, mdw_rooms[mdw_confirm_dest_ri].room);
+                    pfn_dynpath_set_label(lbl);
+                }
                 int rv = pfn_dynpath_inject(
                     (dynpath_step_t *)cdp->steps, cdp->count,
                     mdw_rooms[mdw_cur_ri].checksum,

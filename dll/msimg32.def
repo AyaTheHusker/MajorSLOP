@@ -17,3 +17,5 @@ EXPORTS
     dynpath_get_suspend_events @19
     get_player_strength @20
     get_player_picklocks @21
+    dynpath_get_progress @22
+    dynpath_set_label @23

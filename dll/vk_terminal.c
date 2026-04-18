@@ -779,7 +779,9 @@ static int ttf_loaded[MAX_TTF_FONTS] = {0};
 #define VKM_EXT_SEP3     9   /* separator */
 #define VKM_EXT_SAVE     10  /* Save Settings */
 #define VKM_EXT_RESET    11  /* Reset to Defaults */
-#define VKM_EXT_COUNT    12
+#define VKM_EXT_SEP4     12  /* separator */
+#define VKM_EXT_PAIRANDROID 13  /* Pair Android Device (QR) */
+#define VKM_EXT_COUNT    14
 
 /* Extras submenu items */
 #define VKM_SUB_XTRA2    8
@@ -825,6 +827,32 @@ static pfn_room_cksum_t pfn_get_room_checksum = NULL;
 static pfn_location_t   pfn_get_location = NULL;
 static pfn_auto_rm_q_t  pfn_auto_rm_queue_peek = NULL;
 static pfn_auto_rm_q_t  pfn_auto_rm_queue_consume = NULL;
+typedef void (WINAPI *pfn_auto_rm_inc_t)(void);
+static pfn_auto_rm_inc_t pfn_auto_rm_queue_increment = NULL;
+
+typedef struct {
+    unsigned int   cksum;
+    unsigned short flags;
+    char           dir[32];
+} dynpath_step_t;
+typedef int (WINAPI *pfn_dynpath_inject_t)(dynpath_step_t *steps, int count,
+                                           unsigned int src, unsigned int dst);
+static pfn_dynpath_inject_t pfn_dynpath_inject = NULL;
+
+typedef void (WINAPI *pfn_dynpath_set_suspend_t)(int);
+typedef int  (WINAPI *pfn_dynpath_get_suspend_t)(void);
+static pfn_dynpath_set_suspend_t pfn_dynpath_set_suspend_events = NULL;
+static pfn_dynpath_get_suspend_t pfn_dynpath_get_suspend_events = NULL;
+
+typedef void (WINAPI *pfn_dynpath_get_progress_t)(int *, int *, int *);
+static pfn_dynpath_get_progress_t pfn_dynpath_get_progress = NULL;
+
+typedef void (WINAPI *pfn_dynpath_set_label_t)(const char *);
+static pfn_dynpath_set_label_t pfn_dynpath_set_label = NULL;
+
+typedef int (WINAPI *pfn_get_stat_t)(void);
+static pfn_get_stat_t pfn_get_player_strength  = NULL;
+static pfn_get_stat_t pfn_get_player_picklocks = NULL;
 static int          rm_bridge_resolved = 0;
 
 static void rm_bridge_resolve(void)
@@ -841,6 +869,14 @@ static void rm_bridge_resolve(void)
     pfn_get_location      = (pfn_location_t)GetProcAddress(mm, "get_location");
     pfn_auto_rm_queue_peek    = (pfn_auto_rm_q_t)GetProcAddress(mm, "auto_rm_queue_peek");
     pfn_auto_rm_queue_consume = (pfn_auto_rm_q_t)GetProcAddress(mm, "auto_rm_queue_consume");
+    pfn_auto_rm_queue_increment = (pfn_auto_rm_inc_t)GetProcAddress(mm, "auto_rm_queue_increment");
+    pfn_dynpath_inject = (pfn_dynpath_inject_t)GetProcAddress(mm, "dynpath_inject");
+    pfn_dynpath_set_suspend_events = (pfn_dynpath_set_suspend_t)GetProcAddress(mm, "dynpath_set_suspend_events");
+    pfn_dynpath_get_suspend_events = (pfn_dynpath_get_suspend_t)GetProcAddress(mm, "dynpath_get_suspend_events");
+    pfn_get_player_strength  = (pfn_get_stat_t)GetProcAddress(mm, "get_player_strength");
+    pfn_get_player_picklocks = (pfn_get_stat_t)GetProcAddress(mm, "get_player_picklocks");
+    pfn_dynpath_get_progress = (pfn_dynpath_get_progress_t)GetProcAddress(mm, "dynpath_get_progress");
+    pfn_dynpath_set_label = (pfn_dynpath_set_label_t)GetProcAddress(mm, "dynpath_set_label");
 }
 
 static int auto_rm_queue_peek_safe(void)
@@ -905,6 +941,47 @@ static void vox_resolve(void) {
     vox_wave_pos_ptr  = (volatile int *)GetProcAddress(vm, "voice_wave_pos");
     vox_resolved = (vox_level_ptr && vox_active_ptr) ? 1 : -1;
 }
+
+/* QR pairing overlay state — functions defined after push_solid/push_text forward declarations */
+typedef const char *(*pfn_ab_conn_str_t)(void);
+typedef int (*pfn_ab_gen_qr_t)(void);
+typedef int (*pfn_ab_qr_size_t)(void);
+typedef int (*pfn_ab_qr_mod_t)(int, int);
+typedef int (*pfn_ab_client_count_t)(void);
+
+static pfn_ab_conn_str_t    pfn_ab_conn_str    = NULL;
+static pfn_ab_gen_qr_t      pfn_ab_gen_qr      = NULL;
+static pfn_ab_qr_size_t     pfn_ab_qr_size     = NULL;
+static pfn_ab_qr_mod_t      pfn_ab_qr_mod      = NULL;
+static pfn_ab_client_count_t pfn_ab_client_count = NULL;
+static int ab_resolved = 0;
+static int qr_visible = 0;
+static int qr_paired  = 0;
+static DWORD qr_paired_tick = 0;
+static DWORD qr_show_tick   = 0;
+static char qr_conn_str[256] = {0};
+#define QR_EXPIRY_MS 120000
+
+static void ab_resolve(void)
+{
+    if (ab_resolved) return;
+    ab_resolved = -1;
+    HMODULE h = GetModuleHandleA("android_bridge.dll");
+    if (!h) h = GetModuleHandleA("android_bridge");
+    if (!h) h = LoadLibraryA("plugins\\android_bridge.dll");
+    if (!h) return;
+    pfn_ab_conn_str    = (pfn_ab_conn_str_t)GetProcAddress(h, "ab_get_connection_string");
+    pfn_ab_gen_qr      = (pfn_ab_gen_qr_t)GetProcAddress(h, "ab_generate_qr");
+    pfn_ab_qr_size     = (pfn_ab_qr_size_t)GetProcAddress(h, "ab_qr_get_size");
+    pfn_ab_qr_mod      = (pfn_ab_qr_mod_t)GetProcAddress(h, "ab_qr_get_module");
+    pfn_ab_client_count = (pfn_ab_client_count_t)GetProcAddress(h, "ab_client_count");
+    if (pfn_ab_conn_str && pfn_ab_gen_qr && pfn_ab_qr_size && pfn_ab_qr_mod)
+        ab_resolved = 1;
+}
+
+static void qr_show(void);
+static void qr_draw(int vp_w, int vp_h);
+static int  qr_mouse_down(int mx, int my);
 
 /* Sound settings panel state */
 static int   snd_visible = 0;
@@ -4294,6 +4371,162 @@ static void push_solid(float x0, float y0, float x1, float y1,
     #undef S2Y
 }
 
+/* ---- QR Code Pairing Overlay (implementations) ---- */
+
+static void qr_show(void)
+{
+    ab_resolve();
+    if (ab_resolved != 1) return;
+    int sz = pfn_ab_gen_qr();
+    if (sz <= 0) return;
+    const char *cs = pfn_ab_conn_str();
+    if (cs) strncpy(qr_conn_str, cs, sizeof(qr_conn_str) - 1);
+    qr_visible = 1;
+    qr_paired  = 0;
+    qr_paired_tick = 0;
+    qr_show_tick = GetTickCount();
+}
+
+static void qr_draw(int vp_w, int vp_h)
+{
+    if (!qr_visible) return;
+    ab_resolve();
+    if (ab_resolved != 1) { qr_visible = 0; return; }
+
+    if (!qr_paired && pfn_ab_client_count && pfn_ab_client_count() > 0) {
+        qr_paired = 1;
+        qr_paired_tick = GetTickCount();
+    }
+    if (qr_paired && GetTickCount() - qr_paired_tick > 2500) {
+        qr_visible = 0;
+        qr_paired  = 0;
+        return;
+    }
+
+    const ui_theme_t *t = &ui_themes[current_theme];
+    int cw = (int)(VKM_CHAR_W * ui_scale), ch = (int)(VKM_CHAR_H * ui_scale);
+    int pad = (int)(12 * ui_scale);
+    int text_h = ch + 4;
+
+    if (qr_paired) {
+        int pw = (int)(320 * ui_scale), ph = text_h * 3 + pad * 2;
+        int px0 = (vp_w - pw) / 2, py0 = (vp_h - ph) / 2;
+
+        push_solid(0, 0, vp_w, vp_h, 0.0f, 0.0f, 0.0f, 0.6f, vp_w, vp_h);
+        push_solid(px0, py0, px0 + pw, py0 + ph,
+                   t->bg[0], t->bg[1], t->bg[2], 0.95f, vp_w, vp_h);
+        push_solid(px0, py0, px0 + pw, py0 + 1,
+                   0.0f, 0.8f, 0.4f, 1.0f, vp_w, vp_h);
+        push_solid(px0, py0 + ph - 1, px0 + pw, py0 + ph,
+                   0.0f, 0.8f, 0.4f, 1.0f, vp_w, vp_h);
+        push_solid(px0, py0, px0 + 1, py0 + ph,
+                   0.0f, 0.8f, 0.4f, 1.0f, vp_w, vp_h);
+        push_solid(px0 + pw - 1, py0, px0 + pw, py0 + ph,
+                   0.0f, 0.8f, 0.4f, 1.0f, vp_w, vp_h);
+
+        push_text(px0 + pad, py0 + pad, "PAIRING SUCCESSFUL",
+                  0.0f, 1.0f, 0.5f, vp_w, vp_h, cw, ch);
+        push_text(px0 + pad, py0 + pad + text_h, "Device connected",
+                  t->text[0] * 0.7f, t->text[1] * 0.7f, t->text[2] * 0.7f,
+                  vp_w, vp_h, cw, ch);
+        return;
+    }
+
+    int qr_sz = pfn_ab_qr_size();
+    if (qr_sz <= 0) { qr_visible = 0; return; }
+
+    int quiet = 2;
+    int modules = qr_sz + quiet * 2;
+
+    int max_px = (int)(vp_h * 0.40f);
+    int cell_px = max_px / modules;
+    if (cell_px < 3) cell_px = 3;
+    int qr_px = modules * cell_px;
+
+    int panel_w = qr_px + pad * 2;
+    int panel_h = text_h + pad + qr_px + pad + text_h * 2 + pad;
+    if (panel_w < 300) panel_w = 300;
+    int px0 = (vp_w - panel_w) / 2;
+    int py0 = (vp_h - panel_h) / 2;
+
+    push_solid(0, 0, vp_w, vp_h, 0.0f, 0.0f, 0.0f, 0.6f, vp_w, vp_h);
+
+    push_solid(px0, py0, px0 + panel_w, py0 + panel_h,
+               t->bg[0], t->bg[1], t->bg[2], 0.95f, vp_w, vp_h);
+
+    push_solid(px0, py0, px0 + panel_w, py0 + 1,
+               t->accent[0], t->accent[1], t->accent[2], 0.8f, vp_w, vp_h);
+    push_solid(px0, py0 + panel_h - 1, px0 + panel_w, py0 + panel_h,
+               t->accent[0], t->accent[1], t->accent[2], 0.8f, vp_w, vp_h);
+    push_solid(px0, py0, px0 + 1, py0 + panel_h,
+               t->accent[0], t->accent[1], t->accent[2], 0.8f, vp_w, vp_h);
+    push_solid(px0 + panel_w - 1, py0, px0 + panel_w, py0 + panel_h,
+               t->accent[0], t->accent[1], t->accent[2], 0.8f, vp_w, vp_h);
+
+    int ty = py0 + pad / 2;
+    push_text(px0 + pad, ty, "Scan to Pair",
+              t->accent[0], t->accent[1], t->accent[2], vp_w, vp_h, cw, ch);
+    push_text(px0 + panel_w - pad - cw, ty, "X",
+              t->text[0] * 0.6f, t->text[1] * 0.6f, t->text[2] * 0.6f, vp_w, vp_h, cw, ch);
+
+    int qr_x0 = px0 + (panel_w - qr_px) / 2;
+    int qr_y0 = ty + text_h + pad / 2;
+
+    push_solid(qr_x0, qr_y0, qr_x0 + qr_px, qr_y0 + qr_px,
+               1.0f, 1.0f, 1.0f, 1.0f, vp_w, vp_h);
+
+    for (int my = 0; my < qr_sz; my++) {
+        for (int mx = 0; mx < qr_sz; mx++) {
+            if (pfn_ab_qr_mod(mx, my)) {
+                int cx = qr_x0 + (mx + quiet) * cell_px;
+                int cy = qr_y0 + (my + quiet) * cell_px;
+                push_solid(cx, cy, cx + cell_px, cy + cell_px,
+                           0.0f, 0.0f, 0.0f, 1.0f, vp_w, vp_h);
+            }
+        }
+    }
+
+    int info_y = qr_y0 + qr_px + pad / 2;
+    if (qr_conn_str[0]) {
+        char addr[128];
+        const char *p = qr_conn_str;
+        if (strncmp(p, "slop://", 7) == 0) p += 7;
+        const char *slash = strchr(p, '/');
+        if (slash) {
+            int n = (int)(slash - p);
+            if (n > (int)sizeof(addr) - 1) n = (int)sizeof(addr) - 1;
+            memcpy(addr, p, n);
+            addr[n] = 0;
+        } else {
+            strncpy(addr, p, sizeof(addr) - 1);
+        }
+        push_text(px0 + pad, info_y, addr,
+                  t->text[0], t->text[1], t->text[2], vp_w, vp_h, cw, ch);
+    }
+    DWORD elapsed = GetTickCount() - qr_show_tick;
+    if (elapsed >= QR_EXPIRY_MS) {
+        qr_visible = 0;
+        return;
+    }
+    int secs_left = (int)((QR_EXPIRY_MS - elapsed) / 1000);
+    char timer_buf[64];
+    _snprintf(timer_buf, sizeof(timer_buf), "Expires in %d:%02d - scan now",
+              secs_left / 60, secs_left % 60);
+    push_text(px0 + pad, info_y + text_h, timer_buf,
+              secs_left < 30 ? 0.8f : t->text[0] * 0.5f,
+              secs_left < 30 ? 0.3f : t->text[1] * 0.5f,
+              secs_left < 30 ? 0.2f : t->text[2] * 0.5f,
+              vp_w, vp_h, cw, ch);
+}
+
+static int qr_mouse_down(int mx, int my)
+{
+    if (!qr_visible) return 0;
+    (void)mx; (void)my;
+    qr_visible = 0;
+    return 1;
+}
+
 /* Terminal visualizations (boulders, matrix rain, vectroids) */
 #include "viz_fx.c"
 
@@ -6116,7 +6349,7 @@ static void vkm_draw(int vp_w, int vp_h)
                 } else if (i == VKM_EXT_COLOR) {
                     label = "Color/Brightness";
                     is_active = clr_visible;
-                } else if (i == VKM_EXT_SEP1 || i == VKM_EXT_SEP2 || i == VKM_EXT_SEP3) {
+                } else if (i == VKM_EXT_SEP1 || i == VKM_EXT_SEP2 || i == VKM_EXT_SEP3 || i == VKM_EXT_SEP4) {
                     label = "";
                 } else if (i == VKM_EXT_CONSOLE) {
                     label = "MMUDPy Console";
@@ -6138,6 +6371,10 @@ static void vkm_draw(int vp_w, int vp_h)
                     label = "Save Settings";
                 } else if (i == VKM_EXT_RESET) {
                     label = "Reset to Defaults";
+                } else if (i == VKM_EXT_SEP4) {
+                    label = "";
+                } else if (i == VKM_EXT_PAIRANDROID) {
+                    label = "Pair Android Device";
                 }
             } else if (vkm_sub == VKM_SUB_XTRA2) {
                 if (i == VKM_X2_VIZ) {
@@ -8035,6 +8272,9 @@ static void vkt_build_vertices(void)
     /* File picker sits above every panel & context menu — modal */
     fp_draw(vp_w, vp_h);
 
+    /* QR pairing overlay — modal, on top of everything except floating text */
+    qr_draw(vp_w, vp_h);
+
     /* Floating text on top of EVERYTHING (last = topmost, uses ui font atlas) */
     vft_quad_start = quad_count;
     vft_draw(vp_w, vp_h);
@@ -8098,8 +8338,11 @@ static int numpad_handle(WPARAM vk, int ctrl, int alt, int shift)
     input_send_raw(cmd);
     /* If "rm every step" is on AND this is a plain walk (no pick/disarm/bash),
      * chase with "rm" so the Location: line refreshes on every step. */
-    if (!ctrl && !alt && !shift && rm_every_step_get_safe())
+    if (!ctrl && !alt && !shift && rm_every_step_get_safe()) {
+        rm_bridge_resolve();
+        if (pfn_auto_rm_queue_increment) pfn_auto_rm_queue_increment();
         input_send_raw("rm");
+    }
     /* Swallow the WM_CHAR that TranslateMessage will generate — otherwise
      * "8" also lands in the terminal input box while we're also sending "n"
      * to the MUD. */
@@ -10883,6 +11126,8 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         int my = mouse_ty((short)HIWORD(lParam));
         /* FILE PICKER IS MODAL — nothing else can grab this click. */
         if (fp_visible()) { fp_mouse_down(mx, my); return 0; }
+        /* QR OVERLAY IS MODAL — any click dismisses it */
+        if (qr_mouse_down(mx, my)) return 0;
         /* Z-ORDER GATE: when the root context menu is open, swallow the
          * LBUTTONDOWN so it can't bleed through to MudAMP / panels beneath.
          * The actual menu item selection fires on LBUTTONUP. */
@@ -11118,6 +11363,8 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
     case WM_LBUTTONDBLCLK: {
         int mx = mouse_tx((short)LOWORD(lParam));
         int my = mouse_ty((short)HIWORD(lParam));
+        /* Double-click on map room — walk to it */
+        if (mdw_dblclick(mx, my)) return 0;
         /* Double-click in P&L content area — execute immediately */
         if (pl_wnd_open && pl_hit(mx, my)) {
             int lx = mx - (int)pl_x, ly = my - (int)pl_y;
@@ -11332,6 +11579,8 @@ vkm_click_handler:
                 vkt_save_settings();
             } else if (si == VKM_EXT_RESET) {
                 vkt_reset_settings();
+            } else if (si == VKM_EXT_PAIRANDROID) {
+                qr_show();
             }
             vkm_open = 0;
             vkm_sub = VKM_SUB_NONE;
@@ -17336,7 +17585,131 @@ static slop_command_t vkt_commands[] = {
     { "vft_help",             "vft_help",                  "",  "v", "Show full VFT command reference" },
     { "vft_fonts",            "vft_list_fonts",            "",  "v", "List available VFT display fonts" },
     { "vft_set_font",         "vft_set_font",              "i", "i", "Set VFT font (0-4)" },
+    /* Android Pairing */
+    { "pair",                 "vkt_pair_android",          "",  "v", "Show QR code to pair Android device" },
 };
+
+__declspec(dllexport) void vkt_pair_android(void) { qr_show(); }
+
+/* ---- Map Walker API for cross-DLL access (android_bridge) ---- */
+
+__declspec(dllexport) int vkt_mdw_loaded(void) { return mdw_loaded; }
+__declspec(dllexport) int vkt_mdw_cur_map(void) { return mdw_loaded ? (int)mdw_cur_map_view : -1; }
+__declspec(dllexport) int vkt_mdw_cur_room_map(void) {
+    return (mdw_loaded && mdw_cur_ri < mdw_room_count) ? (int)mdw_rooms[mdw_cur_ri].map : -1;
+}
+__declspec(dllexport) int vkt_mdw_cur_room_num(void) {
+    return (mdw_loaded && mdw_cur_ri < mdw_room_count) ? (int)mdw_rooms[mdw_cur_ri].room : -1;
+}
+
+#define MDW_SERBUF (1024*1024)
+static char mdw_serbuf[MDW_SERBUF];
+
+__declspec(dllexport) const char *vkt_mdw_serialize_map(void)
+{
+    if (!mdw_loaded) return NULL;
+
+    int pos = 0, left = MDW_SERBUF;
+    #define SER(...) do { \
+        int _n = _snprintf(mdw_serbuf + pos, left, __VA_ARGS__); \
+        if (_n < 0 || _n >= left) goto ser_overflow; \
+        pos += _n; left -= _n; \
+    } while(0)
+
+    int *ri_seq = (int *)calloc(mdw_room_count, sizeof(int));
+    if (!ri_seq) return NULL;
+    for (uint32_t i = 0; i < mdw_room_count; i++) ri_seq[i] = -1;
+
+    int cur_seq = -1, seq = 0;
+    for (uint32_t i = 0; i < mdw_room_count; i++) {
+        MdwRoom *r = &mdw_rooms[i];
+        if (r->map != mdw_cur_map_view || r->gx == INT16_MIN) continue;
+        ri_seq[i] = seq;
+        if (i == mdw_cur_ri) cur_seq = seq;
+        seq++;
+    }
+
+    SER("{\"map\":%u,\"cur\":%d,\"rooms\":[", (unsigned)mdw_cur_map_view, cur_seq);
+
+    int first = 1;
+    for (uint32_t i = 0; i < mdw_room_count; i++) {
+        MdwRoom *r = &mdw_rooms[i];
+        if (r->map != mdw_cur_map_view || r->gx == INT16_MIN) continue;
+        int known = 0;
+        char code[8] = "";
+        if (api && api->room_is_known)
+            known = api->room_is_known(r->checksum, code, sizeof(code));
+        char esc[128];
+        int j = 0;
+        for (int k = 0; r->name[k] && j < 120; k++) {
+            if (r->name[k] == '"' || r->name[k] == '\\') esc[j++] = '\\';
+            esc[j++] = r->name[k];
+        }
+        esc[j] = 0;
+        if (!first) SER(",");
+        first = 0;
+        SER("{\"m\":%u,\"r\":%u,\"x\":%d,\"y\":%d,\"n\":%u,\"s\":%u,\"p\":%u,\"l\":%u,\"nm\":\"%s\",\"k\":%d,\"c\":\"%s\"}",
+            (unsigned)r->map, (unsigned)r->room, (int)r->gx, (int)r->gy,
+            (unsigned)r->npc, (unsigned)r->shop, (unsigned)r->spell,
+            (unsigned)r->lair_count, esc, known, known ? code : "");
+    }
+
+    SER("],\"exits\":[");
+    first = 1;
+    for (uint32_t i = 0; i < mdw_room_count; i++) {
+        MdwRoom *r = &mdw_rooms[i];
+        if (r->map != mdw_cur_map_view || r->gx == INT16_MIN) continue;
+        int si = ri_seq[i];
+        for (uint32_t e = 0; e < r->exit_count; e++) {
+            MdwExit *ex = &mdw_exits[r->exit_ofs + e];
+            int ti = -1;
+            if (ex->tmap == mdw_cur_map_view) {
+                uint32_t ni = mdw_room_lookup(ex->tmap, ex->troom);
+                if (ni != 0xFFFFFFFF && ni < mdw_room_count) ti = ri_seq[ni];
+            }
+            if (!first) SER(",");
+            first = 0;
+            SER("{\"s\":%d,\"d\":%u,\"f\":%u,\"ti\":%d}", si, (unsigned)ex->dir, (unsigned)ex->flags, ti);
+        }
+    }
+
+    SER("]}");
+    free(ri_seq);
+    mdw_serbuf[pos] = 0;
+    return mdw_serbuf;
+
+ser_overflow:
+    free(ri_seq);
+    return NULL;
+    #undef SER
+}
+
+/* ---- Icon Bar API for cross-DLL access (android_bridge) ---- */
+
+__declspec(dllexport) const char *vkt_icon_states(void)
+{
+    static char buf[256];
+    vib_read_states();
+    int pos = 0;
+    pos += _snprintf(buf + pos, sizeof(buf) - pos, "{\"count\":%d,\"names\":[", (int)VIB_BTN_COUNT);
+    for (int i = 0; i < (int)VIB_BTN_COUNT; i++) {
+        if (i > 0) buf[pos++] = ',';
+        pos += _snprintf(buf + pos, sizeof(buf) - pos, "\"%s\"", vib_buttons[i].tip);
+    }
+    pos += _snprintf(buf + pos, sizeof(buf) - pos, "],\"states\":[");
+    for (int i = 0; i < (int)VIB_BTN_COUNT; i++) {
+        if (i > 0) buf[pos++] = ',';
+        pos += _snprintf(buf + pos, sizeof(buf) - pos, "%d", vib_states[i]);
+    }
+    pos += _snprintf(buf + pos, sizeof(buf) - pos, "]}");
+    buf[pos] = 0;
+    return buf;
+}
+
+__declspec(dllexport) void vkt_icon_toggle(int idx)
+{
+    vib_click(idx);
+}
 
 __declspec(dllexport) slop_command_t *slop_get_commands(int *count)
 {
@@ -17941,9 +18314,9 @@ static int vkt_init(const slop_api_t *a)
     vkt_load_settings();
     apply_theme_palette(current_theme);
     input_buf[0] = '\0';
-    /* Map Walker was persisted as visible → preload the bin so the window
-     * doesn't come up showing "Load a map database..." */
-    if (mdw_visible) mdw_try_load();
+    /* Always load map data so Android remote can access it even when the
+     * Map Walker panel is not visible on desktop */
+    mdw_try_load();
 
     mr_init();
 
