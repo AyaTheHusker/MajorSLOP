@@ -1091,6 +1091,268 @@ Functions discovered via Ghidra disassembly of megamud.exe. All are cdecl unless
 
 ---
 
+## Step Advancement Function (FUN_00404ed0)
+
+**Decompiled 2026-04-18 via Ghidra headless.** This is the core function that advances
+the character one step along a path. 3310 bytes at VA 0x00404ED0. Called from the main
+state machine when MegaMUD decides it's time to try moving. Returns 0 (no action), 1 (action
+taken, wait), or 2 (special/completion).
+
+### Execution Flow (exact order)
+
+```
+FUN_00404ed0(byte *param_1)   // param_1 = struct base
+
+1. EARLY BLOCKS — return 0 immediately if:
+   - struct+0x4CFC != 0  (internal lock / busy flag)
+   - PATHING(0x5664)==0 OR 0x5788==1 OR AUTO_ROAMING(0x566C)==1
+     → calls FUN_00402df0(struct, 0) first (sell/buy/bank detour check)
+   - CUR_HP(0x53D4) < 1  (dead)
+   - IS_HELD(0x56CC) != 0
+   - IS_BLINDED(0x56AC) != 0 AND IGNORE_BLIND(0x3A38) == 0
+   - 0x5790!=0 AND 0x5508==0 AND 0x358C==0  (search-gate)
+
+2. TELEPORT CHECK (if 0x37E4 != 0 AND step_data_ptr(0x58A8) == 0):
+   - Compares room checksum 0x5884 against hardcoded city checksums
+   - Sends "sys goto <city>\r" for: newhaven, silvermere, lostcity,
+     khazarad, rhudaur, support
+   - Clears path file, updates destination checksum, returns 2
+
+3. PATH FILE LOAD:
+   - If PATH_FILE(0x5834) is empty → calls VA_VERIFY_PATH(0x00428FA0)
+   - If step_data_ptr(0x58A8)==0 → calls VA_PARSE_MP(0x00460050)
+   - Returns 0 if parse fails
+
+4. STEP 0 INITIALIZATION (CUR_PATH_STEP(0x5898)==0):
+   - Clears 0x356C
+   - Calls FUN_00407da0 (auto-trainer check)
+   - Calls FUN_00402df0(struct, 1) (sell/buy/bank detour)
+
+5. EXPERIENCE RATE CHECK (looping only):
+   - If at destination room AND looping AND exp rate too low → stop path,
+     display "[Experience rate too low!]"
+
+6. PATH COMPLETE (PATH_TOTAL_STEPS(0x5894) <= CUR_PATH_STEP(0x5898)):
+   - Try chaining to next path segment
+   - Call FUN_00406490 (cash sharing with party)
+   - Call FUN_00407da0 (trainer), FUN_00402df0 (sell/buy/bank)
+   - Signal state change: struct+0x5444 |= 1
+
+7. ROOM CHECKSUM VERIFICATION:
+   - Current room must match expected step checksum
+   - Handles path resyncing, "Path step updated" messages
+   - "Uncertain room" fallback after 2 mismatches
+   - Re-routes via VA_VERIFY_PATH if lost after 3+ mismatches
+   - Sets MODE=0x11 (lost) if completely lost
+
+8. LIGHT CHECK:
+   - FUN_00439570: scans equipped items for light source (item type 0x06)
+   - If room needs light and no light equipped → FUN_0043b7d0 removes
+     light source item ("remove <item>\r"), sets 0x56A8=1, returns 1
+
+9. SEARCH CHECK:
+   - If 0x358C!=0 (search enabled), calls FUN_00405fe0 for search exits
+   - If 0x5508!=0 AND looping AND 0x3A4C!=0, also calls FUN_00405fe0
+
+10. "STOPPED BEFORE ENTERING" CHECK:
+    - On last step, if destination room has hostile mobs (via FUN_004536f0),
+      stops path: "[Stopped Before Entering]", returns 0
+
+11. DIRECTION RESOLUTION:
+    - FUN_0048c300 converts direction string → index (0=N,1=S,...9=down)
+    - Returns 0xFFFFFFFF for non-standard directions
+
+12. DOOR HANDLING — FUN_00404600(struct, dir_idx, step_flags, dir_str):
+    - Trap search: "search <dir>\r" if trap flag set (step_flags & 0x200)
+    - Trap disarm: "disarm trap <dir>\r"
+    - Door open: "open <dir>\r" if door state == 5 (closed)
+    - Lock pick: "pi <dir>\r" if AUTO_PICK(0x37CC) and door locked
+    - Door bash: "bash <dir>\r" as fallback
+    - Key/item interaction for special doors
+    - Returns 1 if action pending (wait), 0 if clear
+
+13. ★ THE GATE CHECK — FUN_004066b0(struct):
+    Returns 0 = proceed with move, 1 = action pending (wait).
+    Checks IN ORDER:
+    a. AUTO_SNEAK(0x4D20)==0 AND 0x5760==0 → return 0 (nothing needed)
+    b. 0x5410==0 AND 0x5818==0 → return 0
+    c. 0x5778 != 0 → return 0 (already doing something)
+    d. ACTIVITY_STATE(0x54C0)==0x17 (sneaking) → return 1 (wait)
+    e. IN_COMBAT(0x5698) != 0 → return 0 (don't sneak during combat)
+    f. FUN_00453960 checks monster count → if > 0, return 0
+    g. Tick-count timing check (enough time since last action?)
+    h. If ACTIVITY_STATE==3 or 5 (resting/meditating) AND 0x5788 → return 0
+    i. FUN_0040b8f0(struct, 6): equipment check
+    j. Backstab weapon management:
+       - Remove shield for BS: "remove <shield>\r"
+       - Remove weapon for BS with hands: "remove <weapon>\r"
+       - Equip BS weapon: "equip <weapon>\r"
+       - Equip shield for BS: "equip <shield>\r"
+    k. If already sneaking (IS_SNEAKING(0x5688) != 0) → return 0
+    l. SET IS_SNEAKING=1, clear 0x5760, clear IS_HIDING
+    m. Set ACTIVITY_STATE=0x17, send "sneak\r", return 1
+
+14. MODE SET:
+    - If MODE(0x54BC)==0 or MODE==0xB (idle): set to 0xE + (LOOPING!=0)
+      → MODE=0xE (walking) or MODE=0xF (looping)
+    - If MODE==0xE (walking), decrement STEPS_REMAINING(0x54D8)
+
+15. PRE-MOVE — FUN_00404320(struct, dir_idx, 1):
+    Returns 0 if direction invalid/blocked, 1 if move initiated.
+    a. Returns 0 if dir_idx >= 10 or IS_STUNNED(0x4CFC) or 0x5824 != 0
+    b. FUN_0040b8f0(struct, 5): equipment check
+    c. Clears combat state flags
+    d. Saves tick counters for timing
+    e. Sets: ACTIVITY_STATE=0x12 (moving), dir_facing=dir_idx
+    f. Clears: IS_SNEAKING, IS_HIDING, combat counters, search state
+    g. Sends direction command: "<direction>\r" via FUN_0041c9d0
+    h. Logs "Moving: <direction>"
+    i. Decrements combat_counter and search_counter
+    j. Returns 1
+
+16. DIRECTION COMMAND SEND (if FUN_00404320 returned 0):
+    - Formats "%s\r" with raw direction string from step
+    - Special cases: "rest" → activity=2, "med" → activity=4,
+      "@party ..." → party command handling via FUN_0047cf70
+    - Otherwise: sets activity=0x29, sends via FUN_0041c9d0
+    - Sets: 0x9530=0, 0x9534=0, 0x5740=1, 0x573C=1
+    - Logs "Issuing path command: <dir>"
+
+17. POST-MOVE FLAGS:
+    - If step_flags & 0x40: set 0x56D4=1
+    - Advance: save prev step offset, increment CUR_PATH_STEP(0x5898),
+      advance step data pointer(0x589C)
+    - Next step flags: if bit 1 (&2) → REST_TO_FULL_HP(0x56E0)=1,
+      REST_TO_FULL_MANA(0x56E4)=1
+    - If bit 2 (&4) → set 0x5758=1
+    - If bit 3 (&8) → set 0x5528=3
+    - If LOOPING && bit 4 (&0x10) → set 0x5764=1
+```
+
+### Sub-Functions Called by Step Advancement
+
+| VA | Name | Size | Purpose |
+|---|---|---|---|
+| 0x004066b0 | GATE_CHECK | 1154 | Sneak/backstab equipment before move. Returns 1=wait, 0=proceed |
+| 0x00402df0 | REST_COMBAT_IDLE | 919 | Sell/buy/bank detour handler during idle periods |
+| 0x00404320 | PRE_MOVE | 721 | Set activity=moving, clear stealth, send direction, return 1 |
+| 0x00404600 | DOOR_HANDLER | 1424 | Open/pick/bash doors, search/disarm traps |
+| 0x00405fe0 | SEARCH_HANDLER | 419 | Search for hidden exits, advance through search steps |
+| 0x00439570 | LIGHT_CHECK | 74 | Scan equipment for light source (item type 0x06) |
+| 0x0043b7d0 | LIGHT_ROOM | 185 | Remove light source item, send "remove <item>\r" |
+| 0x00407da0 | TRAINER_CHECK | 660 | Auto-train if at trainer room and enough XP |
+| 0x00406490 | CASH_SHARE | 538 | Share copper/silver/gold/platinum/runic with party |
+| 0x004536f0 | HOSTILE_COUNT | 104 | Count hostile mobs in room (for "Stopped Before Entering") |
+| 0x0047cf70 | PARTY_CMD | 17634 | Handle @party commands during path walking |
+| 0x00479dc0 | ACTIVITY_SET | 352 | Set ACTIVITY_STATE with rest/meditation auto-detection |
+| 0x0041c9d0 | INJECT_CMD | — | Send command string to MUD (WriteFile to pipe) |
+| 0x0040b8f0 | EQUIP_CHECK | — | Equipment management (param: check type 4/5/6) |
+
+### Activity State (0x54C0) Values
+
+| Value | Hex | Meaning |
+|---|---|---|
+| 0 | 0x00 | Idle |
+| 2 | 0x02 | Resting (HP) |
+| 3 | 0x03 | Resting (HP, displayed) |
+| 4 | 0x04 | Meditating (mana) |
+| 5 | 0x05 | Meditating (mana, displayed) |
+| 9 | 0x09 | ? |
+| 10 | 0x0A | ? |
+| 11 | 0x0B | ? |
+| 13 | 0x0D | ? |
+| 14 | 0x0E | Backstab mode |
+| 18 | 0x12 | Moving |
+| 19 | 0x13 | Bashing door |
+| 20 | 0x14 | Picking lock |
+| 21 | 0x15 | Disarming trap |
+| 22 | 0x16 | Opening door |
+| 23 | 0x17 | Sneaking |
+| 27 | 0x1B | Equipping item |
+| 29 | 0x1D | Searching (trap) |
+| 40 | 0x28 | Training |
+| 41 | 0x29 | Issuing command |
+
+### Activity State Auto-Detection (FUN_00479dc0)
+
+When setting activity to 0 (idle), automatically upgrades to:
+- **3** (resting) if: IS_RESTING(0x5678) AND connected(0x5644) AND
+  (CUR_HP < MAX_HP * HP_FULL_PCT(0x3788) / 100 OR
+  (REST_TO_FULL_MANA(0x56E4) AND CUR_MANA < MAX_MANA * MANA_FULL_PCT(0x37A4) / 100))
+- **5** (meditating) if: IS_MEDITATING(0x567C) AND connected AND
+  CUR_MANA < MAX_MANA * MANA_FULL_PCT(0x37A4) / 100
+
+### New Offsets Discovered
+
+| Offset | Type | Name | Notes |
+|---|---|---|---|
+| 0x4CFC | i32 | BUSY_LOCK | Internal lock, blocks step advancement when != 0 |
+| 0x5410 | i32 | ? | Checked in gate check, must be non-zero for sneak |
+| 0x5444 | u32 | STATE_CHANGED | Bit 0: signal state machine to re-evaluate |
+| 0x5448 | i32 | CMD_SOURCE | Set to 2 when issuing path command |
+| 0x5500 | i32 | RETRY_COUNT | Incremented on checksum mismatch, triggers re-learn dialog |
+| 0x5504 | i32 | MISMATCH_COUNT | Room checksum mismatch counter during path walking |
+| 0x5508 | i32 | ? | Search/verify gate flag |
+| 0x5528 | i32 | STEP_VERIFY | Set to 3 for special step verification mode |
+| 0x5660 | i32 | ? | Near pathing flags |
+| 0x5740 | i32 | NEED_ROOM_UPDATE | Set to 1 after sending direction |
+| 0x573C | i32 | NEED_STATE_UPDATE | Set to 1 after movement |
+| 0x5758 | i32 | ? | Set by step flag bit 2 |
+| 0x5760 | i32 | SNEAK_PENDING | Cleared after sneak attempt |
+| 0x5764 | i32 | LOOP_STEP_FLAG | Set by step flag bit 4 during looping |
+| 0x5778 | i32 | ACTION_PENDING | Non-zero blocks gate check |
+| 0x5788 | i32 | PAUSED | Blocks step advancement |
+| 0x5790 | i32 | SEARCH_PENDING | Search gate, checked with 0x5508 and 0x358C |
+| 0x5818 | i32 | ? | Checked in gate check |
+| 0x5824 | i32 | DIR_BLOCKED | Checked in PRE_MOVE, blocks direction send |
+| 0x56A8 | i32 | LIGHT_MANAGED | Set to 1 after light source removed |
+| 0x56D4 | i32 | STEP_FLAG_40 | Set when step flag bit 6 is set |
+| 0x56E0 | i32 | REST_TO_FULL_HP | Set by step flag bit 1; rest until HP_FULL_PCT |
+| 0x56E4 | i32 | REST_TO_FULL_MANA | Set by step flag bit 1; rest until MANA_FULL_PCT |
+| 0x59D4 | i32 | STATE_SIGNAL | Set to 4 by FUN_0041ce60 as "state changed" signal |
+
+### FUN_00402df0 — Sell/Buy/Bank Detour Handler (919 bytes)
+
+Called at step 0 and path completion. Checks:
+1. **Sell items**: If inventory has items exceeding sell threshold AND HP below 67%
+   or item count exceeds limit → detour to shop via VA_VERIFY_PATH
+2. **Buy items**: If configured items are below minimum count → detour to buy
+   (checks bank balance, may detour to bank first)
+3. **Bank deposit**: If cash exceeds configured threshold → detour to bank
+   ("Detouring to Bank", "Detouring to Shop", "Detouring to Bank, then Shop")
+
+### FUN_00404600 — Door Handler (1424 bytes)
+
+Handles locked/closed/trapped doors during path walking:
+1. Returns 0 if dir_idx >= 10 or HP < 1 or IS_STUNNED
+2. Equipment check via FUN_0040b8f0(struct, 4)
+3. **Trap handling** (step_flags & 0x200, AUTO_SEARCH_TRAPS on):
+   - If trap not found: "search <dir>\r", activity=0x1D
+   - If trap found, attempts < max: "disarm trap <dir>\r", activity=0x15
+4. **Door states**: door_state at struct[dir_idx + 0x0B9E]
+   - State 5 (closed): "open <dir>\r", activity=0x16
+   - State 2 (locked): "pi <dir>\r" or "bash <dir>\r"
+5. **Key/item doors**: extracts item name from "[item]" in direction string
+6. **Search for alternate route**: calls FUN_00405fe0 if search conditions met
+
+### FUN_004066b0 — The Gate Check (1154 bytes)
+
+The critical pre-move check. Returns 1 to pause movement.
+Handles sneaking AND backstab weapon management:
+1. Skip if AUTO_SNEAK off and no BS weapon needed
+2. Skip if ACTIVITY_STATE == 0x17 (already sneaking → wait)
+3. Skip if IN_COMBAT (don't try to sneak during combat)
+4. Skip if monsters present (FUN_00453960 > 0)
+5. Timing check (must wait between actions)
+6. **Backstab equipment** (if BS weapon configured at 0x37D0):
+   - Remove shield for BS: "remove <shield>\r"
+   - Remove weapon to BS with hands: "remove <weapon>\r"
+   - Equip BS weapon: "equip <weapon>\r"
+   - Equip shield for BS: "equip <shield>\r"
+7. **Sneak**: if not already sneaking → IS_SNEAKING=1, "sneak\r", activity=0x17
+
+---
+
 ## Path Scanner (VA_SCAN_PATHS / FUN_00464C50)
 
 **Decompiled 2026-04-17 via Ghidra headless.** Scans `Default\*.MP` and `Chars\All\*.MP`.
