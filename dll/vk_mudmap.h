@@ -1816,6 +1816,7 @@ typedef struct {
     uint32_t cksum;
     uint16_t flags;
     char     dir[32];
+    uint16_t map, room;
 } MdwDynStep;
 
 typedef struct {
@@ -2015,6 +2016,8 @@ static MdwDynPath *mdw_find_path(uint32_t from_ri, uint32_t to_ri)
             MdwExit *ex = &mdw_exits[pr->exit_ofs + exit_idx[ri]];
             dp->steps[si].cksum = pr->checksum;
             dp->steps[si].flags = ex->flags & 0x1FFF;
+            dp->steps[si].map   = pr->map;
+            dp->steps[si].room  = pr->room;
             const char *stepdir = (ex->text_cmd[0])
                 ? ex->text_cmd
                 : ((ex->dir <= 9) ? mdw_dir_lo[ex->dir] : "look");
@@ -2310,9 +2313,22 @@ static void mdw_text_outlined(int px, int py, const char *s,
     ptext(px, py, s, r, g, b, vp_w, vp_h, cw, ch);
 }
 
+static int mdw_walk_to(int map_num, int room_num);
+
 static void mdw_draw(int vp_w, int vp_h)
 {
     if (!mdw_visible) return;
+
+    if (pfn_dynpath_needs_repath) {
+        int rp_map, rp_room;
+        if (pfn_dynpath_needs_repath(&rp_map, &rp_room)) {
+            mdw_log("[MDW] repath requested to %d,%d\n", rp_map, rp_room);
+            int rv = mdw_walk_to(rp_map, rp_room);
+            if (rv != 0)
+                mdw_log("[MDW] repath failed: %d\n", rv);
+        }
+    }
+
     if (!mdw_scaled) { mdw_w = 640 * ui_scale; mdw_h = 480 * ui_scale; mdw_scaled = 1; }
 
     const ui_theme_t *t = &ui_themes[current_theme];
@@ -4039,6 +4055,10 @@ static int mdw_mouse_down(int mx, int my)
                                   mdw_rooms[mdw_confirm_dest_ri].map, mdw_rooms[mdw_confirm_dest_ri].room);
                         pfn_dynpath_set_label(lbl);
                     }
+                    if (pfn_dynpath_set_dest_room)
+                        pfn_dynpath_set_dest_room(
+                            mdw_rooms[mdw_confirm_dest_ri].map,
+                            mdw_rooms[mdw_confirm_dest_ri].room);
                     int rv = pfn_dynpath_inject(
                         (dynpath_step_t *)cdp->steps, cdp->count,
                         mdw_rooms[mdw_cur_ri].checksum,
@@ -4324,6 +4344,8 @@ static int mdw_dblclick(int mx, int my)
                   mdw_rooms[best_i].map, mdw_rooms[best_i].room);
         pfn_dynpath_set_label(lbl);
     }
+    if (pfn_dynpath_set_dest_room)
+        pfn_dynpath_set_dest_room(mdw_rooms[best_i].map, mdw_rooms[best_i].room);
     int rv = pfn_dynpath_inject((dynpath_step_t *)dp->steps, dp->count,
                                 mdw_rooms[mdw_cur_ri].checksum,
                                 mdw_rooms[best_i].checksum);
@@ -4335,6 +4357,43 @@ static int mdw_dblclick(int mx, int my)
     }
     mdw_walk_status_tick = GetTickCount();
     return 1;
+}
+
+/* Programmatic walk-to: same as double-click but by map/room number.
+ * Returns 0=ok, 1=no map data, 2=room not found, 3=cur unknown,
+ * 4=same room, 5=no path, 6=inject unavailable, 7=inject failed. */
+static int mdw_walk_to(int map_num, int room_num)
+{
+    if (!mdw_loaded || !mdw_rooms || !mdw_exits) return 1;
+    uint32_t dest_ri = mdw_room_lookup((uint16_t)map_num, (uint16_t)room_num);
+    if (dest_ri == 0xFFFFFFFF) return 2;
+    if (mdw_cur_ri == 0xFFFFFFFF || mdw_cur_ri >= mdw_room_count) return 3;
+    if (dest_ri == mdw_cur_ri) return 4;
+
+    rm_bridge_resolve();
+    if (!pfn_dynpath_inject) return 6;
+
+    MdwDynPath *dp = mdw_find_path(mdw_cur_ri, dest_ri);
+    if (dp->error != MDW_DPERR_NONE) return 5;
+
+    if (pfn_dynpath_set_label) {
+        char lbl[128];
+        wsprintfA(lbl, "%d,%d to %d,%d",
+                  mdw_rooms[mdw_cur_ri].map, mdw_rooms[mdw_cur_ri].room,
+                  mdw_rooms[dest_ri].map, mdw_rooms[dest_ri].room);
+        pfn_dynpath_set_label(lbl);
+    }
+    if (pfn_dynpath_set_dest_room)
+        pfn_dynpath_set_dest_room(mdw_rooms[dest_ri].map, mdw_rooms[dest_ri].room);
+    int rv = pfn_dynpath_inject((dynpath_step_t *)dp->steps, dp->count,
+                                mdw_rooms[mdw_cur_ri].checksum,
+                                mdw_rooms[dest_ri].checksum);
+    if (rv != 0) return 7;
+
+    wsprintfA(mdw_walk_status, "Walking to %s (%d steps)",
+              mdw_rooms[dest_ri].name, dp->count);
+    mdw_walk_status_tick = GetTickCount();
+    return 0;
 }
 
 static int mdw_wheel(int mx, int my, int delta)

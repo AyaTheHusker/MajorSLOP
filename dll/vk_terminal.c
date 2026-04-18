@@ -834,6 +834,7 @@ typedef struct {
     unsigned int   cksum;
     unsigned short flags;
     char           dir[32];
+    unsigned short map, room;
 } dynpath_step_t;
 typedef int (WINAPI *pfn_dynpath_inject_t)(dynpath_step_t *steps, int count,
                                            unsigned int src, unsigned int dst);
@@ -849,6 +850,15 @@ static pfn_dynpath_get_progress_t pfn_dynpath_get_progress = NULL;
 
 typedef void (WINAPI *pfn_dynpath_set_label_t)(const char *);
 static pfn_dynpath_set_label_t pfn_dynpath_set_label = NULL;
+
+typedef int (WINAPI *pfn_dynpath_get_effective_auto_t)(int);
+static pfn_dynpath_get_effective_auto_t pfn_dynpath_get_effective_auto = NULL;
+
+typedef void (WINAPI *pfn_dynpath_set_dest_room_t)(int, int);
+static pfn_dynpath_set_dest_room_t pfn_dynpath_set_dest_room = NULL;
+
+typedef int (WINAPI *pfn_dynpath_needs_repath_t)(int *, int *);
+static pfn_dynpath_needs_repath_t pfn_dynpath_needs_repath = NULL;
 
 typedef int (WINAPI *pfn_get_stat_t)(void);
 static pfn_get_stat_t pfn_get_player_strength  = NULL;
@@ -877,6 +887,9 @@ static void rm_bridge_resolve(void)
     pfn_get_player_picklocks = (pfn_get_stat_t)GetProcAddress(mm, "get_player_picklocks");
     pfn_dynpath_get_progress = (pfn_dynpath_get_progress_t)GetProcAddress(mm, "dynpath_get_progress");
     pfn_dynpath_set_label = (pfn_dynpath_set_label_t)GetProcAddress(mm, "dynpath_set_label");
+    pfn_dynpath_get_effective_auto = (pfn_dynpath_get_effective_auto_t)GetProcAddress(mm, "dynpath_get_effective_auto");
+    pfn_dynpath_set_dest_room = (pfn_dynpath_set_dest_room_t)GetProcAddress(mm, "dynpath_set_dest_room");
+    pfn_dynpath_needs_repath  = (pfn_dynpath_needs_repath_t)GetProcAddress(mm, "dynpath_needs_repath");
 }
 
 static int auto_rm_queue_peek_safe(void)
@@ -7103,12 +7116,15 @@ static void vib_read_states(void)
     if (!api) return;
     unsigned int sbase = api->get_struct_base();
     if (!sbase) return;
+    rm_bridge_resolve();
     int do_log = (now - vib_last_log > 5000); /* log every 5s */
     if (do_log) vib_last_log = now;
     for (int i = 0; i < (int)VIB_BTN_COUNT; i++) {
         if (vib_buttons[i].is_toggle && vib_buttons[i].cfg_off) {
-            /* Read config offset (0x4Dxx) — runtime (0x57xx) resets to 0 on connect */
-            int raw = api->read_struct_i32(vib_buttons[i].cfg_off);
+            int raw;
+            int eff = pfn_dynpath_get_effective_auto
+                    ? pfn_dynpath_get_effective_auto(vib_buttons[i].cfg_off) : -1;
+            raw = (eff >= 0) ? eff : api->read_struct_i32(vib_buttons[i].cfg_off);
             vib_states[i] = raw != 0;
             if (do_log)
                 api->log("[vib] %s: cfg=0x%04X raw=%d state=%d\n",
@@ -7296,6 +7312,13 @@ static void vib_draw(int vp_w, int vp_h, int bar_y)
         int is_hov = (vib_hover == i);
         int is_press = (vib_pressed == i);
 
+        /* Check if this toggle is walker-controlled (our pathing, not MegaMUD's) */
+        int is_walker_ctrl = 0;
+        if (is_on && b->cfg_off && pfn_dynpath_get_effective_auto) {
+            int eff = pfn_dynpath_get_effective_auto(b->cfg_off);
+            if (eff > 0) is_walker_ctrl = 1;
+        }
+
         /* Button background */
         float br, bg, bb, ba;
         if (is_press) {
@@ -7303,6 +7326,8 @@ static void vib_draw(int vp_w, int vp_h, int bar_y)
         } else if (is_on) {
             if (i == VIB_BTN_GO) {
                 br = 0.10f; bg = 0.02f; bb = 0.02f; ba = 0.92f; /* dark red for stopped */
+            } else if (is_walker_ctrl) {
+                br = 0.05f; bg = 0.02f; bb = 0.08f; ba = 0.92f; /* dark purple — walker-controlled */
             } else {
                 br = 0.02f; bg = 0.06f; bb = 0.02f; ba = 0.92f; /* dark green tint */
             }
@@ -7321,6 +7346,8 @@ static void vib_draw(int vp_w, int vp_h, int bar_y)
             int is_go = (i == VIB_BTN_GO);
             if (is_go) {
                 bdr = 1.0f; bdg = 0.2f; bdb = 0.2f; /* red for stopped */
+            } else if (is_walker_ctrl) {
+                bdr = 0.6f; bdg = 0.2f; bdb = 1.0f; /* purple for walker-controlled */
             } else {
                 bdr = 0.2f; bdg = 1.0f; bdb = 0.3f; /* green for active */
             }
@@ -12359,6 +12386,11 @@ static void vkt_cleanup_vulkan(void)
 }
 
 /* ---- Exported commands ---- */
+
+__declspec(dllexport) int vkt_map_walk_to(int map_num, int room_num)
+{
+    return mdw_walk_to(map_num, room_num);
+}
 
 __declspec(dllexport) void vkt_show(void)
 {
