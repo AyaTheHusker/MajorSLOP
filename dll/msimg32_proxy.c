@@ -4031,7 +4031,7 @@ static void dpw_tick(void)
 
         if (auto_sneak && !is_sneaking && hostiles <= 0) {
             logmsg("[dynpath] READY->SNEAK_WAIT\n");
-            api_inject_command("sneak");
+            api_inject_command("sn");
             dpw_timeout = GetTickCount();
             dpw_state = DPW_SNEAK_WAIT;
             break;
@@ -4065,6 +4065,7 @@ static void dpw_tick(void)
             break;
         }
         if (is_sneaking) {
+            logmsg("[dynpath] SNEAK_WAIT->OK (sneaking)\n");
             if (auto_hide && !is_hiding) {
                 api_inject_command("hide");
                 dpw_timeout = GetTickCount();
@@ -4074,9 +4075,10 @@ static void dpw_tick(void)
             }
             break;
         }
-        if (GetTickCount() - dpw_timeout > DPW_SNEAK_TIMEOUT_MS) {
-            logmsg("[dynpath] SNEAK_WAIT timeout -> READY\n");
-            dpw_state = DPW_READY;
+        if (GetTickCount() - dpw_timeout > 300) {
+            logmsg("[dynpath] sneak failed, retrying sn\n");
+            api_inject_command("sn");
+            dpw_timeout = GetTickCount();
         }
         break;
 
