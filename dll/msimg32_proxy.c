@@ -3877,10 +3877,6 @@ enum {
 };
 
 #define DPW_MOVE_TIMEOUT_MS   15000
-#define DPW_SNEAK_TIMEOUT_MS   5000
-#define DPW_HIDE_TIMEOUT_MS    5000
-#define DPW_REST_CHECK_MS      1000
-#define DPW_COMBAT_SETTLE_MS    500
 
 /* Shared state (cross-thread handoff from vk_mudmap → main thread) */
 static volatile LONG   dp_pending = 0;
@@ -3901,7 +3897,6 @@ static dynpath_step_t  *dpw_steps = NULL;
 static unsigned int     dpw_dst   = 0;
 static unsigned int     dpw_last_cksum = 0;
 static DWORD            dpw_timeout = 0;
-static DWORD            dpw_combat_end_tick = 0;
 static int              dpw_last_hostiles = 0;
 static char             dpw_label[128] = "";
 
@@ -3971,9 +3966,6 @@ static void dpw_tick(void)
         dpw_last_hostiles = hostiles;
     }
 
-    int prev_state = dpw_state;
-    int prev_step  = dpw_step;
-
     switch (dpw_state) {
     case DPW_READY:
         if (dpw_step >= dpw_count) {
@@ -3983,10 +3975,9 @@ static void dpw_tick(void)
             dpw_update_statusbar();
             break;
         }
-
         if (busy_lock) break;
         if (cur_hp < 1) {
-            logmsg("[dynpath] dead (HP=%d), aborting\n", cur_hp);
+            logmsg("[dynpath] dead, aborting\n");
             dpw_state = DPW_DONE;
             InterlockedExchange(&dp_active, 0);
             dpw_update_statusbar();
@@ -3997,8 +3988,6 @@ static void dpw_tick(void)
 
         if (in_combat || (hostiles > 0 && auto_combat)) {
             if (auto_combat) {
-                logmsg("[dynpath] READY->COMBAT_WAIT (combat=%d hostiles=%d)\n",
-                       in_combat, hostiles);
                 dpw_state = DPW_COMBAT_WAIT;
             } else {
                 api_inject_command(dpw_steps[dpw_step].dir);
@@ -4008,39 +3997,23 @@ static void dpw_tick(void)
                 dpw_timeout = GetTickCount();
                 dpw_step++;
                 dpw_state = DPW_DIR_SENT;
-                logmsg("[dynpath] READY->DIR_SENT (flee past, combat=%d hostiles=%d) step %d/%d '%s'\n",
-                       in_combat, hostiles, dpw_step, dpw_count, dpw_steps[dpw_step-1].dir);
             }
             break;
         }
 
-        if (dpw_combat_end_tick) {
-            int hp_rest_thresh = max_hp > 0 ? (max_hp * hp_rest_pct) / 100 : 0;
-            if (cur_hp < hp_rest_thresh) {
-                logmsg("[dynpath] READY->REST_WAIT (HP=%d/%d thresh=%d)\n",
-                       cur_hp, max_hp, hp_rest_thresh);
-                dpw_state = DPW_REST_WAIT;
-                dpw_timeout = GetTickCount();
-                dpw_combat_end_tick = 0;
-                break;
-            }
-            if (GetTickCount() - dpw_combat_end_tick > DPW_COMBAT_SETTLE_MS) {
-                dpw_combat_end_tick = 0;
-            }
+        if (cur_hp < (max_hp > 0 ? (max_hp * hp_rest_pct) / 100 : 0)) {
+            dpw_state = DPW_REST_WAIT;
+            break;
         }
 
         if (auto_sneak && !is_sneaking && hostiles <= 0) {
-            logmsg("[dynpath] READY->SNEAK_WAIT\n");
             api_inject_command("sn");
-            dpw_timeout = GetTickCount();
             dpw_state = DPW_SNEAK_WAIT;
             break;
         }
 
         if (auto_hide && !is_hiding && hostiles <= 0) {
-            logmsg("[dynpath] READY->HIDE_WAIT\n");
             api_inject_command("hide");
-            dpw_timeout = GetTickCount();
             dpw_state = DPW_HIDE_WAIT;
             break;
         }
@@ -4052,71 +4025,51 @@ static void dpw_tick(void)
         dpw_timeout = GetTickCount();
         dpw_step++;
         dpw_state = DPW_DIR_SENT;
-        logmsg("[dynpath] READY->DIR_SENT step %d/%d '%s'\n",
-               dpw_step, dpw_count, dpw_steps[dpw_step-1].dir);
         dpw_update_statusbar();
         break;
 
     case DPW_SNEAK_WAIT:
         if (in_combat) {
             dpw_state = auto_combat ? DPW_COMBAT_WAIT : DPW_READY;
-            logmsg("[dynpath] SNEAK_WAIT->%s (combat)\n",
-                   dpw_state == DPW_COMBAT_WAIT ? "COMBAT_WAIT" : "READY");
             break;
         }
         if (is_sneaking) {
-            logmsg("[dynpath] SNEAK_WAIT->OK (sneaking)\n");
             if (auto_hide && !is_hiding) {
                 api_inject_command("hide");
-                dpw_timeout = GetTickCount();
                 dpw_state = DPW_HIDE_WAIT;
             } else {
                 dpw_state = DPW_READY;
             }
             break;
         }
-        if (GetTickCount() - dpw_timeout > 300) {
-            logmsg("[dynpath] sneak failed, retrying sn\n");
-            api_inject_command("sn");
-            dpw_timeout = GetTickCount();
-        }
+        api_inject_command("sn");
         break;
 
     case DPW_HIDE_WAIT:
         if (in_combat) {
             dpw_state = auto_combat ? DPW_COMBAT_WAIT : DPW_READY;
-            logmsg("[dynpath] HIDE_WAIT->%s (combat)\n",
-                   dpw_state == DPW_COMBAT_WAIT ? "COMBAT_WAIT" : "READY");
             break;
         }
         if (is_hiding) {
             dpw_state = DPW_READY;
             break;
         }
-        if (GetTickCount() - dpw_timeout > DPW_HIDE_TIMEOUT_MS) {
-            logmsg("[dynpath] HIDE_WAIT timeout -> READY\n");
-            dpw_state = DPW_READY;
-        }
+        api_inject_command("hide");
         break;
 
     case DPW_DIR_SENT:
         if (room_ck != dpw_last_cksum && room_ck != 0) {
-            logmsg("[dynpath] DIR_SENT->READY (room changed %08X->%08X) step %d/%d\n",
-                   dpw_last_cksum, room_ck, dpw_step, dpw_count);
             dpw_state = DPW_READY;
             dpw_update_statusbar();
             break;
         }
         if (in_combat || (hostiles > 0 && auto_combat)) {
-            if (auto_combat) {
-                logmsg("[dynpath] DIR_SENT->COMBAT_WAIT (combat=%d hostiles=%d)\n",
-                       in_combat, hostiles);
+            if (auto_combat)
                 dpw_state = DPW_COMBAT_WAIT;
-            }
             break;
         }
         if (GetTickCount() - dpw_timeout > DPW_MOVE_TIMEOUT_MS) {
-            logmsg("[dynpath] move timeout at step %d, aborting\n", dpw_step);
+            logmsg("[dynpath] move timeout step %d, aborting\n", dpw_step);
             dpw_state = DPW_DONE;
             InterlockedExchange(&dp_active, 0);
             dpw_update_statusbar();
@@ -4125,9 +4078,7 @@ static void dpw_tick(void)
 
     case DPW_COMBAT_WAIT:
         if (!in_combat) {
-            logmsg("[dynpath] COMBAT_WAIT->READY (combat ended, sending Enter to refresh)\n");
             type_into_megamud("");
-            dpw_combat_end_tick = GetTickCount();
             dpw_state = DPW_READY;
         }
         break;
@@ -4140,20 +4091,13 @@ static void dpw_tick(void)
 
         if (in_combat) {
             dpw_state = auto_combat ? DPW_COMBAT_WAIT : DPW_READY;
-            logmsg("[dynpath] REST_WAIT->%s (combat)\n",
-                   dpw_state == DPW_COMBAT_WAIT ? "COMBAT_WAIT" : "READY");
             break;
         }
-
         if (hp_done && mn_done) {
-            logmsg("[dynpath] REST_WAIT->READY (HP=%d/%d MANA=%d/%d, fully rested)\n",
-                   cur_hp, max_hp, cur_mana, max_mana);
             dpw_state = DPW_READY;
             break;
         }
-
         if (!is_resting && !is_medit && hp_done) {
-            logmsg("[dynpath] REST_WAIT->READY (not resting, HP OK)\n");
             dpw_state = DPW_READY;
             break;
         }
