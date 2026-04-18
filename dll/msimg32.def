@@ -11,3 +11,9 @@ EXPORTS
     get_location @13
     auto_rm_queue_peek @14
     auto_rm_queue_consume @15
+    auto_rm_queue_increment @16
+    dynpath_inject @17
+    dynpath_set_suspend_events @18
+    dynpath_get_suspend_events @19
+    get_player_strength @20
+    get_player_picklocks @21

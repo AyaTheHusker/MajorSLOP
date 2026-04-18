@@ -48,6 +48,9 @@ typedef struct {
     uint16_t flags;
     uint16_t tmap, troom;
     uint16_t key_item;
+    uint16_t pick_req;
+    uint16_t bash_req;
+    char     text_cmd[64];
 } MdwExit;
 
 typedef struct { uint16_t map; uint32_t count; uint32_t *indices; } MdwMapInfo;
@@ -115,6 +118,13 @@ static DWORD    mdw_pulse_tick = 0;       /* GetTickCount() of most recent chang
 static char     mdw_cur_room_code[8] = "";
 static int      mdw_cur_room_known = 0;   /* 1 = known in MegaMUD */
 static uint32_t mdw_cur_room_code_ri = 0xFFFFFFFF; /* which ri we last checked */
+
+/* Per-room known cache — refreshed on room change, avoids per-frame API calls */
+#define MDW_KNOWN_MAX 4096
+static int      mdw_known_flags[MDW_KNOWN_MAX];
+static char     mdw_known_codes[MDW_KNOWN_MAX][8];
+static DWORD    mdw_known_tick = 0;
+static uint16_t mdw_known_map = 0xFFFF;
 
 /* Hover state — updated inside mdw_draw from vkm_mouse_x/y (always live,
  * not just during drag). The tooltip draws for mdw_hover_ri if valid. */
@@ -245,6 +255,8 @@ static char mdw_megamud_dir[MAX_PATH] = "";
 
 /* Forward declarations for functions defined later in the file */
 static uint32_t mdw_room_lookup(uint16_t map, uint16_t room);
+static void mdw_send_rm(void);
+static int  mdw_verify_room(void);
 
 /* ---- Auto-MPX: passive background .mpx generation ----
  * Scans Default/ for .mp files without .mpx sidecar, watches room
@@ -348,10 +360,12 @@ static const char *mdw_dir_lo[10] = {
     "n","s","e","w","ne","nw","se","sw","u","d"
 };
 
-#define MDW_EX_DOOR   0x0001
-#define MDW_EX_HIDDEN 0x0002
-#define MDW_EX_KEY    0x0008
-#define MDW_EX_CAST   0x0400
+#define MDW_EX_DOOR    0x0001
+#define MDW_EX_HIDDEN  0x0002
+#define MDW_EX_TRAP    0x0004
+#define MDW_EX_KEY     0x0008
+#define MDW_EX_CAST    0x0400
+#define MDW_EX_TEXTCMD 0x1000
 
 /* Copy cell contents into dst (NUL-terminated). Shared with tooltip code. */
 static const char *mdw_aux_cell_str(MdwAuxTable *t, int row, int col,
@@ -1429,6 +1443,16 @@ static int  mdw_input_focus = 0;          /* 0=none, 1=map, 2=room */
 static float mdw_ctrl_y0 = 0, mdw_ctrl_y1 = 0;
 static float mdw_cb_use_rm_x0 = 0,  mdw_cb_use_rm_x1 = 0;
 static float mdw_cb_auto_x0   = 0,  mdw_cb_auto_x1   = 0;
+static float mdw_cb_noev_x0   = 0,  mdw_cb_noev_x1   = 0;
+static char  mdw_walk_status[256] = "";
+static DWORD mdw_walk_status_tick = 0;
+
+static int      mdw_confirm_showing = 0;
+static uint32_t mdw_confirm_dest_ri = 0xFFFFFFFF;
+static float    mdw_confirm_x0, mdw_confirm_y0, mdw_confirm_x1, mdw_confirm_y1;
+static float    mdw_confirm_btn_run_x0, mdw_confirm_btn_run_x1;
+static float    mdw_confirm_btn_cancel_x0, mdw_confirm_btn_cancel_x1;
+static float    mdw_confirm_btn_y0, mdw_confirm_btn_y1;
 static float mdw_btn_zoom_out_x0 = 0, mdw_btn_zoom_out_x1 = 0;
 static float mdw_btn_zoom_in_x0  = 0, mdw_btn_zoom_in_x1  = 0;
 static float mdw_in_map_x0  = 0,  mdw_in_map_x1  = 0;
@@ -1504,7 +1528,7 @@ static int mdw_load_bin(const char *path)
         fread(&rc, 4, 1, f) != 1 ||
         fread(&mc, 4, 1, f) != 1 ||
         magic != 0x44554D4D ||
-        (version != 1 && version != 2 && version != 3 && version != 4))
+        version < 1 || version > 5)
     { fclose(f); return -1; }
     mdw_room_count = rc;
     mdw_map_count = mc;
@@ -1518,7 +1542,16 @@ static int mdw_load_bin(const char *path)
         fread(&lair, 1, 1, f); fread(&light, 1, 1, f);
         fread(&ec, 1, 1, f);   fread(&nl, 1, 1, f);
         fseek(f, nl, SEEK_CUR);
-        fseek(f, 4 + ec * 9, SEEK_CUR);
+        fseek(f, 4, SEEK_CUR); /* checksum */
+        if (version >= 5) {
+            for (uint8_t e = 0; e < ec; e++) {
+                fseek(f, 13, SEEK_CUR); /* dir+flags+tmap+troom+key+pick+bash */
+                uint8_t tcl = 0; fread(&tcl, 1, 1, f);
+                fseek(f, tcl, SEEK_CUR);
+            }
+        } else {
+            fseek(f, ec * 9, SEEK_CUR);
+        }
         total_exits += ec;
         if (version >= 4) {
             uint16_t lrl = 0;
@@ -1554,6 +1587,18 @@ static int mdw_load_bin(const char *path)
             fread(&ex->tmap, 2, 1, f);
             fread(&ex->troom, 2, 1, f);
             fread(&ex->key_item, 2, 1, f);
+            ex->pick_req = 0; ex->bash_req = 0;
+            ex->text_cmd[0] = 0;
+            if (version >= 5) {
+                fread(&ex->pick_req, 2, 1, f);
+                fread(&ex->bash_req, 2, 1, f);
+                uint8_t tcl = 0; fread(&tcl, 1, 1, f);
+                if (tcl > 0) {
+                    int tn = tcl < 63 ? tcl : 63;
+                    fread(ex->text_cmd, 1, tcl, f);
+                    ex->text_cmd[tn] = 0;
+                }
+            }
         }
         r->lair_raw = NULL;
         if (version >= 4) {
@@ -1757,6 +1802,248 @@ static int mdw_goto_room(int map_num, int room_num)
     mdw_room_buf[0] = 0;
     mdw_input_focus = 0;
     return 1;
+}
+
+/* ================================================================
+ * Dynamic pathfinding — BFS across the room/exit graph
+ * ================================================================ */
+
+#define MDW_DYNPATH_MAX_STEPS 500
+#define MDW_DYNPATH_MAX_ROOMS 8192
+#define MDW_DYNPATH_MAX_REQS  16
+
+typedef struct {
+    uint32_t cksum;
+    uint16_t flags;
+    char     dir[32];
+} MdwDynStep;
+
+typedef struct {
+    uint16_t id;
+    char     name[64];
+} MdwDynReq;
+
+typedef struct {
+    MdwDynStep *steps;
+    int         count;
+    int         error;
+    char        errmsg[256];
+    int         req_count;
+    MdwDynReq   reqs[MDW_DYNPATH_MAX_REQS];
+} MdwDynPath;
+
+#define MDW_DPERR_NONE      0
+#define MDW_DPERR_NO_PATH   1
+#define MDW_DPERR_BLOCKED   2
+#define MDW_DPERR_NOT_LOADED 3
+#define MDW_DPERR_SAME_ROOM 4
+#define MDW_DPERR_BAD_ROOM  5
+
+static MdwDynPath mdw_dynpath_result;
+
+static void mdw_dynpath_free(void)
+{
+    if (mdw_dynpath_result.steps) {
+        free(mdw_dynpath_result.steps);
+        mdw_dynpath_result.steps = NULL;
+    }
+    mdw_dynpath_result.count = 0;
+    mdw_dynpath_result.error = MDW_DPERR_NONE;
+    mdw_dynpath_result.errmsg[0] = 0;
+    mdw_dynpath_result.req_count = 0;
+}
+
+static MdwDynPath *mdw_find_path(uint32_t from_ri, uint32_t to_ri)
+{
+    mdw_dynpath_free();
+    MdwDynPath *dp = &mdw_dynpath_result;
+
+    if (!mdw_loaded || !mdw_rooms || !mdw_exits) {
+        dp->error = MDW_DPERR_NOT_LOADED;
+        lstrcpyA(dp->errmsg, "Map data not loaded");
+        return dp;
+    }
+    if (from_ri >= mdw_room_count || to_ri >= mdw_room_count) {
+        dp->error = MDW_DPERR_BAD_ROOM;
+        wsprintfA(dp->errmsg, "Invalid room index (from=%u to=%u, max=%u)",
+                  from_ri, to_ri, mdw_room_count);
+        return dp;
+    }
+    if (from_ri == to_ri) {
+        dp->error = MDW_DPERR_SAME_ROOM;
+        lstrcpyA(dp->errmsg, "Already in that room");
+        return dp;
+    }
+
+    uint32_t cap = mdw_room_count;
+    if (cap > MDW_DYNPATH_MAX_ROOMS) cap = MDW_DYNPATH_MAX_ROOMS;
+
+    uint32_t *prev = (uint32_t *)calloc(cap, sizeof(uint32_t));
+    uint8_t  *exit_idx = (uint8_t *)calloc(cap, sizeof(uint8_t));
+    uint8_t  *visited = (uint8_t *)calloc(cap, sizeof(uint8_t));
+    uint32_t *queue = (uint32_t *)malloc(cap * sizeof(uint32_t));
+    if (!prev || !exit_idx || !visited || !queue) {
+        dp->error = MDW_DPERR_NO_PATH;
+        lstrcpyA(dp->errmsg, "Out of memory for pathfinding");
+        goto cleanup;
+    }
+
+    memset(prev, 0xFF, cap * sizeof(uint32_t));
+    uint32_t qh = 0, qt = 0;
+
+    if (from_ri < cap) {
+        visited[from_ri] = 1;
+        queue[qt++] = from_ri;
+    }
+
+    uint16_t target_map = mdw_rooms[to_ri].map;
+    int found = 0;
+
+    int player_str = pfn_get_player_strength ? pfn_get_player_strength() : 0;
+    int player_plk = pfn_get_player_picklocks ? pfn_get_player_picklocks() : 0;
+
+    while (qh < qt && !found) {
+        uint32_t cur = queue[qh++];
+        MdwRoom *cr = &mdw_rooms[cur];
+
+        for (int i = 0; i < cr->exit_count; i++) {
+            MdwExit *ex = &mdw_exits[cr->exit_ofs + i];
+            uint32_t ni = mdw_room_lookup(ex->tmap, ex->troom);
+            if (ni >= cap || ni == 0xFFFFFFFF) continue;
+            if (visited[ni]) continue;
+
+            /* CAST exits remain blocked */
+            if (ex->flags & MDW_EX_CAST) {
+                char spl[64];
+                mdw_spell_name(ex->key_item, spl, sizeof spl);
+                if (spl[0]) continue;
+            }
+
+            /* DOOR exits: check if player can bash or pick.
+               If pick_req/bash_req are set and player doesn't meet either, skip. */
+            if ((ex->flags & MDW_EX_DOOR) && !(ex->flags & MDW_EX_KEY)) {
+                if (ex->pick_req > 1 || ex->bash_req > 1) {
+                    int can_pick = (ex->pick_req > 0 && player_plk >= ex->pick_req);
+                    int can_bash = (ex->bash_req > 0 && player_str >= ex->bash_req);
+                    if (!can_pick && !can_bash) continue;
+                }
+            }
+
+            visited[ni] = 1;
+            prev[ni] = cur;
+            exit_idx[ni] = (uint8_t)i;
+
+            if (ni == to_ri) { found = 1; break; }
+            if (qt < cap) queue[qt++] = ni;
+        }
+    }
+
+    if (!found) {
+        /* Try to find why — is destination on a different map? */
+        MdwRoom *fr = &mdw_rooms[from_ri];
+        MdwRoom *tr = &mdw_rooms[to_ri];
+        int blocked = 0;
+        if (fr->map != tr->map) {
+            wsprintfA(dp->errmsg, "Cannot path across maps (Map %d -> Map %d). "
+                      "No connecting exit found.", fr->map, tr->map);
+        } else {
+            /* Check if any exit leads toward it but is blocked */
+            for (uint32_t ri = 0; ri < cap; ri++) {
+                if (!visited[ri]) continue;
+                MdwRoom *cr = &mdw_rooms[ri];
+                for (int i = 0; i < cr->exit_count; i++) {
+                    MdwExit *ex = &mdw_exits[cr->exit_ofs + i];
+                    uint32_t ni = mdw_room_lookup(ex->tmap, ex->troom);
+                    if (ni == 0xFFFFFFFF || ni >= cap) continue;
+                    if (visited[ni]) continue;
+
+                    if (ex->flags & MDW_EX_CAST) {
+                        char spl[64];
+                        mdw_spell_name(ex->key_item, spl, sizeof spl);
+                        wsprintfA(dp->errmsg,
+                                  "Cannot advance past Map %d Room %d (%s) — "
+                                  "requires spell: %s",
+                                  cr->map, cr->room, cr->name,
+                                  spl[0] ? spl : "unknown spell");
+                        blocked = 1; break;
+                    }
+                }
+                if (blocked) break;
+            }
+            if (!blocked) {
+                wsprintfA(dp->errmsg, "No path from Map %d Room %d (%s) to "
+                          "Map %d Room %d (%s) — rooms are not connected",
+                          fr->map, fr->room, fr->name,
+                          tr->map, tr->room, tr->name);
+            }
+        }
+        dp->error = blocked ? MDW_DPERR_BLOCKED : MDW_DPERR_NO_PATH;
+        goto cleanup;
+    }
+
+    /* Trace back from destination to source */
+    int path_len = 0;
+    {
+        uint32_t ri = to_ri;
+        while (ri != from_ri && ri != 0xFFFFFFFF && path_len < MDW_DYNPATH_MAX_STEPS) {
+            path_len++;
+            ri = prev[ri];
+        }
+    }
+    if (path_len <= 0 || path_len > MDW_DYNPATH_MAX_STEPS) {
+        dp->error = MDW_DPERR_NO_PATH;
+        wsprintfA(dp->errmsg, "Path too long (%d steps, max %d)",
+                  path_len, MDW_DYNPATH_MAX_STEPS);
+        goto cleanup;
+    }
+
+    dp->steps = (MdwDynStep *)calloc(path_len, sizeof(MdwDynStep));
+    if (!dp->steps) {
+        dp->error = MDW_DPERR_NO_PATH;
+        lstrcpyA(dp->errmsg, "Out of memory allocating path steps");
+        goto cleanup;
+    }
+    dp->count = path_len;
+
+    /* Fill steps in reverse (from dest back to src) and collect required items */
+    dp->req_count = 0;
+    {
+        uint32_t ri = to_ri;
+        for (int si = path_len - 1; si >= 0; si--) {
+            uint32_t pri = prev[ri];
+            MdwRoom *pr = &mdw_rooms[pri];
+            MdwExit *ex = &mdw_exits[pr->exit_ofs + exit_idx[ri]];
+            dp->steps[si].cksum = pr->checksum;
+            dp->steps[si].flags = ex->flags & 0x1FFF;
+            const char *stepdir = (ex->text_cmd[0])
+                ? ex->text_cmd
+                : ((ex->dir <= 9) ? mdw_dir_lo[ex->dir] : "look");
+            strncpy(dp->steps[si].dir, stepdir, sizeof dp->steps[si].dir - 1);
+            dp->steps[si].dir[sizeof dp->steps[si].dir - 1] = 0;
+
+            if ((ex->flags & MDW_EX_KEY) && ex->key_item &&
+                dp->req_count < MDW_DYNPATH_MAX_REQS) {
+                int dup = 0;
+                for (int k = 0; k < dp->req_count; k++)
+                    if (dp->reqs[k].id == ex->key_item) { dup = 1; break; }
+                if (!dup) {
+                    dp->reqs[dp->req_count].id = ex->key_item;
+                    mdw_item_name(ex->key_item,
+                                  dp->reqs[dp->req_count].name,
+                                  sizeof dp->reqs[dp->req_count].name);
+                    dp->req_count++;
+                }
+            }
+            ri = pri;
+        }
+    }
+
+cleanup:
+    if (prev) free(prev);
+    if (exit_idx) free(exit_idx);
+    if (visited) free(visited);
+    if (queue) free(queue);
+    return dp;
 }
 
 static int mdw_bin_exists(void)
@@ -2083,6 +2370,21 @@ static void mdw_draw(int vp_w, int vp_h)
         }
     }
 
+    /* Refresh per-room known cache on room/map change (once, not per frame) */
+    DWORD ktick = GetTickCount();
+    if (mdw_cur_map_view != mdw_known_map || ktick - mdw_known_tick > 5000) {
+        mdw_known_map = mdw_cur_map_view;
+        mdw_known_tick = ktick;
+        if (api && api->room_is_known) {
+            uint32_t cap = mdw_room_count < MDW_KNOWN_MAX ? mdw_room_count : MDW_KNOWN_MAX;
+            for (uint32_t ki = 0; ki < cap; ki++) {
+                mdw_known_codes[ki][0] = 0;
+                mdw_known_flags[ki] = api->room_is_known(
+                    mdw_rooms[ki].checksum, mdw_known_codes[ki], sizeof(mdw_known_codes[ki]));
+            }
+        }
+    }
+
     /* Title text — "Map Walker │ Map N  Room M │ <room name>" */
     int title_tx = (int)x0 + pad;
     int title_ty = (int)tb_y0 + (titlebar_h - ch) / 2;
@@ -2279,6 +2581,11 @@ static void mdw_draw(int vp_w, int vp_h)
         int text_ok = (sy - tile >= c_y0 && sy + tile <= c_y1 &&
                        sx - tile >= c_x0 && sx + tile <= c_x1);
 
+        /* Zoom-scaled glyph sizes for room icons and lair numbers */
+        int gcw = (int)(tile * 0.55f);
+        if (gcw < cw) gcw = cw;
+        int gch = gcw * 2;
+
         /* Special-room glyphs — skip for current-room tile to avoid clashing
          * with the cyan player highlight. */
         if (text_ok && i != mdw_cur_ri) {
@@ -2293,36 +2600,36 @@ static void mdw_draw(int vp_w, int vp_h)
             } else if (is_trainer && tile >= 5.0f) {
                 /* Class trainer (ShopType=8) → bold bright T with halo */
                 const char *g = "T";
-                int gx = (int)(sx - cw * 0.5f);
-                int gy = (int)(sy - ch * 0.5f);
-                ptext(gx - 1, gy, g, 0.0f, 0.0f, 0.0f, vp_w, vp_h, cw, ch);
-                ptext(gx + 1, gy, g, 0.0f, 0.0f, 0.0f, vp_w, vp_h, cw, ch);
-                ptext(gx, gy - 1, g, 0.0f, 0.0f, 0.0f, vp_w, vp_h, cw, ch);
-                ptext(gx, gy + 1, g, 0.0f, 0.0f, 0.0f, vp_w, vp_h, cw, ch);
-                ptext(gx, gy, g, 0.4f, 1.0f, 0.6f, vp_w, vp_h, cw, ch);
-                ptext(gx + 1, gy, g, 0.4f, 1.0f, 0.6f, vp_w, vp_h, cw, ch);
+                int gx = (int)(sx - gcw * 0.5f);
+                int gy = (int)(sy - gch * 0.5f);
+                ptext(gx - 1, gy, g, 0.0f, 0.0f, 0.0f, vp_w, vp_h, gcw, gch);
+                ptext(gx + 1, gy, g, 0.0f, 0.0f, 0.0f, vp_w, vp_h, gcw, gch);
+                ptext(gx, gy - 1, g, 0.0f, 0.0f, 0.0f, vp_w, vp_h, gcw, gch);
+                ptext(gx, gy + 1, g, 0.0f, 0.0f, 0.0f, vp_w, vp_h, gcw, gch);
+                ptext(gx, gy, g, 0.4f, 1.0f, 0.6f, vp_w, vp_h, gcw, gch);
+                ptext(gx + 1, gy, g, 0.4f, 1.0f, 0.6f, vp_w, vp_h, gcw, gch);
             } else if (r->shop && tile >= 5.0f) {
                 /* Shop → $ glyph, bold with halo */
                 const char *g = "$";
-                int gx = (int)(sx - cw * 0.5f);
-                int gy = (int)(sy - ch * 0.5f);
-                ptext(gx - 1, gy, g, 0.0f, 0.0f, 0.0f, vp_w, vp_h, cw, ch);
-                ptext(gx + 1, gy, g, 0.0f, 0.0f, 0.0f, vp_w, vp_h, cw, ch);
-                ptext(gx, gy - 1, g, 0.0f, 0.0f, 0.0f, vp_w, vp_h, cw, ch);
-                ptext(gx, gy + 1, g, 0.0f, 0.0f, 0.0f, vp_w, vp_h, cw, ch);
-                ptext(gx, gy, g, 1.0f, 1.0f, 0.2f, vp_w, vp_h, cw, ch);
-                ptext(gx + 1, gy, g, 1.0f, 1.0f, 0.2f, vp_w, vp_h, cw, ch);
+                int gx = (int)(sx - gcw * 0.5f);
+                int gy = (int)(sy - gch * 0.5f);
+                ptext(gx - 1, gy, g, 0.0f, 0.0f, 0.0f, vp_w, vp_h, gcw, gch);
+                ptext(gx + 1, gy, g, 0.0f, 0.0f, 0.0f, vp_w, vp_h, gcw, gch);
+                ptext(gx, gy - 1, g, 0.0f, 0.0f, 0.0f, vp_w, vp_h, gcw, gch);
+                ptext(gx, gy + 1, g, 0.0f, 0.0f, 0.0f, vp_w, vp_h, gcw, gch);
+                ptext(gx, gy, g, 1.0f, 1.0f, 0.2f, vp_w, vp_h, gcw, gch);
+                ptext(gx + 1, gy, g, 1.0f, 1.0f, 0.2f, vp_w, vp_h, gcw, gch);
             } else if (r->spell && !r->lair_count && tile >= 5.0f) {
                 /* Spell/trainer room → "+" */
                 const char *g = "+";
-                int gx = (int)(sx - cw * 0.5f);
-                int gy = (int)(sy - ch * 0.5f);
-                ptext(gx - 1, gy, g, 0.0f, 0.0f, 0.0f, vp_w, vp_h, cw, ch);
-                ptext(gx + 1, gy, g, 0.0f, 0.0f, 0.0f, vp_w, vp_h, cw, ch);
-                ptext(gx, gy - 1, g, 0.0f, 0.0f, 0.0f, vp_w, vp_h, cw, ch);
-                ptext(gx, gy + 1, g, 0.0f, 0.0f, 0.0f, vp_w, vp_h, cw, ch);
-                ptext(gx, gy, g, 1.0f, 1.0f, 1.0f, vp_w, vp_h, cw, ch);
-                ptext(gx + 1, gy, g, 1.0f, 1.0f, 1.0f, vp_w, vp_h, cw, ch);
+                int gx = (int)(sx - gcw * 0.5f);
+                int gy = (int)(sy - gch * 0.5f);
+                ptext(gx - 1, gy, g, 0.0f, 0.0f, 0.0f, vp_w, vp_h, gcw, gch);
+                ptext(gx + 1, gy, g, 0.0f, 0.0f, 0.0f, vp_w, vp_h, gcw, gch);
+                ptext(gx, gy - 1, g, 0.0f, 0.0f, 0.0f, vp_w, vp_h, gcw, gch);
+                ptext(gx, gy + 1, g, 0.0f, 0.0f, 0.0f, vp_w, vp_h, gcw, gch);
+                ptext(gx, gy, g, 1.0f, 1.0f, 1.0f, vp_w, vp_h, gcw, gch);
+                ptext(gx + 1, gy, g, 1.0f, 1.0f, 1.0f, vp_w, vp_h, gcw, gch);
             }
         }
 
@@ -2330,20 +2637,108 @@ static void mdw_draw(int vp_w, int vp_h)
         if (text_ok && r->lair_count) {
             char nb[8]; wsprintfA(nb, "%u", r->lair_count);
             int nlen = (int)strlen(nb);
-            int nw = nlen * cw + 1; /* +1 for fake-bold double print */
+            int nw = nlen * gcw + 1;
             int tx = (int)(sx - nw * 0.5f);
-            int ty = (int)(sy - ch * 0.5f);
+            int ty = (int)(sy - gch * 0.5f);
             /* Drop shadow (2px down/right, black) */
-            ptext(tx + 2, ty + 2, nb, 0.0f, 0.0f, 0.0f, vp_w, vp_h, cw, ch);
-            ptext(tx + 3, ty + 2, nb, 0.0f, 0.0f, 0.0f, vp_w, vp_h, cw, ch);
+            ptext(tx + 2, ty + 2, nb, 0.0f, 0.0f, 0.0f, vp_w, vp_h, gcw, gch);
+            ptext(tx + 3, ty + 2, nb, 0.0f, 0.0f, 0.0f, vp_w, vp_h, gcw, gch);
             /* Black halo — 4 directions */
-            ptext(tx - 1, ty,     nb, 0.0f, 0.0f, 0.0f, vp_w, vp_h, cw, ch);
-            ptext(tx + 1, ty,     nb, 0.0f, 0.0f, 0.0f, vp_w, vp_h, cw, ch);
-            ptext(tx,     ty - 1, nb, 0.0f, 0.0f, 0.0f, vp_w, vp_h, cw, ch);
-            ptext(tx,     ty + 1, nb, 0.0f, 0.0f, 0.0f, vp_w, vp_h, cw, ch);
+            ptext(tx - 1, ty,     nb, 0.0f, 0.0f, 0.0f, vp_w, vp_h, gcw, gch);
+            ptext(tx + 1, ty,     nb, 0.0f, 0.0f, 0.0f, vp_w, vp_h, gcw, gch);
+            ptext(tx,     ty - 1, nb, 0.0f, 0.0f, 0.0f, vp_w, vp_h, gcw, gch);
+            ptext(tx,     ty + 1, nb, 0.0f, 0.0f, 0.0f, vp_w, vp_h, gcw, gch);
             /* Main glyph */
-            ptext(tx,     ty, nb, tr, tg, tb, vp_w, vp_h, cw, ch);
-            ptext(tx + 1, ty, nb, tr, tg, tb, vp_w, vp_h, cw, ch);
+            ptext(tx,     ty, nb, tr, tg, tb, vp_w, vp_h, gcw, gch);
+            ptext(tx + 1, ty, nb, tr, tg, tb, vp_w, vp_h, gcw, gch);
+        }
+
+        /* Up/down exit corner triangles — full corner, pulsing colors
+         * UP = upper-left corner, DOWN = lower-right corner */
+        if (tile >= 4.0f) {
+            int has_up = 0, has_down = 0;
+            for (uint32_t e = 0; e < r->exit_count; e++) {
+                MdwExit *ex = &mdw_exits[r->exit_ofs + e];
+                if (ex->dir == 8) has_up = 1;
+                if (ex->dir == 9) has_down = 1;
+            }
+            if (has_up || has_down) {
+                float tp = (float)(now % 800) / 800.0f;
+                float alt = 0.5f + 0.5f * sinf(tp * 6.28318f);
+                float tri = tile * 0.95f;
+                if (tri < 4.0f) tri = 4.0f;
+                int nsteps = 8;
+                float stp = tri / nsteps;
+                if (has_up) {
+                    float ur = alt * 0.0f + (1.0f - alt) * 1.0f;
+                    float ug = alt * 1.0f + (1.0f - alt) * 0.85f;
+                    float ub = alt * 1.0f + (1.0f - alt) * 0.0f;
+                    for (int s = 0; s < nsteps; s++) {
+                        float w = tri - s * stp;
+                        psolid(sx - tile, sy - tile + s * stp,
+                               sx - tile + w, sy - tile + (s+1) * stp,
+                               ur, ug, ub, 0.85f, vp_w, vp_h);
+                    }
+                }
+                if (has_down) {
+                    float dr = (1.0f - alt) * 0.0f + alt * 1.0f;
+                    float dg = (1.0f - alt) * 1.0f + alt * 0.85f;
+                    float db = (1.0f - alt) * 1.0f + alt * 0.0f;
+                    for (int s = 0; s < nsteps; s++) {
+                        float w = tri - s * stp;
+                        psolid(sx + tile - w, sy + tile - (s+1) * stp,
+                               sx + tile,     sy + tile - s * stp,
+                               dr, dg, db, 0.85f, vp_w, vp_h);
+                    }
+                }
+            }
+        }
+
+        /* Known room: animated clockwise green dots border + room code */
+        if (i != mdw_cur_ri && i < MDW_KNOWN_MAX && mdw_known_flags[i]) {
+                char *kcode = mdw_known_codes[i];
+                float boff = tile + 2.5f;
+                float dot_sz = tile * 0.15f;
+                if (dot_sz < 1.2f) dot_sz = 1.2f;
+                if (dot_sz > 4.0f) dot_sz = 4.0f;
+                int ndots = 12;
+                float side = 2.0f * boff;
+                float perim = 4.0f * side;
+                float dphase = (float)(now % 4000) / 4000.0f;
+                float da = 0.6f + 0.35f * sinf((float)(now % 1500) / 1500.0f * 6.28318f);
+
+                for (int d = 0; d < ndots; d++) {
+                    float frac = dphase + (float)d / ndots;
+                    frac -= (float)(int)frac;
+                    float pos = frac * perim;
+                    float ddx, ddy;
+                    if (pos < side) {
+                        ddx = -boff + pos; ddy = -boff;
+                    } else if (pos < 2 * side) {
+                        ddx = boff; ddy = -boff + (pos - side);
+                    } else if (pos < 3 * side) {
+                        ddx = boff - (pos - 2 * side); ddy = boff;
+                    } else {
+                        ddx = -boff; ddy = boff - (pos - 3 * side);
+                    }
+                    float dx0 = sx + ddx - dot_sz, dy0 = sy + ddy - dot_sz;
+                    float dx1 = sx + ddx + dot_sz, dy1 = sy + ddy + dot_sz;
+                    if (dx1 >= c_x0 && dx0 <= c_x1 && dy1 >= c_y0 && dy0 <= c_y1)
+                        psolid(dx0, dy0, dx1, dy1, 0.2f, 0.9f, 0.3f, da, vp_w, vp_h);
+                }
+
+                if (text_ok && kcode[0] && tile >= 5.0f) {
+                    int kcw = (int)(tile * 0.45f);
+                    if (kcw < 4) kcw = 4;
+                    int kch = kcw * 2;
+                    int klen = (int)strlen(kcode);
+                    int kw = klen * kcw + 1;
+                    int kx = (int)(sx - kw * 0.5f);
+                    int ky = (int)(sy + tile + 2.0f);
+                    ptext(kx + 1, ky + 1, kcode, 0.0f, 0.0f, 0.0f, vp_w, vp_h, kcw, kch);
+                    ptext(kx, ky, kcode, 0.3f, 1.0f, 0.4f, vp_w, vp_h, kcw, kch);
+                    ptext(kx + 1, ky, kcode, 0.3f, 1.0f, 0.4f, vp_w, vp_h, kcw, kch);
+                }
         }
     }
     mdw_hover_ri = hover_ri;
@@ -2993,6 +3388,76 @@ static void mdw_draw(int vp_w, int vp_h)
         mdw_sd_x0 = ip_x; mdw_sd_y0 = ip_y; mdw_sd_x1 = ip_x1g; mdw_sd_y1 = ip_y1g;
     }
 
+    /* ---- Walk confirmation dialog (path requires items) ---- */
+    if (mdw_confirm_showing && mdw_dynpath_result.req_count > 0) {
+        MdwDynPath *cdp = &mdw_dynpath_result;
+        int nreqs = cdp->req_count;
+        float cf_w = 320.0f * ui_scale;
+        float cf_h = (float)(60 + nreqs * (ch + 2) + ch + 20) * ui_scale;
+        if (cf_h < 120.0f * ui_scale) cf_h = 120.0f * ui_scale;
+        float cf_x = (x0 + x1 - cf_w) * 0.5f;
+        float cf_y = (y0 + y1 - cf_h) * 0.5f;
+        float cf_x1g = cf_x + cf_w, cf_y1g = cf_y + cf_h;
+        int cf_pad = (int)(10 * ui_scale);
+        mdw_confirm_x0 = cf_x; mdw_confirm_y0 = cf_y;
+        mdw_confirm_x1 = cf_x1g; mdw_confirm_y1 = cf_y1g;
+
+        psolid(x0, y0, x1, y1, 0.0f, 0.0f, 0.0f, 0.5f, vp_w, vp_h);
+        psolid(cf_x, cf_y, cf_x1g, cf_y1g,
+               bgr + 0.06f, bgg + 0.06f, bgb + 0.06f, 0.98f, vp_w, vp_h);
+        psolid(cf_x, cf_y, cf_x1g, cf_y + 1, 1.0f, 0.7f, 0.2f, 0.9f, vp_w, vp_h);
+        psolid(cf_x, cf_y1g - 1, cf_x1g, cf_y1g, 0.4f, 0.28f, 0.08f, 0.9f, vp_w, vp_h);
+        psolid(cf_x, cf_y, cf_x + 1, cf_y1g, 1.0f, 0.7f, 0.2f, 0.8f, vp_w, vp_h);
+        psolid(cf_x1g - 1, cf_y, cf_x1g, cf_y1g, 0.4f, 0.28f, 0.08f, 0.8f, vp_w, vp_h);
+
+        int cf_tx = (int)cf_x + cf_pad;
+        int cf_ty = (int)cf_y + cf_pad;
+
+        ptext(cf_tx, cf_ty, "This path requires:", 1.0f, 0.7f, 0.2f, vp_w, vp_h, cw, ch);
+        cf_ty += ch + 6;
+
+        for (int i = 0; i < nreqs; i++) {
+            char rline[80];
+            wsprintfA(rline, "  %s", cdp->reqs[i].name[0] ? cdp->reqs[i].name : "(unknown item)");
+            ptext(cf_tx, cf_ty, rline, txr, txg, txb, vp_w, vp_h, cw, ch);
+            cf_ty += ch + 2;
+        }
+        cf_ty += 4;
+
+        char stepinfo[64];
+        wsprintfA(stepinfo, "(%d steps to %s)",
+                  cdp->count,
+                  (mdw_confirm_dest_ri < mdw_room_count)
+                      ? mdw_rooms[mdw_confirm_dest_ri].name : "?");
+        ptext(cf_tx, cf_ty, stepinfo, dmr, dmg, dmb, vp_w, vp_h, cw, ch);
+
+        int btn_y2 = (int)cf_y1g - cf_pad - ch - 6;
+        int btn_w2 = 10 * cw + 10;
+
+        int rbx0 = cf_tx;
+        int rbx1 = rbx0 + btn_w2;
+        psolid((float)rbx0, (float)btn_y2, (float)rbx1, (float)(btn_y2 + ch + 4),
+               0.15f, 0.4f, 0.15f, 1.0f, vp_w, vp_h);
+        psolid((float)rbx0, (float)btn_y2, (float)rbx1, (float)btn_y2 + 1,
+               0.3f, 1.0f, 0.4f, 0.9f, vp_w, vp_h);
+        ptext(rbx0 + 5, btn_y2 + 2, "Run path", txr, txg, txb, vp_w, vp_h, cw, ch);
+        mdw_confirm_btn_run_x0 = (float)rbx0;
+        mdw_confirm_btn_run_x1 = (float)rbx1;
+
+        rbx0 = rbx1 + 8;
+        rbx1 = rbx0 + btn_w2;
+        psolid((float)rbx0, (float)btn_y2, (float)rbx1, (float)(btn_y2 + ch + 4),
+               bgr * 0.5f, bgg * 0.5f, bgb * 0.5f, 1.0f, vp_w, vp_h);
+        psolid((float)rbx0, (float)btn_y2, (float)rbx1, (float)btn_y2 + 1,
+               dmr, dmg, dmb, 0.9f, vp_w, vp_h);
+        ptext(rbx0 + 5, btn_y2 + 2, "Cancel", txr, txg, txb, vp_w, vp_h, cw, ch);
+        mdw_confirm_btn_cancel_x0 = (float)rbx0;
+        mdw_confirm_btn_cancel_x1 = (float)rbx1;
+
+        mdw_confirm_btn_y0 = (float)btn_y2;
+        mdw_confirm_btn_y1 = (float)(btn_y2 + ch + 4);
+    }
+
     /* ---- Code Room dialog overlay ---- */
     if (mdw_code_showing) {
         float cd_w = 300.0f * ui_scale;
@@ -3068,6 +3533,21 @@ static void mdw_draw(int vp_w, int vp_h)
         mdw_sd_x0 = cd_x; mdw_sd_y0 = cd_y; mdw_sd_x1 = cd_x1g; mdw_sd_y1 = cd_y1g;
     }
 
+    /* Walk status message (fades after 5s) */
+    if (mdw_walk_status[0]) {
+        DWORD elapsed = GetTickCount() - mdw_walk_status_tick;
+        if (elapsed > 5000) {
+            mdw_walk_status[0] = 0;
+        } else {
+            float alpha = elapsed > 4000 ? (5000 - elapsed) / 1000.0f : 1.0f;
+            int sy = (int)(ctrl_y0 - ch - 4);
+            psolid(c_x0, (float)sy - 1, c_x1, (float)sy + ch + 2,
+                   0.0f, 0.0f, 0.0f, 0.7f * alpha, vp_w, vp_h);
+            ptext((int)c_x0 + 6, sy, mdw_walk_status,
+                  1.0f, 0.9f, 0.3f, vp_w, vp_h, cw, ch);
+        }
+    }
+
     /* ---- Bottom controls strip ---- */
     mdw_ctrl_y0 = ctrl_y0;
     mdw_ctrl_y1 = ctrl_y1;
@@ -3125,6 +3605,30 @@ static void mdw_draw(int vp_w, int vp_h)
         }
         ptext(bx1 + 4, cy, "auto", txr, txg, txb, vp_w, vp_h, cw, ch);
         cx = bx1 + 4 + 4 * cw + 10;
+    }
+
+    /* [X] no events — suspend timed events during map walk */
+    {
+        int noev = pfn_dynpath_get_suspend_events ? pfn_dynpath_get_suspend_events() : 0;
+        int bx0 = cx, by0 = cy, bx1 = cx + ch, by1 = cy + ch;
+        mdw_cb_noev_x0 = (float)bx0; mdw_cb_noev_x1 = (float)bx1;
+        psolid((float)bx0, (float)by0, (float)bx1, (float)by1,
+               bgr * 0.2f, bgg * 0.2f, bgb * 0.2f, 1.0f, vp_w, vp_h);
+        psolid((float)bx0, (float)by0, (float)bx1, (float)by0 + 1,
+               acr, acg, acb, 0.8f, vp_w, vp_h);
+        psolid((float)bx0, (float)by1 - 1, (float)bx1, (float)by1,
+               acr, acg, acb, 0.8f, vp_w, vp_h);
+        psolid((float)bx0, (float)by0, (float)bx0 + 1, (float)by1,
+               acr, acg, acb, 0.8f, vp_w, vp_h);
+        psolid((float)bx1 - 1, (float)by0, (float)bx1, (float)by1,
+               acr, acg, acb, 0.8f, vp_w, vp_h);
+        if (noev) {
+            psolid((float)bx0 + 3, (float)by0 + 3,
+                   (float)bx1 - 3, (float)by1 - 3,
+                   0.95f, 0.6f, 0.2f, 1.0f, vp_w, vp_h);
+        }
+        ptext(bx1 + 4, cy, "no events", txr, txg, txb, vp_w, vp_h, cw, ch);
+        cx = bx1 + 4 + 9 * cw + 10;
     }
 
     /* Map: [  ]  Room: [    ] */
@@ -3303,6 +3807,13 @@ static int mdw_mouse_down(int mx, int my)
         float fmx = (float)mx;
         if (fmx >= mdw_cb_use_rm_x0 && fmx <= mdw_cb_use_rm_x1) {
             mdw_use_rm = !mdw_use_rm;
+            mdw_input_focus = 0;
+            return 1;
+        }
+        if (fmx >= mdw_cb_noev_x0 && fmx <= mdw_cb_noev_x1) {
+            if (pfn_dynpath_get_suspend_events && pfn_dynpath_set_suspend_events) {
+                pfn_dynpath_set_suspend_events(!pfn_dynpath_get_suspend_events());
+            }
             mdw_input_focus = 0;
             return 1;
         }
@@ -3493,6 +4004,40 @@ static int mdw_mouse_down(int mx, int my)
         return 1; /* swallow clicks while prompt is up */
     }
 
+    /* ---- Walk confirmation dialog click handling ---- */
+    if (mdw_confirm_showing) {
+        float fmx = (float)mx, fmy = (float)my;
+        if (fmy >= mdw_confirm_btn_y0 && fmy <= mdw_confirm_btn_y1) {
+            if (fmx >= mdw_confirm_btn_run_x0 && fmx <= mdw_confirm_btn_run_x1) {
+                if (!mdw_verify_room()) {
+                    mdw_confirm_showing = 0;
+                    return 1;
+                }
+                MdwDynPath *cdp = &mdw_dynpath_result;
+                if (cdp->steps && cdp->count > 0 && pfn_dynpath_inject &&
+                    mdw_confirm_dest_ri < mdw_room_count) {
+                    int rv = pfn_dynpath_inject(
+                        (dynpath_step_t *)cdp->steps, cdp->count,
+                        mdw_rooms[mdw_cur_ri].checksum,
+                        mdw_rooms[mdw_confirm_dest_ri].checksum);
+                    if (rv == 0)
+                        wsprintfA(mdw_walk_status, "Walking to %s (%d steps)",
+                                  mdw_rooms[mdw_confirm_dest_ri].name, cdp->count);
+                    else
+                        wsprintfA(mdw_walk_status, "Inject failed (%d)", rv);
+                    mdw_walk_status_tick = GetTickCount();
+                }
+                mdw_confirm_showing = 0;
+                return 1;
+            }
+            if (fmx >= mdw_confirm_btn_cancel_x0 && fmx <= mdw_confirm_btn_cancel_x1) {
+                mdw_confirm_showing = 0;
+                return 1;
+            }
+        }
+        return 1;
+    }
+
     /* ---- Path panel button clicks ---- */
     if (mdw_show_path_panel) {
         float fmx = (float)mx, fmy = (float)my;
@@ -3637,6 +4182,117 @@ static int mdw_rbutton_down(int mx, int my)
      * the real character via RM polling). */
     mdw_view_x = mdw_rooms[best_i].gx * 20.0f;
     mdw_view_y = mdw_rooms[best_i].gy * 20.0f;
+    return 1;
+}
+
+static void mdw_send_rm(void)
+{
+    if (!api || !api->inject_command) return;
+    if (pfn_auto_rm_queue_increment) pfn_auto_rm_queue_increment();
+    api->inject_command("rm");
+}
+
+static int mdw_verify_room(void)
+{
+    if (mdw_cur_ri >= mdw_room_count) {
+        wsprintfA(mdw_walk_status, "Current room unknown — refreshing...");
+        mdw_walk_status_tick = GetTickCount();
+        mdw_send_rm();
+        return 0;
+    }
+    uint32_t mega_ck = pfn_get_room_checksum ? pfn_get_room_checksum() : 0;
+    if (!mega_ck) return 1;
+    if (mdw_rooms[mdw_cur_ri].checksum == mega_ck) return 1;
+    wsprintfA(mdw_walk_status,
+              "Room mismatch — refreshing position...");
+    mdw_walk_status_tick = GetTickCount();
+    mdw_send_rm();
+    return 0;
+}
+
+static int mdw_dblclick(int mx, int my)
+{
+    if (!mdw_visible || !mdw_loaded) return 0;
+    if (!mdw_hit_window(mx, my)) return 0;
+
+    int ch = (int)(VSB_CHAR_H * ui_scale);
+    int titlebar_h = ch + 10;
+    if (my - (int)mdw_y < titlebar_h) return 0;
+
+    float x0 = mdw_x, y0 = mdw_y;
+    float x1 = x0 + mdw_w, y1 = y0 + mdw_h;
+    float tb_y1 = y0 + (float)titlebar_h;
+    float c_x0 = x0 + 6, c_y0 = tb_y1 + 3;
+    float c_x1 = x1 - 6, c_y1 = y1 - 6;
+    if ((float)mx < c_x0 || (float)mx > c_x1 ||
+        (float)my < c_y0 || (float)my > c_y1) return 0;
+
+    float cell = 20.0f * mdw_zoom;
+    float tile = 7.0f * mdw_zoom;
+    if (tile < 3.5f) tile = 3.5f;
+    float cview_x = (c_x0 + c_x1) * 0.5f;
+    float cview_y = (c_y0 + c_y1) * 0.5f;
+    float zfac = cell / 20.0f;
+
+    float best_d2 = tile * tile * 4.0f;
+    uint32_t best_i = 0xFFFFFFFF;
+    for (uint32_t i = 0; i < mdw_room_count; i++) {
+        MdwRoom *r = &mdw_rooms[i];
+        if (r->gx == INT16_MIN) continue;
+        if (r->map != mdw_cur_map_view) continue;
+        float sx = cview_x + (r->gx * 20.0f - mdw_view_x) * zfac;
+        float sy = cview_y + (r->gy * 20.0f - mdw_view_y) * zfac;
+        if (sx < c_x0 - tile || sx > c_x1 + tile) continue;
+        if (sy < c_y0 - tile || sy > c_y1 + tile) continue;
+        float ddx = sx - (float)mx, ddy = sy - (float)my;
+        float d2 = ddx * ddx + ddy * ddy;
+        if (d2 < best_d2) { best_d2 = d2; best_i = i; }
+    }
+    if (best_i == 0xFFFFFFFF) return 0;
+    if (mdw_cur_ri == 0xFFFFFFFF || mdw_cur_ri >= mdw_room_count) {
+        wsprintfA(mdw_walk_status, "Current room unknown — can't pathfind");
+        mdw_walk_status_tick = GetTickCount();
+        return 1;
+    }
+    if (best_i == mdw_cur_ri) {
+        wsprintfA(mdw_walk_status, "Already in that room");
+        mdw_walk_status_tick = GetTickCount();
+        return 1;
+    }
+
+    rm_bridge_resolve();
+    if (!pfn_dynpath_inject) {
+        wsprintfA(mdw_walk_status, "Dynamic pathing not available");
+        mdw_walk_status_tick = GetTickCount();
+        return 1;
+    }
+
+    if (!mdw_verify_room()) return 1;
+
+    MdwDynPath *dp = mdw_find_path(mdw_cur_ri, best_i);
+    if (dp->error != MDW_DPERR_NONE) {
+        strncpy(mdw_walk_status, dp->errmsg, sizeof(mdw_walk_status) - 1);
+        mdw_walk_status[sizeof(mdw_walk_status) - 1] = 0;
+        mdw_walk_status_tick = GetTickCount();
+        return 1;
+    }
+
+    if (dp->req_count > 0) {
+        mdw_confirm_dest_ri = best_i;
+        mdw_confirm_showing = 1;
+        return 1;
+    }
+
+    int rv = pfn_dynpath_inject((dynpath_step_t *)dp->steps, dp->count,
+                                mdw_rooms[mdw_cur_ri].checksum,
+                                mdw_rooms[best_i].checksum);
+    if (rv == 0) {
+        wsprintfA(mdw_walk_status, "Walking to %s (%d steps)",
+                  mdw_rooms[best_i].name, dp->count);
+    } else {
+        wsprintfA(mdw_walk_status, "Inject failed (%d)", rv);
+    }
+    mdw_walk_status_tick = GetTickCount();
     return 1;
 }
 
@@ -3793,6 +4449,36 @@ static int mdw_key_down(unsigned int vk)
         }
         /* Let WM_CHAR handle text input */
         return 0;
+    }
+    /* Walk confirmation: Enter/R=Run, Esc=Cancel */
+    if (mdw_confirm_showing) {
+        if (vk == VK_RETURN || vk == 'R') {
+            if (!mdw_verify_room()) {
+                mdw_confirm_showing = 0;
+                mdw_swallow_char = 1; return 1;
+            }
+            MdwDynPath *cdp = &mdw_dynpath_result;
+            if (cdp->steps && cdp->count > 0 && pfn_dynpath_inject &&
+                mdw_confirm_dest_ri < mdw_room_count) {
+                int rv = pfn_dynpath_inject(
+                    (dynpath_step_t *)cdp->steps, cdp->count,
+                    mdw_rooms[mdw_cur_ri].checksum,
+                    mdw_rooms[mdw_confirm_dest_ri].checksum);
+                if (rv == 0)
+                    wsprintfA(mdw_walk_status, "Walking to %s (%d steps)",
+                              mdw_rooms[mdw_confirm_dest_ri].name, cdp->count);
+                else
+                    wsprintfA(mdw_walk_status, "Inject failed (%d)", rv);
+                mdw_walk_status_tick = GetTickCount();
+            }
+            mdw_confirm_showing = 0;
+            mdw_swallow_char = 1; return 1;
+        }
+        if (vk == VK_ESCAPE) {
+            mdw_confirm_showing = 0;
+            mdw_swallow_char = 1; return 1;
+        }
+        mdw_swallow_char = 1; return 1;
     }
     /* Import prompt: I/Enter=Import, L=Loop, Esc=Cancel */
     if (mdw_import_prompt) {
@@ -4000,6 +4686,7 @@ static void mdw_toggle(void)
         if (mdw_loaded && mdw_map_count > 0)
             mdw_relayout(mdw_maps[0].map);
         mdw_focused = 1;
+        mdw_send_rm();
         /* Center view on current room if we have one, otherwise fall back
          * to the centroid of the visible map so the user sees rooms
          * immediately instead of a blank canvas requiring pan-to-find.
@@ -4102,6 +4789,7 @@ static DWORD WINAPI mdw_mdb_worker(LPVOID param)
         if (mdw_map_count > 0) mdw_relayout(mdw_maps[0].map);
         mdw_visible = 1;
         mdw_focused = 1;
+        mdw_send_rm();
         if (api) api->log("[mudmap] loaded %u rooms, %u maps\n",
                           mdw_room_count, mdw_map_count);
     } else {

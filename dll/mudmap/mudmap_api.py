@@ -228,7 +228,7 @@ def export_bin(mdb_path: str, out_path: str, rooms_md_path: str | None = None) -
     rooms = sorted(data["rooms"].items())
     room_index: dict[tuple[int,int], int] = {}
     buf = bytearray()
-    buf += struct.pack("<IIII", 0x44554D4D, 4, len(rooms), len(data["maps"]))
+    buf += struct.pack("<IIII", 0x44554D4D, 5, len(rooms), len(data["maps"]))
     for i, ((m, rn), row) in enumerate(rooms):
         room_index[(m, rn)] = i
         wv, oo = detect_special_items(row, data["items"])
@@ -271,12 +271,18 @@ def export_bin(mdb_path: str, out_path: str, rooms_md_path: str | None = None) -
             if ex.blocked_flag:  flags |= 0x0200
             if ex.cast_pre:      flags |= 0x0400
             if ex.gate:          flags |= 0x0800
-            buf += struct.pack("<BHHHH",
+            tcmd = ex.text_cmd.encode("latin-1", "replace")[:63] if ex.text_cmd else b""
+            if tcmd:
+                flags |= 0x1000
+            buf += struct.pack("<BHHHHHH",
                 DIR_CODE.get(ex.dir, 0) & 0xFF,
                 flags & 0xFFFF,
                 ex.map & 0xFFFF, ex.room & 0xFFFF,
                 (ex.key_item or ex.req_item) & 0xFFFF,
+                ex.pick_req & 0xFFFF,
+                ex.bash_req & 0xFFFF,
             )
+            buf += struct.pack("<B", len(tcmd)) + tcmd
         # v4+: raw Lair field text (u16 len prefix, then bytes). Empty → len=0.
         lr_bytes = lair_raw.encode("latin-1", "replace")[:65534]
         buf += struct.pack("<H", len(lr_bytes)) + lr_bytes

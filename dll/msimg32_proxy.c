@@ -1868,6 +1868,8 @@ static void incoming_feed_data(const char *data, int len)
     line_fsm_feed(&recv_fsm, data, len);
 }
 
+static void dynpath_check_pending(void);  /* defined below — drains pending + checks arrival */
+
 /* Our hook — called instead of FUN_0041C8D0 */
 static volatile int hook_0041C8D0_call_count = 0;
 static void __cdecl hooked_process_incoming(int sbase, void *data, int len)
@@ -1896,6 +1898,8 @@ static void __cdecl hooked_process_incoming(int sbase, void *data, int len)
     /* Call original */
     process_incoming_fn real_fn = (process_incoming_fn)VA_PROCESS_INCOMING;
     real_fn(sbase, data, len);
+
+    dynpath_check_pending();
 
     /* Re-install hook */
     VirtualProtect(target, 5, PAGE_EXECUTE_READWRITE, &old_protect);
@@ -3757,6 +3761,13 @@ void WINAPI rm_every_step_set(int on)
     logmsg("[mudplugin] RM Every Step: %s (via vk_terminal)\n", on ? "ON" : "OFF");
 }
 
+/* Increment the auto-rm queue from outside msimg32 (numpad walk, android walk).
+ * Same atomic pattern as pro_step_thread uses internally. */
+void WINAPI auto_rm_queue_increment(void)
+{
+    InterlockedIncrement(&auto_rm_queue_count);
+}
+
 /* Returns current auto-rm queue depth without modifying it. vk_terminal uses
  * this to peek whether the next "rm" echo / Location block is ours. */
 int WINAPI auto_rm_queue_peek(void)
@@ -3807,9 +3818,194 @@ unsigned int WINAPI get_location(void)
     return (m << 16) | r;
 }
 
-/* ---- Auto struct finder thread ---- */
-/* Finds struct_base WITHOUT needing a player name by scanning for valid
-   game data patterns (HP, MaxHP, Level, Mana at known offsets). */
+/* ---- Dynamic path injection ----
+ * Builds a step buffer in MegaMUD's exact format and writes it into
+ * the path entry at struct+0x5930, then sets control flags so the
+ * native path walker executes it.  Called from vk_terminal when the
+ * user clicks a room on the map and BFS produces a route.
+ *
+ * Step buffer format (from Ghidra RE of STEP_ALLOC 0x45f240):
+ *   [4B checksum][2B flags][dir_string\0]  — stride = strlen(dir)+8
+ *
+ * Path entry offsets (relative to entry base at struct+0x5930):
+ *   +0x58 src_cksum, +0x5C dst_cksum, +0x6C step_count,
+ *   +0x70 cur_step, +0x74 byte_ofs, +0x7C capacity, +0x80 buf_ptr
+ */
+
+#define VA_MM_ALLOC  mega_va(0x004a4b80)
+#define VA_MM_FREE   mega_va(0x004dd8b0)
+
+typedef void *(__cdecl *fn_mm_alloc_t)(int size);
+typedef void  (__cdecl *fn_mm_free_t)(void *ptr);
+
+typedef struct {
+    unsigned int   cksum;
+    unsigned short flags;
+    char           dir[32];
+} dynpath_step_t;
+
+#define OFF_FR_DISABLE_EVENTS 0x1E18
+
+static volatile LONG   dp_pending = 0;
+static dynpath_step_t *dp_steps   = NULL;
+static int             dp_count   = 0;
+static unsigned int    dp_src     = 0;
+static unsigned int    dp_dst     = 0;
+
+static volatile LONG   dp_active  = 0;
+static unsigned int    dp_active_dst = 0;
+static int             dp_saved_events_disabled = 0;
+static volatile LONG   dp_suspend_events = 0;
+
+static void dynpath_do_inject(void)
+{
+    if (!struct_base || !dp_steps || dp_count <= 0) return;
+    unsigned char *sbp   = (unsigned char *)struct_base;
+    int            sb    = (int)struct_base;
+    unsigned char *entry = sbp + OFF_FR_LOOP_DEST;
+
+    dp_saved_events_disabled = *(int *)(sbp + OFF_FR_DISABLE_EVENTS);
+
+    ((fn_vi)VA_STOP_PATH)(sb);
+
+    void *old_buf = *(void **)(entry + 0x80);
+    int   old_cap = *(int  *)(entry + 0x7C);
+    if (old_cap != 0 && old_buf) {
+        ((fn_mm_free_t)VA_MM_FREE)(old_buf);
+        *(void **)(entry + 0x80) = NULL;
+        *(int  *)(entry + 0x7C) = 0;
+    }
+
+    int total = 0;
+    for (int i = 0; i < dp_count; i++)
+        total += (int)strlen(dp_steps[i].dir) + 8;
+
+    void *buf = ((fn_mm_alloc_t)VA_MM_ALLOC)(total);
+    if (!buf) {
+        logmsg("[dynpath] alloc %d bytes failed\n", total);
+        return;
+    }
+    memset(buf, 0, total);
+
+    int ofs = 0;
+    for (int i = 0; i < dp_count; i++) {
+        int dlen = (int)strlen(dp_steps[i].dir);
+        *(unsigned int   *)((char *)buf + ofs)     = dp_steps[i].cksum;
+        *(unsigned short *)((char *)buf + ofs + 4) = dp_steps[i].flags;
+        memcpy((char *)buf + ofs + 6, dp_steps[i].dir, dlen + 1);
+        ofs += dlen + 8;
+    }
+
+    memset(entry, 0, 0x84);
+    *(unsigned int *)(entry + 0x58) = dp_src;
+    *(unsigned int *)(entry + 0x5C) = dp_dst;
+    *(int *)(entry + 0x6C) = dp_count;
+    *(int *)(entry + 0x70) = 0;
+    *(int *)(entry + 0x74) = 0;
+    *(int *)(entry + 0x78) = 0;
+    *(int *)(entry + 0x7C) = total;
+    *(void **)(entry + 0x80) = buf;
+
+    memset(sbp + 0x2EA4, 0, 40);
+    *(unsigned int *)(sbp + 0x2EA4) = dp_dst;
+
+    memset(sbp + 0x2E3B, 0, 0x35);
+    strncpy((char *)(sbp + 0x2E3B), "Dynamic Path", 0x34);
+
+    *(int *)(sbp + OFF_FR_LOOPING)       = 0;
+    *(int *)(sbp + OFF_FR_ON_ENTRY)      = 0;
+    *(int *)(sbp + OFF_FR_LOOP_RESUME_A) = 0;
+    *(int *)(sbp + OFF_FR_LOOP_RESUME_B) = 0;
+    memset(sbp + OFF_FR_PATH_FILE, 0, 76);
+
+    if (dp_suspend_events)
+        *(int *)(sbp + OFF_FR_DISABLE_EVENTS) = 1;
+
+    *(int *)(sbp + OFF_FR_MODE)    = 14;
+    *(int *)(sbp + OFF_FR_PATHING) = 1;
+
+    dp_active_dst = dp_dst;
+    InterlockedExchange(&dp_active, 1);
+
+    if (*(int *)(sbp + OFF_FR_GO_FLAG) == 0) {
+        HWND mw = *(HWND *)(sbp + OFF_FR_MMMAIN_HWND);
+        if (mw) PostMessageA(mw, WM_COMMAND, MEGAMUD_CMD_STOPGO, 0);
+    }
+
+    logmsg("[dynpath] injected %d steps (%d bytes), src=%08X dst=%08X, events suspended\n",
+           dp_count, total, dp_src, dp_dst);
+}
+
+static void dynpath_check_arrival(void)
+{
+    if (!dp_active || !struct_base) return;
+    unsigned char *sbp = (unsigned char *)struct_base;
+    unsigned int cur_ck = *(unsigned int *)(sbp + OFF_ROOM_CHECKSUM);
+    if (cur_ck == 0 || cur_ck != dp_active_dst) return;
+
+    if (dp_suspend_events)
+        *(int *)(sbp + OFF_FR_DISABLE_EVENTS) = dp_saved_events_disabled;
+    InterlockedExchange(&dp_active, 0);
+    logmsg("[dynpath] arrived at dst=%08X, events restored=%d\n",
+           dp_active_dst, (int)dp_suspend_events);
+}
+
+int WINAPI dynpath_inject(dynpath_step_t *steps, int count,
+                          unsigned int src_cksum, unsigned int dst_cksum)
+{
+    if (!struct_base || !steps || count <= 0) return -1;
+
+    dynpath_step_t *copy = (dynpath_step_t *)HeapAlloc(
+        GetProcessHeap(), 0, count * (int)sizeof(dynpath_step_t));
+    if (!copy) return -2;
+    memcpy(copy, steps, count * sizeof(dynpath_step_t));
+
+    dynpath_step_t *old = (dynpath_step_t *)InterlockedExchangePointer(
+        (void *volatile *)&dp_steps, copy);
+    if (old) HeapFree(GetProcessHeap(), 0, old);
+
+    dp_count = count;
+    dp_src   = src_cksum;
+    dp_dst   = dst_cksum;
+    InterlockedExchange(&dp_pending, 1);
+
+    return 0;
+}
+
+void WINAPI dynpath_set_suspend_events(int val)
+{
+    InterlockedExchange(&dp_suspend_events, val ? 1 : 0);
+}
+
+int WINAPI dynpath_get_suspend_events(void)
+{
+    return (int)dp_suspend_events;
+}
+
+int WINAPI get_player_strength(void)
+{
+    if (!struct_base) return 0;
+    return *(int *)(struct_base + 0x53F4);
+}
+
+int WINAPI get_player_picklocks(void)
+{
+    if (!struct_base) return 0;
+    return *(int *)(struct_base + 0x541C);
+}
+
+/* Called from the ReadFile hook (main thread) to drain pending injections
+ * and detect arrival at the dynamic path destination. */
+static void dynpath_check_pending(void)
+{
+    if (InterlockedCompareExchange(&dp_pending, 0, 1) == 1) {
+        dynpath_do_inject();
+        dynpath_step_t *old = (dynpath_step_t *)InterlockedExchangePointer(
+            (void *volatile *)&dp_steps, NULL);
+        if (old) HeapFree(GetProcessHeap(), 0, old);
+    }
+    dynpath_check_arrival();
+}
 
 /* ---- Auto struct finder thread ---- */
 /* Gets struct base directly from MMMAIN window extra data (offset 4),
