@@ -599,7 +599,13 @@ static int loc_room;
  * the path name in part 0. Written by dpw_tick, read by update_statusbar_location. */
 static char dpw_statusbar_override[256] = "";
 static volatile LONG dp_active;
+enum {
+    DPW_DONE = 0, DPW_READY, DPW_SNEAK_WAIT, DPW_HIDE_WAIT,
+    DPW_DIR_SENT, DPW_COMBAT_WAIT, DPW_REST_WAIT
+};
+static int dpw_state;
 static void type_into_megamud(const char *cmd);
+static void api_inject_command(const char *cmd);
 
 /* Plugin system forward declarations */
 #define SLOP_MAX_PLUGINS 16
@@ -1905,16 +1911,26 @@ static void __cdecl hooked_process_incoming(int sbase, void *data, int len)
     process_incoming_fn real_fn = (process_incoming_fn)VA_PROCESS_INCOMING;
     real_fn(sbase, data, len);
 
-    /* "You gain" detection: send Enter to refresh entity list after a kill.
-     * Only fires during active dynpath walk. */
+    /* Text-driven triggers during active dynpath walk.
+     * Matches MegaMUD's own response-based logic, not flag polling. */
     if (dp_active && len > 0 && data) {
         const char *p = (const char *)data;
-        for (int i = 0; i <= len - 8; i++) {
-            if (p[i]=='Y' && p[i+1]=='o' && p[i+2]=='u' && p[i+3]==' ' &&
-                p[i+4]=='g' && p[i+5]=='a' && p[i+6]=='i' && p[i+7]=='n') {
-                type_into_megamud("");
-                break;
+        int found_you_gain = 0, found_dont_think = 0;
+        for (int i = 0; i < len - 7; i++) {
+            if (p[i]=='Y' && p[i+1]=='o' && p[i+2]=='u' && p[i+3]==' ') {
+                if (i + 7 < len && p[i+4]=='g' && p[i+5]=='a' && p[i+6]=='i' && p[i+7]=='n')
+                    found_you_gain = 1;
+                if (i + 14 < len && p[i+4]=='d' && p[i+5]=='o' && p[i+6]=='n' && p[i+7]=='\'' &&
+                    p[i+8]=='t' && p[i+9]==' ' && p[i+10]=='t' && p[i+11]=='h' &&
+                    p[i+12]=='i' && p[i+13]=='n' && p[i+14]=='k')
+                    found_dont_think = 1;
             }
+        }
+        if (found_you_gain)
+            type_into_megamud("");
+        if (found_dont_think && dpw_state == DPW_SNEAK_WAIT) {
+            int bl = struct_base ? *(int *)((unsigned char *)struct_base + 0x4CFC) : 0;
+            if (!bl) api_inject_command("sn");
         }
     }
 
@@ -3881,16 +3897,6 @@ static void api_inject_command(const char *cmd);
  * Our job: wait for those to finish, then send next direction.
  * Direction comes from BFS path, not .mp file. No room DB needed. */
 
-enum {
-    DPW_DONE = 0,
-    DPW_READY,
-    DPW_SNEAK_WAIT,
-    DPW_HIDE_WAIT,
-    DPW_DIR_SENT,
-    DPW_COMBAT_WAIT,
-    DPW_REST_WAIT
-};
-
 #define DPW_MOVE_TIMEOUT_MS   15000
 
 /* Shared state (cross-thread handoff from vk_mudmap → main thread) */
@@ -4047,9 +4053,7 @@ static void dpw_tick(void)
             } else {
                 dpw_state = DPW_READY;
             }
-            break;
         }
-        api_inject_command("sn");
         break;
 
     case DPW_HIDE_WAIT:
@@ -4059,9 +4063,7 @@ static void dpw_tick(void)
         }
         if (is_hiding) {
             dpw_state = DPW_READY;
-            break;
         }
-        api_inject_command("hide");
         break;
 
     case DPW_DIR_SENT:
