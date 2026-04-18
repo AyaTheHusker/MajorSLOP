@@ -595,6 +595,10 @@ static void update_statusbar_location(void);
 static int loc_map;
 static int loc_room;
 
+/* Status bar override: when dynpath walker is active, this replaces
+ * the path name in part 0. Written by dpw_tick, read by update_statusbar_location. */
+static char dpw_statusbar_override[256] = "";
+
 /* Plugin system forward declarations */
 #define SLOP_MAX_PLUGINS 16
 
@@ -3647,28 +3651,35 @@ static int scan_mmansi_for_location(void)
     return 0;
 }
 
-/* Update MegaMUD's status bar — append Map/Room to the path name (part 0) */
+/* Update MegaMUD's status bar — append Map/Room to the path name (part 0).
+ * When dpw_statusbar_override is set, use that instead of reading part 0. */
 static void update_statusbar_location(void)
 {
-    if (loc_map == 0 && loc_room == 0) return;
-
     HWND mw = FindWindowA("MMMAIN", NULL);
     if (!mw) return;
     HWND sb = GetDlgItem(mw, MEGAMUD_STATUSBAR_ID);
     if (!sb) return;
 
-    /* Read current path name from part 0 */
-    char part0[256] = {0};
-    SendMessageA(sb, SB_GETTEXTA, 0, (LPARAM)part0);
-    part0[255] = '\0';
+    char path_part[256];
 
-    /* Strip any existing " | Map:" suffix we may have added before */
-    char *existing = strstr(part0, " | Map:");
-    if (existing) *existing = '\0';
+    if (dpw_statusbar_override[0]) {
+        strncpy(path_part, dpw_statusbar_override, sizeof(path_part) - 1);
+        path_part[sizeof(path_part) - 1] = 0;
+    } else {
+        char part0[256] = {0};
+        SendMessageA(sb, SB_GETTEXTA, 0, (LPARAM)part0);
+        part0[255] = '\0';
+        char *existing = strstr(part0, " | Map:");
+        if (existing) *existing = '\0';
+        strncpy(path_part, part0, sizeof(path_part) - 1);
+        path_part[sizeof(path_part) - 1] = 0;
+    }
 
-    /* Build new text: "MUSTFULL | Map:1 Room:9472" */
     char text[256];
-    sprintf(text, "%s | Map:%d Room:%d", part0, loc_map, loc_room);
+    if (loc_map != 0 || loc_room != 0)
+        sprintf(text, "%s | Map:%d Room:%d", path_part, loc_map, loc_room);
+    else
+        strcpy(text, path_part);
     SendMessageA(sb, SB_SETTEXTA, 0, (LPARAM)text);
 }
 
@@ -3896,26 +3907,14 @@ static char             dpw_label[128] = "";
 
 static void dpw_update_statusbar(void)
 {
-    HWND mw = FindWindowA("MMMAIN", NULL);
-    if (!mw) return;
-    HWND sb = GetDlgItem(mw, MEGAMUD_STATUSBAR_ID);
-    if (!sb) return;
-
-    char text[256];
     if (dpw_state != DPW_DONE && dpw_label[0]) {
-        sprintf(text, "%s (%d/%d)", dpw_label, dpw_step, dpw_count);
+        sprintf(dpw_statusbar_override, "%s (%d/%d)", dpw_label, dpw_step, dpw_count);
     } else if (dpw_state != DPW_DONE) {
-        sprintf(text, "DynPath (%d/%d)", dpw_step, dpw_count);
+        sprintf(dpw_statusbar_override, "DynPath (%d/%d)", dpw_step, dpw_count);
     } else {
-        sprintf(text, "No Path");
+        dpw_statusbar_override[0] = 0;
     }
-
-    if (loc_map != 0 || loc_room != 0) {
-        char tmp[128];
-        sprintf(tmp, " | Map:%d Room:%d", loc_map, loc_room);
-        strcat(text, tmp);
-    }
-    SendMessageA(sb, SB_SETTEXTA, 0, (LPARAM)text);
+    update_statusbar_location();
 }
 
 /* Replicate FUN_00453960: count hostile entities in the current room.
@@ -4159,6 +4158,8 @@ static void dpw_tick(void)
         break;
     }
     }
+
+    update_statusbar_location();
 }
 
 static void dynpath_do_inject(void)
