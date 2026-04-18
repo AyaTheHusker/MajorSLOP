@@ -459,6 +459,14 @@ write_i32(0x5788, 0);    // CONNECT_FLAG2 = 0
 | 0x5690 | i32 | IS_HIDING | Player is hiding |
 | 0x5698 | i32 | IN_COMBAT | Player is in combat |
 | 0x569C | i32 | UNK_569C | Tracks with IN_COMBAT — likely IS_ATTACKING or ATTACK_PENDING |
+| 0x5510 | i32 | COMBAT_CONDITION | Non-zero when combat condition active (poison/disease/status). Gates rebless section in COMBAT_HANDLER. |
+| 0x5528 | i32 | COMBAT_ENGAGE_STATE | Combat engagement state: 0=idle, 1=BS-ready(needs 0x5810), 2+=engaged, 3=skip. Controls COMBAT_EARLY attack flow. |
+| 0x54C8 | i32[N] | TICK_COUNTERS | Internal tick counters for timing gates |
+| 0x5778 | i32 | ACTION_PENDING | Non-zero blocks gate check AND dynpath. Set during spell casting, cleared by PRE_MOVE and various completions. |
+| 0x56CC | i32 | IS_HELD | Player is held (gates rebless section in combat handler) |
+| 0x56D0 | i32 | IS_STUNNED | Stun state |
+| 0x573C | i32 | NEED_STATE_UPDATE | Set to 1 after movement, signals state re-evaluation |
+| 0x5740 | i32 | NEED_ROOM_UPDATE | Set to 1 after sending direction |
 
 ### Status Effects
 
@@ -1088,6 +1096,22 @@ Functions discovered via Ghidra disassembly of megamud.exe. All are cdecl unless
 | 0x00435C30 | VA_INI_WRITE_INT | void(int struct, LPCSTR section, LPCSTR key, uint value) | Write int to INI file at struct+0x1303 |
 | 0x00435CF0 | VA_INI_WRITE_STR | void(int struct, LPCSTR section, LPCSTR key, LPCSTR value) | Write string to INI file |
 | 0x00427120 | VA_LOAD_ALL_DATA | uint(int *struct, uint flags) | Master data loader. Loads rooms, paths, macros, etc. Calls VA_SCAN_PATHS. |
+| 0x0040bad0 | COMBAT_HANDLER | uint(uint *struct) | Main combat handler (5848 bytes). Orchestrates attacks, rebless, resting, hiding. Called from text parsers on room entry. |
+| 0x0040b070 | COMBAT_EARLY | uint(int *struct) | Early combat check (343 bytes). Gates backstab/attack. Returns 0=skip, 1=action taken. |
+| 0x00407920 | STAT_REFRESH | uint(int *struct) | Stat refresh during combat (532 bytes). Gets exp/spells/stats. NOT rebless — returns 0 if hostiles present. |
+| 0x00405fe0 | SEARCH_HANDLER | uint(int *struct, int) | Search for hidden exits during path walking (419 bytes). |
+| 0x004074f0 | CAST_ATTACK_A | int(int *struct, byte *spell) | Cast attack spell variant A. Returns 1 if spell cast. |
+| 0x00407260 | CAST_ATTACK_B | int(int *struct, byte *spell, char *) | Cast attack spell variant B. Returns non-zero if cast. |
+| 0x004395c0 | TARGET_VALIDATE | int(int *struct) | Validate combat target exists. Returns non-zero if valid target present. |
+| 0x004536f0 | HOSTILE_COUNT_B | int(int struct, int 0) | Count hostile monsters (variant B). Returns count. Used by sneak-skip logic. |
+| 0x00469950 | COMBAT_TIMER_RESET | void(int struct) | Reset combat timing counters. Called before stat refresh. |
+| 0x00402740 | BLESS_HANDLER | uint(uint *struct) | Auto-bless caster (746 bytes). Iterates BlessCmd1-14, casts via FUN_00407260. Has sneak gate. |
+| 0x0040aa30 | COMBAT_BLESS_GATE | uint(int *struct) | Gates bless during combat (1599 bytes). Calls BLESS_HANDLER when BLESS_COMBAT+AUTO_BLESS set. |
+| 0x0040b2d0 | PRE_COMBAT_HANDLER | uint(int *struct) | Pre-combat setup (1563 bytes). Between combat gate and combat handler. |
+| 0x00406b40 | AUTOMATION_DISPATCH | uint(int *struct) | Main automation dispatcher (1794 bytes, 43 callees). Routes to combat/path/bless. |
+| 0x00408320 | BIG_HANDLER | uint(int *struct) | Large handler (4083 bytes, 33 callees). Core automation area. |
+| 0x00473490 | SPELL_LOOKUP | int(int struct, byte *name) | Look up spell by name. Returns spell record ptr or 0. |
+| 0x00474310 | SPELL_VALIDATE | int(int struct, int spell_rec) | Validate spell can be cast (level, class, etc). |
 
 ---
 
@@ -1350,6 +1374,438 @@ Handles sneaking AND backstab weapon management:
    - Equip BS weapon: "equip <weapon>\r"
    - Equip shield for BS: "equip <shield>\r"
 7. **Sneak**: if not already sneaking → IS_SNEAKING=1, "sneak\r", activity=0x17
+
+---
+
+## Automation Dispatch (FUN_00406b40)
+
+**Decompiled 2026-04-18 via Ghidra headless.** 1794 bytes at VA 0x00406B40, 43 callees.
+The master dispatcher for ALL MegaMUD automation: combat, bless, heal, path stepping.
+
+### Execution Flow (exact order)
+
+```
+FUN_00406b40(uint *param_1)
+
+1. EARLY GATES:
+   - If param_1[0x1591] (0x5644) == 0 → return 0 (automation disabled)
+   - If param_1[0x158f] (0x563C) == 0 → call FUN_0041cbb0 (init something)
+   - If (param_1[0x1511] & 1) == 0 → return 0 (step flag not set)
+   - FUN_0040d7e0: update entity state
+   - If param_1[0x1683] (0x5A0C) != 0 → return 0 (global block A)
+   - If param_1[0x1670] (0x59C0) != 0 → return 0 (global block B)
+   - Activity/COMBAT_ENGAGE_STATE checks
+
+2. HOSTILE SHORT-CIRCUIT (lines 91-94):
+   if (param_1[0x15bc] (0x56F0) != 0 AND FUN_004536f0(param_1, 0) == 0)
+     → call FUN_0040bad0 (COMBAT_HANDLER) directly → RETURN
+   ★ This runs BEFORE the BUSY_LOCK check!
+   ★ Combat handler fires regardless of BUSY_LOCK.
+
+3. BUSY_LOCK CHECK (line 96):
+   if (BUSY_LOCK (0x4CFC) != 0)
+     → call FUN_004519a0 (pending action handler)
+     → set iVar3 = 1
+   ★ With iVar3=1, ALL subsequent handlers are SKIPPED.
+
+4. HANDLER CHAIN (only runs when iVar3 == 0):
+   Each handler returns non-zero to signal "action taken":
+   - FUN_004066b0   (conditional)
+   - FUN_00406390   — unknown
+   - FUN_00407920   — STAT_REFRESH
+   - FUN_00403c20   — unknown
+   - FUN_00408040   — unknown
+   - FUN_00403270   — unknown
+   - FUN_00404b90   — unknown
+   - FUN_00409970   — unknown
+   - FUN_00408220   — unknown
+   - FUN_00409d20   — unknown
+   - FUN_0046ee40   — unknown
+   - FUN_0040aa30   — COMBAT_BLESS_GATE (contains heal + bless)
+   - FUN_0040b2d0   — PRE_COMBAT
+   - FUN_0040b070   — COMBAT_EARLY (sneak skip)
+   - FUN_00403cd0   — unknown
+   - FUN_00408320   — BIG_HANDLER (4083 bytes)
+   - FUN_0040a340   — unknown
+   - FUN_00403f10   — unknown
+   - FUN_00407b40   — unknown
+   - FUN_00406490   — unknown
+   - FUN_004519a0   — pending action handler
+   - FUN_0040bad0   — COMBAT_HANDLER
+   - FUN_00402740   — BLESS_HANDLER
+   - FUN_00402c60   — unknown
+   - FUN_004080c0   — unknown
+   - FUN_00402a30   — unknown
+   - FUN_00406240   — unknown
+   - FUN_00403a80   — unknown
+   - FUN_00406190   — unknown
+   - FUN_00407690   — unknown
+   - FUN_00404080   — unknown
+   - FUN_00404ed0   — STEP_ADVANCEMENT (last in chain)
+```
+
+### Key Insight: BUSY_LOCK Suppresses Bless But Not Combat
+
+When BUSY_LOCK(0x4CFC) is set:
+- Hostile short-circuit at step 2 still runs → combat handler (backstab) fires normally
+- Handler chain at step 4 is entirely skipped → NO bless, heal, stat refresh, etc.
+- This is used by the dynpath walker to prevent bless from breaking stealth during
+  the sneak→move→backstab window, while allowing MegaMUD to handle combat normally.
+
+---
+
+## Combat Handler (FUN_0040bad0)
+
+**Decompiled 2026-04-18 via Ghidra headless.** The main combat handler, 5848 bytes at
+VA 0x0040BAD0. Called from text parsers (not the main tick) when room-entry triggers
+combat. Returns 0 (no action) or 1 (action taken).
+
+### Execution Flow (exact order)
+
+```
+FUN_0040bad0(uint *param_1)   // param_1 = struct base (uint* — offsets are word indices)
+
+1. EARLY EXITS:
+   - ACTIVITY_STATE(0x54C0) == 2 or 4 → return 1 (resting/meditating)
+   - BUSY_LOCK(0x4CFC) != 0 → return 0
+   - CUR_HP(0x53D4) < 1 → return 0
+
+2. COMBAT EARLY — FUN_0040b070(struct):
+   Returns 0 = skip attack, 1 = attack initiated.
+   If returns 1 → COMBAT_HANDLER returns 1.
+   If returns 0 → fall through to maintenance.
+
+3. STAT REFRESH — FUN_00407920(struct):
+   ONLY called when ALL of these are true:
+   a. At least ONE of these combat conditions is set:
+      - COMBAT_CONDITION(0x5510) > 0    (in active combat / status condition)
+      - IS_HELD(0x56CC) != 0
+      - IS_STUNNED(0x56D0) != 0
+      - IS_BLINDED(0x56AC) != 0
+      - 0x56B0 != 0
+      - WAITING_ON_MEMBER(0x5790) != 0
+      - HOLDING_UP_LEADER(0x5794) != 0
+   b. BUSY_LOCK(0x4CFC) == 0
+   c. Tick delta > 0x78 (120 ticks since last check)
+   → Calls FUN_00469950 (timer reset), then FUN_00407920
+   
+   ★ FUN_00407920 is NOT rebless. It's a stat refresh:
+   - Returns 0 if hostiles present (don't refresh during combat)
+   - Sends "stat\r", "exp\r", "spells\r"/"powers\r"
+   - Checks for HP/mana exceeding max (anomaly detection)
+   
+   ★ Actual rebless: FUN_00402740 (746 bytes, VA 0x00402740).
+   Called from FUN_0040aa30 when BLESS_COMBAT(0x3A44) AND AUTO_BLESS(0x4D0C) set.
+   See "Bless Handler" section below for full analysis.
+
+4. HIDDEN WAIT CHECK:
+   - If IS_HIDING(0x5690) AND timing conditions → "Remaining hidden", return 1
+
+5. HP-FULL / MANA-FULL SPELL CASTING:
+   - If mana >= 67% AND MA_FULL_CMD configured → cast it ("Casting %s because Mana/Kai is full")
+   - If HP >= configured threshold AND HP_FULL_CMD → cast it ("Casting %s because HP's are full")
+   - These are "top-off" spells, not rebless
+
+6. HP/MANA REST THRESHOLDS:
+   - Check HP against rest/heal thresholds
+   - Check mana against rest thresholds
+   - Set bVar3/bVar4 (need-rest flags)
+   - Status strings: "HP's too low", "Mana/Kai too low", etc.
+
+7. PARTY MEMBER WAIT:
+   - Check each party member's health
+   - Wait for low-HP party members if configured
+
+8. REST DECISION (if bVar3 or bVar4):
+   - If IS_HELD AND FREEDOM_CMD configured → cast freedom
+   - Rest/meditate as needed
+
+9. ATTACK INITIATION (much further down, after all maintenance):
+   - Actual attack command sent via FUN_0041c9d0
+   - Sets COMBAT_ENGAGE_STATE, activity state
+```
+
+### FUN_0040b070 — Combat Early Check (343 bytes, VA 0x0040B070)
+
+The gate function that decides whether to engage in combat. Called first in COMBAT_HANDLER.
+
+```
+FUN_0040b070(int *param_1)
+
+1. CUR_HP < 1 → return 0
+2. ACTIVITY_STATE(0x54C0):
+   - 0x0D → return 0
+   - 0x0E → return 0
+
+3. ★ SNEAK-IN-IDLE CHECK:
+   If ACTIVITY_STATE == 0 (idle) AND IS_SNEAKING(0x5688) != 0
+   AND 0x5664 != 0 AND HOSTILE_COUNT_B(struct, 0) > 0:
+   → return 0 (SKIP COMBAT — player is sneaking, hold for BS)
+   
+   This is why MegaMUD doesn't attack when sneaking into a room:
+   FUN_0040b070 returns 0, skipping the attack. The BS is triggered
+   by a separate mechanism (text parser / room entry handler).
+
+4. AUTO_LIGHT(0x4D10) == 0 → return 0 (room too dark to pick targets — 
+      pathing/automation won't initiate. MegaMUD still fights back if attacked
+      via text parser detecting incoming combat, just doesn't proactively engage)
+
+5. IS_HIDING(0x5690) != 0 → return 0 (hiding, don't attack)
+
+6. ★ SNEAKING + HOSTILES:
+   If IS_SNEAKING(0x5688) != 0 AND HOSTILE_COUNT_B > 0:
+   → return 0 (don't attack while sneaking)
+
+7. COMBAT_ENGAGE_STATE(0x5528) check:
+   - 0: falls through → returns 0 (not engaged)
+   - 1: needs BS_READY(0x5810) != 0 → tries attack spell
+   - 2+: proceeds to attack logic
+   - 3: return 0 (explicitly skip)
+
+8. If 0x5528 == 0 or 1, also need TARGET_VALIDATE(FUN_004395c0) != 0.
+
+9. ★ ATTACK EXECUTION (label LAB_0040b124):
+   - Reads auto-attack spell string at struct+0x4EE0
+   - If IS_SNEAKING AND 0x3A24(?) == 0 → return 0
+     (additional sneak safety check)
+   - FUN_004074f0: try cast attack spell A → if success, return 1
+   - FUN_00407260: try cast attack spell B → if success, proceed
+   - Clears COMBAT_ENGAGE_STATE, sets NEED_STATE_UPDATE=1
+
+10. Return 1 (action taken) or 0 (nothing to do)
+```
+
+### PRE_MOVE State Reset (FUN_00404320, VA 0x00404320, 721 bytes)
+
+Critical function called by step advancement BEFORE sending a direction.
+**Clears stealth flags** — this is how MegaMUD prevents stale sneak state.
+
+Key state resets (using byte offsets):
+```
+param_1[0x15a2] = 0  → IS_SNEAKING(0x5688) = 0     ★ Clears sneak flag
+param_1[0x15a4] = 0  → IS_HIDING(0x5690) = 0        ★ Clears hide flag
+param_1[0x15de] = 0  → ACTION_PENDING(0x5778) = 0   ★ Clears action lock
+param_1[0x1512] = 2  → CMD_SOURCE(0x5448) = 2       (moving)
+param_1[0x15b5] = 0  → various combat state clears
+param_1[0x15b6] = 1
+param_1[0x1594] = 1
+param_1[0x15df] = 0
+param_1[0x15e0] = 0
+param_1[0x15e1] = 0
+param_1[0x15ff] = 0
+param_1[0x1600] = 0
+param_1[0x15e3] = 0
+param_1[0x15aa] = 0
+param_1[0x15d6] = 0
+param_1[0x1541] = 0  → MISMATCH_COUNT = 0
+param_1[0x1540] = 0
+param_1[0x1538] = 0
+param_1[0x153a] = 0
+param_1[0x153c] = 0
+```
+Then calls:
+- FUN_00479dc0(struct, 0x12) → sets ACTIVITY_STATE = 0x12 (moving)
+- FUN_0041c9d0 → sends direction command
+- Logs "Moving: <direction>"
+
+### Bless/Heal Timing Analysis
+
+**The Problem:** When our dynpath walker enters a room while sneaking,
+MegaMUD may rebless/heal before the backstab fires, breaking stealth.
+
+**Root Cause (from RE of FUN_00406b40 + FUN_0040aa30):**
+- PRE_MOVE (FUN_00404320) clears IS_SNEAKING before sending direction
+- MegaMUD's native path sets ACTIVITY_STATE to 0x12 (walking), which
+  blocks the handler chain via early gates. Bless never gets a chance.
+- Our dynpath walker leaves ACTIVITY_STATE=0 (idle), so the entire
+  handler chain runs freely. The sneak gate in FUN_0040aa30 checks
+  IS_SNEAKING, but PRE_MOVE already cleared it → gate fails → bless fires.
+
+**Solution (BUSY_LOCK suppression):**
+The dynpath walker sets BUSY_LOCK(0x4CFC) = 1 when sending a direction
+while sneaking. In FUN_00406b40:
+- Hostile shortcut at step 2 runs BEFORE BUSY_LOCK check → backstab works
+- BUSY_LOCK at step 3 sets iVar3=1 → entire handler chain skipped → no bless
+- BUSY_LOCK is cleared after the first combat round fires (detected via
+  rd_round_num change), allowing bless/heal to proceed normally.
+
+**Order of operations with BUSY_LOCK suppression:**
+```
+1. DPW_READY: is_sneaking → set BUSY_LOCK=1, send direction → DPW_DIR_SENT
+2. PRE_MOVE fires: clears IS_SNEAKING, IS_HIDING, ACTION_PENDING
+3. Room changes → DPW_READY (via DPW_DIR_SENT room check)
+4. DPW_READY: hostiles detected → DPW_COMBAT_WAIT, save rd_round_num
+5. MegaMUD automation tick (FUN_00406b40):
+   a. Hostile shortcut: combat handler fires → backstab initiated ✓
+   b. BUSY_LOCK check: iVar3=1 → handler chain skipped → NO bless ✓
+6. First combat round fires (swing detection) → rd_round_num increments
+7. DPW_COMBAT_WAIT: round detected → clear BUSY_LOCK → bless allowed
+8. MegaMUD's bless handler can now fire between rounds ✓
+```
+
+**Settings that control bless timing:**
+- BLESS_COMBAT(0x3A44): Cast bless during combat
+- BLESS_RESTING(0x3A40): Cast bless while resting
+- MANA_BLESS_PCT(0x37B8): Min mana % to cast bless
+
+### Offsets Discovered from Combat Handler RE
+
+| Offset | Type | Name | Notes |
+|---|---|---|---|
+| 0x4CFC | i32 | BUSY_LOCK | In FUN_00406b40: checked AFTER hostile shortcut but BEFORE handler chain. When set, iVar3=1 → skips bless/heal/stat/step chain. Combat handler still fires via hostile shortcut. Used by dynpath walker to suppress bless during sneak→BS window. |
+| 0x4D10 | i32 | AUTO_LIGHT | param_1[0x1344] — gates proactive combat in COMBAT_EARLY: room too dark to pick targets. MegaMUD still fights back if attacked (text parser). |
+| 0x4EE0 | char[21] | AUTO_ATTACK_SPELL | Auto-attack spell string (used by COMBAT_EARLY at LAB_0040b124) |
+| 0x5510 | i32 | COMBAT_CONDITION | Active combat condition counter. 0 when idle. Gates rebless section. |
+| 0x5528 | i32 | COMBAT_ENGAGE_STATE | 0=idle, 1=BS-ready, 2+=engaged, 3=skip |
+| 0x5644 | i32 | AUTOMATION_ENABLE | param_1[0x1591] — must be non-zero for FUN_00406b40 to run |
+| 0x563C | i32 | AUTOMATION_INIT | param_1[0x158f] — if 0, calls FUN_0041cbb0 to init |
+| 0x5664 | i32 | PATHING_ACTIVE | param_1[0x1599] — third condition in FUN_0040aa30 sneak gate |
+| 0x56F0 | i32 | HOSTILE_FLAG | param_1[0x15bc] — checked in FUN_00406b40 hostile shortcut |
+| 0x5800 | i32 | SPELL_PENDING | param_1[0x1600] — set after heal/disease cure, blocks further bless |
+| 0x59C0 | i32 | GLOBAL_BLOCK_B | param_1[0x1670] — if non-zero, FUN_00406b40 returns 0 |
+| 0x5A0C | i32 | GLOBAL_BLOCK_A | param_1[0x1683] — if non-zero, FUN_00406b40 returns 0 |
+| 0x5688 | i32 | IS_SNEAKING | Checked multiple times in COMBAT_EARLY for skip logic |
+| 0x5690 | i32 | IS_HIDING | Blocks combat when set |
+| 0x5778 | i32 | ACTION_PENDING | Cleared by PRE_MOVE. Blocks gate check. |
+| 0x5810 | i32 | BS_READY | Must be non-zero for COMBAT_ENGAGE_STATE=1 to proceed with BS |
+
+### FUN_00402740 — Bless Handler (746 bytes, VA 0x00402740)
+
+The actual auto-bless/rebless function. Iterates through BlessCmd1-14 and casts
+any that are due. Called from FUN_0040aa30 (combat bless gate).
+
+```
+FUN_00402740(uint *param_1)
+
+1. ★ SNEAK GATE (line 1314-1316 of decompilation):
+   BLOCKS BLESS when ALL of these are true:
+   - COMBAT_CONDITION(0x5510) < 1     (not in active combat round)
+   - AUTO_BLESS(0x4D0C) != 0          (auto-bless enabled)
+   - ACTIVITY_STATE(0x54C0) != 0x0E   (not already BS'ing)
+   - ACTIVITY_STATE == 0 (idle) AND IS_SNEAKING(0x5688) != 0
+     AND 0x5664 != 0 AND HOSTILE_COUNT_B > 0
+   
+   ★ KEY: When idle + sneaking + hostiles present → bless is BLOCKED.
+   This is how MegaMUD prevents rebless from breaking stealth before backstab.
+
+2. ACTIVITY CHECK:
+   - If ACTIVITY_STATE == 0x0C (already blessing) AND spell tracking:
+     → Update bless timer, set activity to idle, continue
+   
+3. PRE-CONDITIONS:
+   - CUR_HP > 0
+   - Not confused (IS_CONFUSED(0x56B0) == 0)  
+   - Not currently casting (0x15a6) OR BLESS_COMBAT(0x3A44) enabled
+   - Activity NOT resting(2,3) or meditating(4,5) UNLESS BLESS_RESTING(0x3A40) set
+   - CUR_MANA >= (MAX_MANA * MANA_BLESS_PCT(0x37B8)) / 100
+
+4. BLESS LOOP (iterates 0 to 13, up to 14 bless slots):
+   - Slots 0-9: BlessCmd1-10 at struct+0x4F1F (21 bytes apart)
+   - Slots 10-13: party bless slots (only if party size >= 2)
+   - For each slot:
+     a. Read spell string from struct+0x4F1F + (slot * 0x15)
+     b. Skip if empty string
+     c. FUN_00473490: look up spell by name → spell record
+     d. Check spell flags (byte at spell+0x54, bit 1 must be set = buff type)
+     e. 600-tick timing gate between casts of same slot
+     f. FUN_004074f0: try equip item for spell → return 1 if equipping
+     g. FUN_00407260: cast the spell → return 1 if casting
+     h. Record cast time, set ACTIVITY_STATE = 0x0C (Blessing)
+
+5. Return 0 if nothing to cast.
+```
+
+**Settings that control bless timing:**
+- AUTO_BLESS(0x4D0C): Master toggle for auto-bless
+- BLESS_COMBAT(0x3A44): Allow bless during combat
+- BLESS_RESTING(0x3A40): Allow bless while resting/meditating  
+- MANA_BLESS_PCT(0x37B8): Minimum mana % to cast bless
+- 600-tick minimum between casts of the same bless slot
+
+### FUN_0040aa30 — Combat Bless Gate (1599 bytes, VA 0x0040AA30)
+
+The main bless/heal gate function. Handles disease cure, blind cure, held cure,
+combat healing, and auto-bless. Has its own sneak gate at the top.
+
+```
+FUN_0040aa30(uint *param_1)
+
+1. PREREQUISITES:
+   - param_1[0x1342] (AUTO_BLESS 0x4D08??) != 0
+   - CUR_HP > 0
+   - MAX_HP != 0, MAX_MANA != 0
+   - ACTIVITY_STATE != 0x0E
+
+2. ★ SNEAK GATE (line 281-283):
+   if (ACTIVITY_STATE == 0          // idle
+       AND IS_SNEAKING (0x5688) != 0
+       AND param_1[0x1599] (0x5664) != 0  // PATHING_ACTIVE or similar
+       AND FUN_004536f0(hostile count) > 0)
+     → return 0   // BLOCK all bless/heal
+   ★ Prevents bless from breaking stealth near hostiles.
+   ★ Only works when IS_SNEAKING flag is actually set.
+   ★ PRE_MOVE clears IS_SNEAKING before direction, creating a gap.
+
+3. TIMING GATE (5-tick 64-bit counter at 0x254e/0x254f)
+
+4. PRIORITY ACTIONS (checked in order, each returns 1 if acted):
+   a. Disease cure: "@diseased" command
+   b. Blind cure: "@blind" command
+   c. Held cure: "@held" command
+   d. Combat heal: cast heal spell when HP < combat heal threshold
+
+5. If param_1[0x1600] (0x5800) != 0 → return 0
+   (spell pending from above, block further actions)
+
+6. More timing gates on 64-bit counters
+
+7. Diseased weapon handling
+
+8. HEAL PATH: HP < combat healing level → cast heal spell
+   BLESS PATH (else):
+   if (BLESS_COMBAT(0x3A44) != 0 AND AUTO_BLESS(0x4D0C) != 0)
+     → call FUN_00402740 (bless handler)
+```
+
+**Why bless breaks stealth with dynpath walker:**
+PRE_MOVE (FUN_00404320) clears IS_SNEAKING before sending direction. When
+the player arrives in the new room, IS_SNEAKING=0, so the sneak gate at step 2
+does NOT trigger. MegaMUD's own path walker has ACTIVITY_STATE != 0 during path
+execution, which blocks the handler chain via different gates. Our dynpath walker
+leaves ACTIVITY_STATE=0, so the bless handler reaches the bless path freely.
+
+**Solution:** Set BUSY_LOCK(0x4CFC) when sending direction while sneaking.
+Per FUN_00406b40 analysis, BUSY_LOCK suppresses the entire handler chain
+(including bless) while still allowing the hostile→combat handler shortcut
+(backstab). Clear after first combat round fires.
+
+### Function Coverage Summary
+
+**Total functions in MegaMud.exe: 4505**
+- Documented in MEGAMUD_RE.md: ~65 (1.4%)
+- Undocumented >= 50 bytes: 2699
+- Top undocumented by size: 13788 bytes (FUN_004322a0) down to ~50 bytes
+
+**Coverage by address range:**
+| Range | Description | Count | Documented |
+|---|---|---|---|
+| 0x401000-0x410000 | Core automation (step, combat, path) | 123 | ~20 |
+| 0x410000-0x420000 | Connection & I/O (hooks, data) | ~100 | ~5 |
+| 0x420000-0x430000 | Path management (verify, start, rooms) | ~100 | ~8 |
+| 0x430000-0x440000 | Equipment & settings (INI, light) | ~100 | ~6 |
+| 0x440000-0x450000 | UI & WndProc (dialogs, roam) | ~100 | ~3 |
+| 0x450000-0x460000 | Party & entity (commands, counts) | ~100 | ~8 |
+| 0x460000-0x470000 | Path parse & timer (mp file, scan) | ~100 | ~3 |
+| 0x470000-0x480000 | Activity & commands (status, @cmds) | ~100 | ~10 |
+| 0x480000-0x490000 | Display & logging (statusbar, INI) | ~100 | ~3 |
+| 0x490000-0x500000 | Utilities (string, CRT, misc) | ~3500+ | ~2 |
+
+Full catalog: `dll/ghidra_function_catalog.txt`
+
+### Ghidra Scripts for Combat RE
+
+- `GhidraWalkDecompile5.java`: HOSTILE_MONSTER_COUNT, EQUIP_CHECK, COMBAT_HANDLER, PROCESS_INCOMING, STATE_CHANGED
+- `GhidraWalkDecompile6.java`: COMBAT_MAINTENANCE(FUN_00407920), PRESTEP_BLESS(FUN_00405fe0), CAST_ATTACK_A/B, TARGET_VALIDATE, SNEAK_HOSTILE_CHECK — **awaiting decompilation**
 
 ---
 

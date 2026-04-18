@@ -1929,8 +1929,10 @@ static void __cdecl hooked_process_incoming(int sbase, void *data, int len)
         if (found_you_gain)
             type_into_megamud("");
         if (found_dont_think && dpw_state == DPW_SNEAK_WAIT) {
-            int bl = struct_base ? *(int *)((unsigned char *)struct_base + 0x4CFC) : 0;
-            if (!bl) api_inject_command("sn");
+            unsigned char *sb = (unsigned char *)struct_base;
+            int bl = sb ? *(int *)(sb + 0x4CFC) : 0;
+            int ap = sb ? *(int *)(sb + 0x5778) : 0;
+            if (!bl && !ap) api_inject_command("sn");
         }
     }
 
@@ -3949,6 +3951,27 @@ static int dpw_count_hostiles(unsigned char *sbp)
     return hostiles;
 }
 
+/* Set/clear PATHING_ACTIVE (0x5664) — the flag that enables sneak gates
+ * in FUN_0040aa30 (bless gate) and FUN_0040b070 (combat early).
+ * Both check: ACTIVITY_STATE==0 AND IS_SNEAKING AND 0x5664!=0 AND hostiles>0
+ * Without 0x5664 set, those gates never fire and bless/combat proceed freely.
+ * MegaMUD's own path walker sets this when a path is active. */
+static void dpw_set_pathing_active(unsigned char *sbp)
+{
+    if (sbp && *(int *)(sbp + 0x5664) == 0) {
+        *(int *)(sbp + 0x5664) = 1;
+        logmsg("[dynpath] PATHING_ACTIVE (0x5664) = 1\n");
+    }
+}
+
+static void dpw_clear_pathing_active(unsigned char *sbp)
+{
+    if (sbp && *(int *)(sbp + 0x5664) != 0) {
+        *(int *)(sbp + 0x5664) = 0;
+        logmsg("[dynpath] PATHING_ACTIVE (0x5664) = 0\n");
+    }
+}
+
 static void dpw_tick(void)
 {
     if (dpw_state == DPW_DONE || !struct_base) return;
@@ -3976,12 +3999,14 @@ static void dpw_tick(void)
     int is_sneaking = *(int *)(sbp + 0x5688);
     int is_hiding   = *(int *)(sbp + 0x5690);
     int busy_lock   = *(int *)(sbp + 0x4CFC);
+    int action_pending = *(int *)(sbp + 0x5778);
     unsigned int room_ck = *(unsigned int *)(sbp + OFF_ROOM_CHECKSUM);
     int hostiles    = dpw_count_hostiles(sbp);
 
     switch (dpw_state) {
     case DPW_READY:
         if (dpw_step >= dpw_count) {
+            dpw_clear_pathing_active(sbp);
             dpw_state = DPW_DONE;
             InterlockedExchange(&dp_active, 0);
             logmsg("[dynpath] arrived at %08X (%d steps)\n", room_ck, dpw_count);
@@ -3989,7 +4014,9 @@ static void dpw_tick(void)
             break;
         }
         if (busy_lock) break;
+        if (action_pending) break;
         if (cur_hp < 1) {
+            dpw_clear_pathing_active(sbp);
             logmsg("[dynpath] dead, aborting\n");
             dpw_state = DPW_DONE;
             InterlockedExchange(&dp_active, 0);
@@ -4078,6 +4105,7 @@ static void dpw_tick(void)
             break;
         }
         if (GetTickCount() - dpw_timeout > DPW_MOVE_TIMEOUT_MS) {
+            dpw_clear_pathing_active(sbp);
             logmsg("[dynpath] move timeout step %d, aborting\n", dpw_step);
             dpw_state = DPW_DONE;
             InterlockedExchange(&dp_active, 0);
@@ -4120,6 +4148,7 @@ static void dynpath_do_inject(void)
 {
     if (!struct_base || !dp_steps || dp_count <= 0) return;
 
+    dpw_clear_pathing_active((unsigned char *)struct_base);
     dpw_state = DPW_DONE;
     if (dpw_steps) {
         HeapFree(GetProcessHeap(), 0, dpw_steps);
@@ -4139,6 +4168,7 @@ static void dynpath_do_inject(void)
 
     dp_active_dst = dp_dst;
     InterlockedExchange(&dp_active, 1);
+    dpw_set_pathing_active((unsigned char *)struct_base);
     dpw_state = DPW_READY;
 
     logmsg("[dynpath] walk started: %d steps, src=%08X dst=%08X\n",
