@@ -111,8 +111,10 @@ static float    mdw_view_x = 0, mdw_view_y = 0;  /* world-space pan center */
 static float    mdw_zoom = 4.0f;          /* 1.0 = default CELL px */
 
 /* Current room + glow pulse */
-static uint32_t mdw_cur_ri = 0xFFFFFFFF;
-static DWORD    mdw_pulse_tick = 0;       /* GetTickCount() of most recent change */
+static uint32_t mdw_cur_ri = 0xFFFFFFFF;      /* map cursor — moved by numpad/exit/click */
+static uint32_t mdw_player_ri = 0xFFFFFFFF;   /* player's actual game position (RM) */
+static int      mdw_browsing = 0;             /* 1 = user manually navigating map, don't follow player */
+static DWORD    mdw_pulse_tick = 0;            /* GetTickCount() of most recent change */
 
 /* Cached room code from MegaMUD's Rooms.md (updated on room change) */
 static char     mdw_cur_room_code[8] = "";
@@ -162,6 +164,27 @@ static uint32_t     mdw_rec_start_ri = 0xFFFFFFFF;
 static int          mdw_rec_gen_mpx = 1;   /* checkbox — sidecar by default */
 static int          mdw_show_path_panel = 1;
 static int          mdw_path_focus = 0;
+
+/* Right-click context menu on map rooms */
+#define MDW_CTX_MAX_ITEMS 24
+enum {
+    MDW_CTX_TYPE_WALK = 0,
+    MDW_CTX_TYPE_CENTER,
+    MDW_CTX_TYPE_SEP,
+    MDW_CTX_TYPE_START,
+    MDW_CTX_TYPE_EXIT
+};
+typedef struct {
+    int      type;
+    char     label[80];
+    uint32_t dest_ri;
+} MdwCtxItem;
+static int        mdw_ctx_open = 0;
+static int        mdw_ctx_x = 0, mdw_ctx_y = 0;
+static int        mdw_ctx_hover = -1;
+static uint32_t   mdw_ctx_room_ri = 0xFFFFFFFF;
+static int        mdw_ctx_count = 0;
+static MdwCtxItem mdw_ctx_items[MDW_CTX_MAX_ITEMS];
 
 /* Button hit rects (filled during draw, read during click). */
 static float mdw_btn_rec_x0 = 0, mdw_btn_rec_x1 = 0;
@@ -1792,12 +1815,28 @@ static int mdw_set_current(int map_num, int room_num)
     return 1;
 }
 
+/* Update player's actual game position from RM.  Always tracks
+ * mdw_player_ri.  Only moves the map cursor (mdw_cur_ri + view)
+ * when dynpath is actively walking a path. */
+static int mdw_update_player_pos(int map_num, int room_num)
+{
+    if (!mdw_loaded) return 0;
+    uint32_t ri = mdw_room_lookup((uint16_t)map_num, (uint16_t)room_num);
+    if (ri == 0xFFFFFFFF) return 0;
+    mdw_player_ri = ri;
+
+    if (mdw_use_rm && !mdw_browsing)
+        mdw_set_current(map_num, room_num);
+    return 1;
+}
+
 /* Manual "Set Room" button target: jump and pin the view (turns off RM
  * auto-tracking so the manual setting isn't clobbered next frame). */
 static int mdw_goto_room(int map_num, int room_num)
 {
     if (!mdw_set_current(map_num, room_num)) return 0;
     mdw_use_rm = 0;
+    mdw_browsing = 1;
     mdw_map_buf[0] = 0;
     mdw_room_buf[0] = 0;
     mdw_input_focus = 0;
@@ -3839,6 +3878,7 @@ static int mdw_mouse_down(int mx, int my)
         float fmx = (float)mx;
         if (fmx >= mdw_cb_use_rm_x0 && fmx <= mdw_cb_use_rm_x1) {
             mdw_use_rm = !mdw_use_rm;
+            if (mdw_use_rm) mdw_browsing = 0;
             mdw_input_focus = 0;
             return 1;
         }
@@ -4061,8 +4101,8 @@ static int mdw_mouse_down(int mx, int my)
                             mdw_rooms[mdw_confirm_dest_ri].room);
                     int rv = pfn_dynpath_inject(
                         (dynpath_step_t *)cdp->steps, cdp->count,
-                        mdw_rooms[mdw_cur_ri].checksum,
-                        mdw_rooms[mdw_confirm_dest_ri].checksum);
+                        (mdw_rooms[mdw_player_ri].map << 16) | mdw_rooms[mdw_player_ri].room,
+                        (mdw_rooms[mdw_confirm_dest_ri].map << 16) | mdw_rooms[mdw_confirm_dest_ri].room);
                     if (rv == 0)
                         wsprintfA(mdw_walk_status, "Walking to %s (%d steps)",
                                   mdw_rooms[mdw_confirm_dest_ri].name, cdp->count);
@@ -4179,16 +4219,78 @@ static void mdw_mouse_up(void)
 
 /* Right-click on a room = center the view on it. Returns 1 if the click
  * landed on a room (so the outer wndproc can skip its right-click menu). */
+static void mdw_ctx_build(uint32_t ri)
+{
+    mdw_ctx_count = 0;
+    if (ri >= mdw_room_count) return;
+    MdwRoom *room = &mdw_rooms[ri];
+
+    /* Walk to this room */
+    MdwCtxItem *it = &mdw_ctx_items[mdw_ctx_count++];
+    it->type = MDW_CTX_TYPE_WALK;
+    it->dest_ri = ri;
+    wsprintfA(it->label, "Walk to %d,%d  %s", room->map, room->room, room->name);
+    it->label[79] = 0;
+
+    /* Center on room */
+    it = &mdw_ctx_items[mdw_ctx_count++];
+    it->type = MDW_CTX_TYPE_CENTER;
+    it->dest_ri = ri;
+    lstrcpyA(it->label, "Center on Room");
+
+    /* Separator */
+    it = &mdw_ctx_items[mdw_ctx_count++];
+    it->type = MDW_CTX_TYPE_SEP;
+    it->label[0] = 0;
+
+    /* Set as path start */
+    it = &mdw_ctx_items[mdw_ctx_count++];
+    it->type = MDW_CTX_TYPE_START;
+    it->dest_ri = ri;
+    lstrcpyA(it->label, "Set as Path Start");
+
+    /* Add special exits: up, down, text-command exits */
+    int has_exits = 0;
+    for (int i = 0; i < room->exit_count && mdw_ctx_count < MDW_CTX_MAX_ITEMS - 1; i++) {
+        MdwExit *ex = &mdw_exits[room->exit_ofs + i];
+        int show = 0;
+        const char *dir_label = NULL;
+        if (ex->dir == 8) { show = 1; dir_label = "Go Up"; }
+        else if (ex->dir == 9) { show = 1; dir_label = "Go Down"; }
+        else if (ex->text_cmd[0]) { show = 1; dir_label = ex->text_cmd; }
+        if (!show) continue;
+
+        uint32_t dest = mdw_room_lookup(ex->tmap, ex->troom);
+        if (dest == 0xFFFFFFFF) continue;
+
+        if (!has_exits) {
+            it = &mdw_ctx_items[mdw_ctx_count++];
+            it->type = MDW_CTX_TYPE_SEP;
+            it->label[0] = 0;
+            has_exits = 1;
+        }
+
+        it = &mdw_ctx_items[mdw_ctx_count++];
+        it->type = MDW_CTX_TYPE_EXIT;
+        it->dest_ri = dest;
+        wsprintfA(it->label, "%s \x10 %d,%d", dir_label,
+                  mdw_rooms[dest].map, mdw_rooms[dest].room);
+        it->label[79] = 0;
+    }
+}
+
 static int mdw_rbutton_down(int mx, int my)
 {
     if (!mdw_visible || !mdw_loaded) return 0;
-    if (!mdw_hit_window(mx, my)) return 0;
+    if (!mdw_hit_window(mx, my)) {
+        if (mdw_ctx_open) { mdw_ctx_open = 0; return 1; }
+        return 0;
+    }
 
     int ch = (int)(VSB_CHAR_H * ui_scale);
     int titlebar_h = ch + 10;
     if (my - (int)mdw_y < titlebar_h) return 0;
 
-    /* Reproduce the transform from mdw_draw */
     float x0 = mdw_x, y0 = mdw_y;
     float x1 = x0 + mdw_w, y1 = y0 + mdw_h;
     float tb_y1 = y0 + (float)titlebar_h;
@@ -4200,7 +4302,10 @@ static int mdw_rbutton_down(int mx, int my)
     float c_x0 = x0 + 6, c_y0 = tb_y1 + 3;
     float c_x1 = x1 - 6 - (float)pp_w_px_r, c_y1 = ctrl_y0_r - 2;
     if ((float)mx < c_x0 || (float)mx > c_x1 ||
-        (float)my < c_y0 || (float)my > c_y1) return 0;
+        (float)my < c_y0 || (float)my > c_y1) {
+        if (mdw_ctx_open) { mdw_ctx_open = 0; return 1; }
+        return 0;
+    }
 
     float cell = 20.0f * mdw_zoom;
     float tile = 7.0f * mdw_zoom;
@@ -4209,7 +4314,6 @@ static int mdw_rbutton_down(int mx, int my)
     float cview_y = (c_y0 + c_y1) * 0.5f;
     float zfac = cell / 20.0f;
 
-    /* Find closest room to cursor (within tile radius) */
     float best_d2 = tile * tile * 4.0f;
     uint32_t best_i = 0xFFFFFFFF;
     for (uint32_t i = 0; i < mdw_room_count; i++) {
@@ -4224,13 +4328,222 @@ static int mdw_rbutton_down(int mx, int my)
         float d2 = ddx * ddx + ddy * ddy;
         if (d2 < best_d2) { best_d2 = d2; best_i = i; }
     }
-    if (best_i == 0xFFFFFFFF) return 0;
+    if (best_i == 0xFFFFFFFF) {
+        if (mdw_ctx_open) { mdw_ctx_open = 0; return 1; }
+        return 0;
+    }
 
-    /* Center view on that room (current-room marker stays tied to
-     * the real character via RM polling). */
-    mdw_view_x = mdw_rooms[best_i].gx * 20.0f;
-    mdw_view_y = mdw_rooms[best_i].gy * 20.0f;
+    mdw_ctx_room_ri = best_i;
+    mdw_ctx_x = mx;
+    mdw_ctx_y = my;
+    mdw_ctx_hover = -1;
+    mdw_ctx_open = 1;
+    mdw_focused = 1;
+    mdw_ctx_build(best_i);
     return 1;
+}
+
+static int mdw_ctx_item_h(void) { return (int)(20 * ui_scale); }
+static int mdw_ctx_w(void) { return (int)(220 * ui_scale); }
+static int mdw_ctx_sep_h(void) { return (int)(8 * ui_scale); }
+
+static int mdw_ctx_total_h(void)
+{
+    int h = 8;
+    for (int i = 0; i < mdw_ctx_count; i++)
+        h += (mdw_ctx_items[i].type == MDW_CTX_TYPE_SEP)
+             ? mdw_ctx_sep_h() : mdw_ctx_item_h();
+    return h;
+}
+
+static int mdw_ctx_hit(int mx, int my)
+{
+    if (!mdw_ctx_open) return -1;
+    int mw = mdw_ctx_w(), mh = mdw_ctx_total_h();
+    if (mx < mdw_ctx_x || mx > mdw_ctx_x + mw) return -1;
+    if (my < mdw_ctx_y || my > mdw_ctx_y + mh) return -1;
+    int iy = mdw_ctx_y + 4;
+    for (int i = 0; i < mdw_ctx_count; i++) {
+        int ih = (mdw_ctx_items[i].type == MDW_CTX_TYPE_SEP)
+                 ? mdw_ctx_sep_h() : mdw_ctx_item_h();
+        if (my >= iy && my < iy + ih) {
+            if (mdw_ctx_items[i].type == MDW_CTX_TYPE_SEP) return -1;
+            return i;
+        }
+        iy += ih;
+    }
+    return -1;
+}
+
+static void mdw_ctx_walk_to(uint32_t dest_ri)
+{
+    if (dest_ri >= mdw_room_count) return;
+    if (mdw_player_ri >= mdw_room_count) {
+        wsprintfA(mdw_walk_status, "Player position unknown — send rm");
+        mdw_walk_status_tick = GetTickCount();
+        return;
+    }
+    if (dest_ri == mdw_player_ri) {
+        wsprintfA(mdw_walk_status, "Already in that room");
+        mdw_walk_status_tick = GetTickCount();
+        return;
+    }
+
+    rm_bridge_resolve();
+    if (!pfn_dynpath_inject) {
+        wsprintfA(mdw_walk_status, "Dynamic pathing not available");
+        mdw_walk_status_tick = GetTickCount();
+        return;
+    }
+
+    MdwDynPath *dp = mdw_find_path(mdw_player_ri, dest_ri);
+    if (dp->error != MDW_DPERR_NONE) {
+        strncpy(mdw_walk_status, dp->errmsg, sizeof(mdw_walk_status) - 1);
+        mdw_walk_status[sizeof(mdw_walk_status) - 1] = 0;
+        mdw_walk_status_tick = GetTickCount();
+        return;
+    }
+
+    if (dp->req_count > 0) {
+        mdw_confirm_dest_ri = dest_ri;
+        mdw_confirm_showing = 1;
+        return;
+    }
+
+    if (pfn_dynpath_set_label) {
+        char lbl[128];
+        wsprintfA(lbl, "%d,%d to %d,%d",
+                  mdw_rooms[mdw_player_ri].map, mdw_rooms[mdw_player_ri].room,
+                  mdw_rooms[dest_ri].map, mdw_rooms[dest_ri].room);
+        pfn_dynpath_set_label(lbl);
+    }
+    if (pfn_dynpath_set_dest_room)
+        pfn_dynpath_set_dest_room(mdw_rooms[dest_ri].map,
+                                  mdw_rooms[dest_ri].room);
+    mdw_browsing = 0;
+    mdw_set_current(mdw_rooms[mdw_player_ri].map, mdw_rooms[mdw_player_ri].room);
+    int rv = pfn_dynpath_inject((dynpath_step_t *)dp->steps, dp->count,
+                                (mdw_rooms[mdw_player_ri].map << 16) | mdw_rooms[mdw_player_ri].room,
+                                (mdw_rooms[dest_ri].map << 16) | mdw_rooms[dest_ri].room);
+    if (rv == 0)
+        wsprintfA(mdw_walk_status, "Walking to %s (%d steps)",
+                  mdw_rooms[dest_ri].name, dp->count);
+    else
+        wsprintfA(mdw_walk_status, "Inject failed (%d)", rv);
+    mdw_walk_status_tick = GetTickCount();
+}
+
+static int mdw_ctx_click(int mx, int my)
+{
+    if (!mdw_ctx_open) return 0;
+    int idx = mdw_ctx_hit(mx, my);
+    if (idx < 0) {
+        mdw_ctx_open = 0;
+        return 1;
+    }
+    MdwCtxItem *it = &mdw_ctx_items[idx];
+    switch (it->type) {
+    case MDW_CTX_TYPE_WALK:
+        mdw_ctx_walk_to(it->dest_ri);
+        break;
+    case MDW_CTX_TYPE_EXIT:
+        if (it->dest_ri < mdw_room_count) {
+            uint32_t tri = it->dest_ri;
+            if (mdw_rooms[tri].map != mdw_cur_map_view || mdw_rooms[tri].gx == INT16_MIN) {
+                for (uint32_t k = 0; k < mdw_room_count; k++)
+                    mdw_rooms[k].gx = mdw_rooms[k].gy = INT16_MIN;
+                mdw_layout_bfs(mdw_rooms[tri].map, tri);
+                mdw_cur_map_view = mdw_rooms[tri].map;
+            }
+            mdw_cur_ri = tri;
+            mdw_browsing = 1;
+            mdw_pulse_tick = GetTickCount();
+            if (mdw_rooms[tri].gx != INT16_MIN) {
+                mdw_view_x = mdw_rooms[tri].gx * 20.0f;
+                mdw_view_y = mdw_rooms[tri].gy * 20.0f;
+            }
+        }
+        break;
+    case MDW_CTX_TYPE_CENTER:
+        if (mdw_ctx_room_ri < mdw_room_count) {
+            mdw_view_x = mdw_rooms[mdw_ctx_room_ri].gx * 20.0f;
+            mdw_view_y = mdw_rooms[mdw_ctx_room_ri].gy * 20.0f;
+        }
+        break;
+    case MDW_CTX_TYPE_START:
+        if (mdw_ctx_room_ri < mdw_room_count) {
+            mdw_rec_start_ri = mdw_ctx_room_ri;
+            mdw_rec_n = 0;
+            mdw_rec_active = 1;
+            wsprintfA(mdw_walk_status, "Start: %s [%d,%d]",
+                      mdw_rooms[mdw_ctx_room_ri].name,
+                      mdw_rooms[mdw_ctx_room_ri].map,
+                      mdw_rooms[mdw_ctx_room_ri].room);
+            mdw_walk_status_tick = GetTickCount();
+        }
+        break;
+    }
+    mdw_ctx_open = 0;
+    return 1;
+}
+
+static void mdw_ctx_draw(int vp_w, int vp_h)
+{
+    if (!mdw_ctx_open || mdw_ctx_count <= 0) return;
+    const ui_theme_t *t = &ui_themes[current_theme];
+
+    int mw = mdw_ctx_w();
+    int mh = mdw_ctx_total_h();
+    int cx = mdw_ctx_x, cy = mdw_ctx_y;
+
+    /* Clamp to viewport */
+    if (cx + mw > vp_w) cx = vp_w - mw;
+    if (cy + mh > vp_h) cy = vp_h - mh;
+    if (cx < 0) cx = 0;
+    if (cy < 0) cy = 0;
+
+    /* Background */
+    push_solid(cx, cy, cx + mw, cy + mh,
+               t->bg[0] * 0.85f, t->bg[1] * 0.85f, t->bg[2] * 0.85f, 0.96f,
+               vp_w, vp_h);
+    /* Border */
+    push_solid(cx, cy, cx + mw, cy + 1,
+               t->dim[0] * 0.5f, t->dim[1] * 0.5f, t->dim[2] * 0.5f, 0.7f, vp_w, vp_h);
+    push_solid(cx, cy + mh - 1, cx + mw, cy + mh,
+               t->dim[0] * 0.5f, t->dim[1] * 0.5f, t->dim[2] * 0.5f, 0.7f, vp_w, vp_h);
+    push_solid(cx, cy, cx + 1, cy + mh,
+               t->dim[0] * 0.5f, t->dim[1] * 0.5f, t->dim[2] * 0.5f, 0.7f, vp_w, vp_h);
+    push_solid(cx + mw - 1, cy, cx + mw, cy + mh,
+               t->dim[0] * 0.5f, t->dim[1] * 0.5f, t->dim[2] * 0.5f, 0.7f, vp_w, vp_h);
+
+    int item_cw = (int)(7 * ui_scale), item_ch = (int)(14 * ui_scale);
+    int s4 = (int)(4 * ui_scale);
+
+    int iy = cy + 4;
+    for (int i = 0; i < mdw_ctx_count; i++) {
+        MdwCtxItem *it = &mdw_ctx_items[i];
+        int ih = (it->type == MDW_CTX_TYPE_SEP) ? mdw_ctx_sep_h() : mdw_ctx_item_h();
+        if (it->type == MDW_CTX_TYPE_SEP) {
+            push_solid(cx + s4, iy + 3, cx + mw - s4, iy + 4,
+                       t->dim[0] * 0.3f, t->dim[1] * 0.3f, t->dim[2] * 0.3f,
+                       0.4f, vp_w, vp_h);
+            iy += ih;
+            continue;
+        }
+        if (i == mdw_ctx_hover) {
+            push_solid(cx + 1, iy, cx + mw - 1, iy + ih,
+                       t->accent[0], t->accent[1], t->accent[2],
+                       0.18f, vp_w, vp_h);
+        }
+        float lr = t->text[0], lg = t->text[1], lb = t->text[2];
+        if (it->type == MDW_CTX_TYPE_WALK && mdw_cur_ri >= mdw_room_count) {
+            lr = t->dim[0] * 0.5f; lg = t->dim[1] * 0.5f; lb = t->dim[2] * 0.5f;
+        }
+        push_text(cx + s4 + 4, iy + (ih - item_ch) / 2,
+                  it->label, lr, lg, lb,
+                  vp_w, vp_h, item_cw, item_ch);
+        iy += ih;
+    }
 }
 
 static void mdw_send_rm(void)
@@ -4248,114 +4561,14 @@ static int mdw_verify_room(void)
         mdw_send_rm();
         return 0;
     }
-    uint32_t mega_ck = pfn_get_room_checksum ? pfn_get_room_checksum() : 0;
-    if (!mega_ck) return 1;
-    if (mdw_rooms[mdw_cur_ri].checksum == mega_ck) return 1;
-    wsprintfA(mdw_walk_status,
-              "Room mismatch — refreshing position...");
-    mdw_walk_status_tick = GetTickCount();
-    mdw_send_rm();
-    return 0;
+    return 1;
 }
 
 static int mdw_dblclick(int mx, int my)
 {
     if (!mdw_visible || !mdw_loaded) return 0;
     if (!mdw_hit_window(mx, my)) return 0;
-
-    int ch = (int)(VSB_CHAR_H * ui_scale);
-    int titlebar_h = ch + 10;
-    if (my - (int)mdw_y < titlebar_h) return 0;
-
-    float x0 = mdw_x, y0 = mdw_y;
-    float x1 = x0 + mdw_w, y1 = y0 + mdw_h;
-    float tb_y1 = y0 + (float)titlebar_h;
-    int ctrl_h = ch + 10;
-    float ctrl_y0 = y1 - 6 - (float)ctrl_h;
-    int pp_cols = 30;
-    int pp_w_px = mdw_show_path_panel ? (pp_cols * (int)(VSB_CHAR_W * ui_scale) + 16) : 0;
-    float c_x0 = x0 + 6, c_y0 = tb_y1 + 3;
-    float c_x1 = x1 - 6 - (float)pp_w_px, c_y1 = ctrl_y0 - 2;
-    if ((float)mx < c_x0 || (float)mx > c_x1 ||
-        (float)my < c_y0 || (float)my > c_y1) {
-        return 0;
-    }
-
-    float cell = 20.0f * mdw_zoom;
-    float tile = 7.0f * mdw_zoom;
-    if (tile < 3.5f) tile = 3.5f;
-    float cview_x = (c_x0 + c_x1) * 0.5f;
-    float cview_y = (c_y0 + c_y1) * 0.5f;
-    float zfac = cell / 20.0f;
-
-    float best_d2 = tile * tile * 4.0f;
-    uint32_t best_i = 0xFFFFFFFF;
-    for (uint32_t i = 0; i < mdw_room_count; i++) {
-        MdwRoom *r = &mdw_rooms[i];
-        if (r->gx == INT16_MIN) continue;
-        if (r->map != mdw_cur_map_view) continue;
-        float sx = cview_x + (r->gx * 20.0f - mdw_view_x) * zfac;
-        float sy = cview_y + (r->gy * 20.0f - mdw_view_y) * zfac;
-        if (sx < c_x0 - tile || sx > c_x1 + tile) continue;
-        if (sy < c_y0 - tile || sy > c_y1 + tile) continue;
-        float ddx = sx - (float)mx, ddy = sy - (float)my;
-        float d2 = ddx * ddx + ddy * ddy;
-        if (d2 < best_d2) { best_d2 = d2; best_i = i; }
-    }
-    if (best_i == 0xFFFFFFFF) return 0;
-    if (mdw_cur_ri == 0xFFFFFFFF || mdw_cur_ri >= mdw_room_count) {
-        wsprintfA(mdw_walk_status, "Current room unknown — can't pathfind");
-        mdw_walk_status_tick = GetTickCount();
-        return 1;
-    }
-    if (best_i == mdw_cur_ri) {
-        wsprintfA(mdw_walk_status, "Already in that room");
-        mdw_walk_status_tick = GetTickCount();
-        return 1;
-    }
-
-    rm_bridge_resolve();
-    if (!pfn_dynpath_inject) {
-        wsprintfA(mdw_walk_status, "Dynamic pathing not available");
-        mdw_walk_status_tick = GetTickCount();
-        return 1;
-    }
-
-    if (!mdw_verify_room()) return 1;
-
-    MdwDynPath *dp = mdw_find_path(mdw_cur_ri, best_i);
-    if (dp->error != MDW_DPERR_NONE) {
-        strncpy(mdw_walk_status, dp->errmsg, sizeof(mdw_walk_status) - 1);
-        mdw_walk_status[sizeof(mdw_walk_status) - 1] = 0;
-        mdw_walk_status_tick = GetTickCount();
-        return 1;
-    }
-
-    if (dp->req_count > 0) {
-        mdw_confirm_dest_ri = best_i;
-        mdw_confirm_showing = 1;
-        return 1;
-    }
-
-    if (pfn_dynpath_set_label) {
-        char lbl[128];
-        wsprintfA(lbl, "%d,%d to %d,%d",
-                  mdw_rooms[mdw_cur_ri].map, mdw_rooms[mdw_cur_ri].room,
-                  mdw_rooms[best_i].map, mdw_rooms[best_i].room);
-        pfn_dynpath_set_label(lbl);
-    }
-    if (pfn_dynpath_set_dest_room)
-        pfn_dynpath_set_dest_room(mdw_rooms[best_i].map, mdw_rooms[best_i].room);
-    int rv = pfn_dynpath_inject((dynpath_step_t *)dp->steps, dp->count,
-                                mdw_rooms[mdw_cur_ri].checksum,
-                                mdw_rooms[best_i].checksum);
-    if (rv == 0) {
-        wsprintfA(mdw_walk_status, "Walking to %s (%d steps)",
-                  mdw_rooms[best_i].name, dp->count);
-    } else {
-        wsprintfA(mdw_walk_status, "Inject failed (%d)", rv);
-    }
-    mdw_walk_status_tick = GetTickCount();
+    /* Double-click just centers — walking moved to right-click context menu */
     return 1;
 }
 
@@ -4386,8 +4599,8 @@ static int mdw_walk_to(int map_num, int room_num)
     if (pfn_dynpath_set_dest_room)
         pfn_dynpath_set_dest_room(mdw_rooms[dest_ri].map, mdw_rooms[dest_ri].room);
     int rv = pfn_dynpath_inject((dynpath_step_t *)dp->steps, dp->count,
-                                mdw_rooms[mdw_cur_ri].checksum,
-                                mdw_rooms[dest_ri].checksum);
+                                (mdw_rooms[mdw_cur_ri].map << 16) | mdw_rooms[mdw_cur_ri].room,
+                                (mdw_rooms[dest_ri].map << 16) | mdw_rooms[dest_ri].room);
     if (rv != 0) return 7;
 
     wsprintfA(mdw_walk_status, "Walking to %s (%d steps)",
@@ -4570,8 +4783,8 @@ static int mdw_key_down(unsigned int vk)
                 }
                 int rv = pfn_dynpath_inject(
                     (dynpath_step_t *)cdp->steps, cdp->count,
-                    mdw_rooms[mdw_cur_ri].checksum,
-                    mdw_rooms[mdw_confirm_dest_ri].checksum);
+                    (mdw_rooms[mdw_cur_ri].map << 16) | mdw_rooms[mdw_cur_ri].room,
+                    (mdw_rooms[mdw_confirm_dest_ri].map << 16) | mdw_rooms[mdw_confirm_dest_ri].room);
                 if (rv == 0)
                     wsprintfA(mdw_walk_status, "Walking to %s (%d steps)",
                               mdw_rooms[mdw_confirm_dest_ri].name, cdp->count);
@@ -4669,9 +4882,9 @@ static int mdw_key_down(unsigned int vk)
         return 1;
     }
 
-    if (!(GetKeyState(VK_NUMLOCK) & 1)) return 0;
-
-    /* Numpad walks the MAP when path panel has focus. If recording, also capture steps. */
+    /* Numpad walks the MAP when path panel has focus. If recording, also capture steps.
+     * VK_NUMPAD* keys are only generated when NumLock is on; when off, Windows
+     * sends VK_UP/VK_DOWN/etc. instead — so no NumLock gate needed here. */
     if (mdw_path_focus && mdw_cur_ri < mdw_room_count) {
         int dir = -1;
         switch (vk) {

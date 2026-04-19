@@ -8265,16 +8265,15 @@ static void vkt_build_vertices(void)
     vxb_draw(vp_w, vp_h);
     pl_draw(vp_w, vp_h);
     pst_draw(vp_w, vp_h);
-    /* Live current-room tracking — use the map/room parsed from the most
-     * recent `rm` command output (msimg32 maintains loc_map / loc_room).
-     * Checksums are NOT unique per room, so matching by checksum silently
-     * teleported the marker to dup rooms. Gated by [x] use rm. */
-    if (mdw_use_rm && !mdw_path_focus) {
+    /* Player position tracking — ALWAYS updates mdw_player_ri regardless
+     * of mdw_use_rm so walk-to always knows the real player location.
+     * Map cursor only follows when not browsing (inside mdw_update_player_pos). */
+    {
         unsigned int packed = get_location_safe();
         if (packed) {
             int map = (int)((packed >> 16) & 0xFFFF);
             int room = (int)(packed & 0xFFFF);
-            if (room > 0) mdw_set_current(map, room);
+            if (room > 0) mdw_update_player_pos(map, room);
         }
     }
     mdw_draw(vp_w, vp_h);
@@ -8292,6 +8291,9 @@ static void vkt_build_vertices(void)
             sp_draws[sp_focus](vp_w, vp_h);
     }
     pl_quad_end = quad_count;
+
+    /* Map walker context menu — above all panels */
+    mdw_ctx_draw(vp_w, vp_h);
 
     /* Draw context menu on top of UI chrome */
     vkm_draw(vp_w, vp_h);
@@ -11005,6 +11007,10 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             pst_y = (float)my2 - pst_drag_oy;
             return 0;
         }
+        /* Map Walker context menu hover */
+        if (mdw_ctx_open) {
+            mdw_ctx_hover = mdw_ctx_hit(mx2, my2);
+        }
         /* Map Walker drag/resize/pan */
         if (mdw_dragging || mdw_resizing || mdw_panning) {
             mdw_mouse_move(mx2, my2);
@@ -11329,6 +11335,8 @@ static LRESULT CALLBACK vkt_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             stw_draw(vp_w, vp_h, mx, my, 1);
             return 0;
         }
+        /* Map Walker context menu — consume clicks before anything else */
+        if (mdw_ctx_open && mdw_ctx_click(mx, my)) return 0;
         /* Map Walker — claims focus before MudAMP so it can't bleed clicks */
         if (mdw_visible && mdw_mouse_down(mx, my)) return 0;
         /* MUDRadio panel click — AFTER all settings/child windows */
