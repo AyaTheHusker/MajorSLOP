@@ -57,7 +57,7 @@ cd "$DLL_DIR"
 # ------------------------------------------------------------------
 say "Build msimg32.dll (proxy loader)"
 $CC -shared -o msimg32.dll msimg32_proxy.c msimg32.def \
-    -lgdi32 -lws2_32 -luser32 -mwindows
+    -lgdi32 -lws2_32 -luser32 -lwinmm -lcomctl32 -mwindows
 cp msimg32.dll "$STAGE/msimg32.dll"
 
 # ------------------------------------------------------------------
@@ -148,6 +148,19 @@ fi
 say "Skip voice.dll + voice-model (WIP, excluded from release)"
 
 # ------------------------------------------------------------------
+# 8b. android_bridge.dll — prebuilt, just copy from deploy or dll dir
+# ------------------------------------------------------------------
+if [[ -f "$DLL_DIR/android_bridge.dll" ]]; then
+    say "Stage android_bridge.dll (prebuilt)"
+    cp "$DLL_DIR/android_bridge.dll" "$STAGE/plugins/android_bridge.dll"
+elif [[ -f "$DEPLOY_DIR/plugins/android_bridge.dll" ]]; then
+    say "Stage android_bridge.dll (from deploy)"
+    cp "$DEPLOY_DIR/plugins/android_bridge.dll" "$STAGE/plugins/android_bridge.dll"
+else
+    warn "no android_bridge.dll available"
+fi
+
+# ------------------------------------------------------------------
 # 9. Stage asset directories from the deploy tree (single source of truth).
 #    These are large/generated resources we don't rebuild here.
 # ------------------------------------------------------------------
@@ -163,6 +176,20 @@ for dir in fonts espeak-ng-data python; do
         warn "missing asset dir: $src (skipping)"
     fi
 done
+
+# mudmap/ — Python scripts for MDB→mmud.bin conversion (map walker)
+# Always copy from SOURCE, not deploy — deploy may have stale versions
+MUDMAP_SRC="$DLL_DIR/mudmap"
+if [[ -d "$MUDMAP_SRC" ]]; then
+    mkdir -p "$STAGE/mudmap"
+    for f in "$MUDMAP_SRC"/*.py; do
+        [[ -f "$f" ]] && cp "$f" "$STAGE/mudmap/"
+    done
+    find "$STAGE/mudmap" -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true
+    say "Staged mudmap scripts (from source)"
+else
+    warn "mudmap dir missing at $MUDMAP_SRC"
+fi
 
 # MMUDPy/scripts/ — Python user scripts the plugin auto-loads
 if [[ -d "$DEPLOY_DIR/plugins/MMUDPy/scripts" ]]; then

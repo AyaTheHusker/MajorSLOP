@@ -5062,30 +5062,50 @@ static DWORD WINAPI mdw_mdb_worker(LPVOID param)
         rooms_md[0] = 0;
     }
 
-    CreateDirectoryA("mudmap", NULL);
+    /* Get MegaMUD root directory (where megamud.exe lives) */
+    char mmroot[MAX_PATH];
+    GetModuleFileNameA(NULL, mmroot, MAX_PATH);
+    char *last_bs = mmroot;
+    for (char *p = mmroot; *p; p++) if (*p == '\\' || *p == '/') last_bs = p;
+    *(last_bs + 1) = 0;
+
+    char mudmap_dir[MAX_PATH];
+    _snprintf(mudmap_dir, MAX_PATH, "%smudmap", mmroot);
+    CreateDirectoryA(mudmap_dir, NULL);
 
     char cmd[2048];
     if (rooms_md[0])
         _snprintf(cmd, sizeof(cmd),
-            "python mudmap\\mudmap_api.py export_bin \"%s\" mudmap\\mmud.bin \"%s\"",
-            mdw_worker_mdb, rooms_md);
+            "\"%splugins\\python\\python.exe\" \"%smudmap\\mudmap_api.py\" export_bin \"%s\" \"%smudmap\\mmud.bin\" \"%s\"",
+            mmroot, mmroot, mdw_worker_mdb, mmroot, rooms_md);
     else
         _snprintf(cmd, sizeof(cmd),
-            "python mudmap\\mudmap_api.py export_bin \"%s\" mudmap\\mmud.bin",
-            mdw_worker_mdb);
+            "\"%splugins\\python\\python.exe\" \"%smudmap\\mudmap_api.py\" export_bin \"%s\" \"%smudmap\\mmud.bin\"",
+            mmroot, mmroot, mdw_worker_mdb, mmroot);
     cmd[sizeof(cmd) - 1] = 0;
+
+    char logpath[MAX_PATH];
+    _snprintf(logpath, MAX_PATH, "%smudmap\\mudmap_export.log", mmroot);
+    SECURITY_ATTRIBUTES sa = { sizeof(sa), NULL, TRUE };
+    HANDLE hLog = CreateFileA(logpath,
+                              GENERIC_WRITE, FILE_SHARE_READ, &sa,
+                              CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
 
     STARTUPINFOA si = { sizeof(si) };
     PROCESS_INFORMATION pi = {0};
-    si.dwFlags = STARTF_USESHOWWINDOW;
+    si.dwFlags = STARTF_USESHOWWINDOW | STARTF_USESTDHANDLES;
     si.wShowWindow = SW_HIDE;
+    si.hStdOutput = hLog != INVALID_HANDLE_VALUE ? hLog : NULL;
+    si.hStdError  = hLog != INVALID_HANDLE_VALUE ? hLog : NULL;
+    si.hStdInput  = NULL;
     if (api) api->log("[mudmap] running: %s\n", cmd);
-    BOOL ok = CreateProcessA(NULL, cmd, NULL, NULL, FALSE,
-                             CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
+    BOOL ok = CreateProcessA(NULL, cmd, NULL, NULL, TRUE,
+                             CREATE_NO_WINDOW, NULL, mmroot, &si, &pi);
     if (!ok) {
         if (api) api->log("[mudmap] CreateProcess failed (err=%lu) — "
                           "python on PATH? mudmap\\mudmap_api.py present?\n",
                           GetLastError());
+        if (hLog != INVALID_HANDLE_VALUE) CloseHandle(hLog);
         mdw_worker_busy = 0;
         return 1;
     }
@@ -5098,11 +5118,24 @@ static DWORD WINAPI mdw_mdb_worker(LPVOID param)
     }
     CloseHandle(pi.hProcess);
     CloseHandle(pi.hThread);
+    if (hLog != INVALID_HANDLE_VALUE) CloseHandle(hLog);
 
     if (exit_code != 0) {
-        if (api) api->log("[mudmap] python export failed: exit=%lu. "
-                          "Check that mudmap/*.py is deployed and "
-                          "access_parser is installed.\n", exit_code);
+        if (api) api->log("[mudmap] python export failed: exit=%lu\n", exit_code);
+        /* Dump the captured output so the user can see the actual error */
+        HANDLE hRead = CreateFileA("mudmap\\mudmap_export.log",
+                                   GENERIC_READ, FILE_SHARE_READ, NULL,
+                                   OPEN_EXISTING, 0, NULL);
+        if (hRead != INVALID_HANDLE_VALUE) {
+            char logbuf[2048];
+            DWORD nread = 0;
+            ReadFile(hRead, logbuf, sizeof(logbuf) - 1, &nread, NULL);
+            CloseHandle(hRead);
+            if (nread > 0) {
+                logbuf[nread] = 0;
+                if (api) api->log("[mudmap] python output:\n%s\n", logbuf);
+            }
+        }
         mdw_worker_busy = 0;
         return 1;
     }

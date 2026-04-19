@@ -16,7 +16,9 @@ Compact JSON schema written for C to parse with a tiny handwritten parser:
 """
 from __future__ import annotations
 import json
+import os
 import sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from mudmap_load import load
 from mudmap_exit import parse_room_exits, EXIT_DIRECTIONS
 
