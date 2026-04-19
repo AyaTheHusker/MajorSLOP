@@ -860,6 +860,9 @@ static pfn_dynpath_set_dest_room_t pfn_dynpath_set_dest_room = NULL;
 typedef int (WINAPI *pfn_dynpath_needs_repath_t)(int *, int *);
 static pfn_dynpath_needs_repath_t pfn_dynpath_needs_repath = NULL;
 
+typedef void (WINAPI *pfn_set_location_t)(int, int);
+static pfn_set_location_t pfn_set_location = NULL;
+
 typedef int (WINAPI *pfn_get_stat_t)(void);
 static pfn_get_stat_t pfn_get_player_strength  = NULL;
 static pfn_get_stat_t pfn_get_player_picklocks = NULL;
@@ -890,6 +893,7 @@ static void rm_bridge_resolve(void)
     pfn_dynpath_get_effective_auto = (pfn_dynpath_get_effective_auto_t)GetProcAddress(mm, "dynpath_get_effective_auto");
     pfn_dynpath_set_dest_room = (pfn_dynpath_set_dest_room_t)GetProcAddress(mm, "dynpath_set_dest_room");
     pfn_dynpath_needs_repath  = (pfn_dynpath_needs_repath_t)GetProcAddress(mm, "dynpath_needs_repath");
+    pfn_set_location          = (pfn_set_location_t)GetProcAddress(mm, "set_location");
 }
 
 static int auto_rm_queue_peek_safe(void)
@@ -4262,6 +4266,25 @@ static void ap_feed_rm_filtered(ap_term_t *t, const uint8_t *data, int len)
                     rm_block_remaining = 0;
                 }
             } else if (row_has_location(t, t->cy)) {
+                /* Parse and push location to msimg32 immediately */
+                if (pfn_set_location) {
+                    char loc_buf[128];
+                    int loc_len = 0;
+                    for (int ci = 0; ci < t->cols && loc_len < 127; ci++) {
+                        char ch = (char)t->grid[t->cy][ci].ch;
+                        if (ch == 0) break;
+                        loc_buf[loc_len++] = ch;
+                    }
+                    loc_buf[loc_len] = '\0';
+                    char *lp = strstr(loc_buf, "Location:");
+                    if (lp) {
+                        lp += 9;
+                        while (*lp == ' ') lp++;
+                        int lm = 0, lr = 0;
+                        if (sscanf(lp, "%d,%d", &lm, &lr) == 2)
+                            pfn_set_location(lm, lr);
+                    }
+                }
                 /* Location row — consume a queued auto-rm slot. If we got
                  * one, this is ours: suppress and arm the block state. */
                 if (auto_rm_queue_consume_safe()) {
@@ -12015,6 +12038,10 @@ static DWORD WINAPI vkt_autoconnect_thread(LPVOID param)
     if (vkt_wait_for_ingame(60000)) {
         if (api) api->log("[vk_terminal] Character is in-game\n");
         Sleep(5000); /* let MegaMUD fully load paths, scripts, etc */
+
+        rm_bridge_resolve();
+        if (pfn_auto_rm_queue_increment) pfn_auto_rm_queue_increment();
+        if (api && api->inject_command) api->inject_command("rm");
 
         /* Load scripts first */
         vkt_do_loadscripts();

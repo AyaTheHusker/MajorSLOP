@@ -5035,6 +5035,7 @@ static void mdw_toggle(void)
         }
     } else {
         mdw_focused = 0;
+        mdw_send_rm();
     }
 }
 
