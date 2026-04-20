@@ -23,3 +23,11 @@ EXPORTS
     dynpath_set_dest_room @25
     dynpath_needs_repath @26
     set_location @27
+    dynpath_get_path_rooms @28
+    dynpath_get_path_dirs @29
+    dynpath_set_run_mode @30
+    dynpath_get_run_mode @31
+    dynpath_toggle_pause @32
+    dynpath_is_paused @33
+    dynpath_back_step_prepare @34
+    dynpath_back_step_finalize @35

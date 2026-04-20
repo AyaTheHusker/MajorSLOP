@@ -48,7 +48,7 @@
 #define IDM_VKT_FONT_BITMAP 51039  /* special: original 8x16 bitmap */
 
 /* Max quads: terminal ~16k + menus ~500 + windows ~8k */
-#define MAX_QUADS       25000
+#define MAX_QUADS       100000
 #define VERTS_PER_QUAD  4
 #define IDXS_PER_QUAD   6
 
@@ -860,6 +860,25 @@ static pfn_dynpath_set_dest_room_t pfn_dynpath_set_dest_room = NULL;
 typedef int (WINAPI *pfn_dynpath_needs_repath_t)(int *, int *);
 static pfn_dynpath_needs_repath_t pfn_dynpath_needs_repath = NULL;
 
+typedef int (WINAPI *pfn_dynpath_get_path_rooms_t)(unsigned short *, unsigned short *, int *, int);
+static pfn_dynpath_get_path_rooms_t pfn_dynpath_get_path_rooms = NULL;
+
+typedef int (WINAPI *pfn_dynpath_get_path_dirs_t)(signed char *, int);
+static pfn_dynpath_get_path_dirs_t pfn_dynpath_get_path_dirs = NULL;
+
+typedef void (WINAPI *pfn_dynpath_set_run_mode_t)(int);
+static pfn_dynpath_set_run_mode_t pfn_dynpath_set_run_mode = NULL;
+
+typedef int (WINAPI *pfn_dynpath_simple_int_t)(void);
+static pfn_dynpath_simple_int_t pfn_dynpath_toggle_pause = NULL;
+static pfn_dynpath_simple_int_t pfn_dynpath_is_paused    = NULL;
+static pfn_dynpath_simple_int_t pfn_dynpath_get_run_mode = NULL;
+
+typedef int  (WINAPI *pfn_dynpath_back_prepare_t)(int *, int *);
+typedef void (WINAPI *pfn_dynpath_back_finalize_t)(void);
+static pfn_dynpath_back_prepare_t  pfn_dynpath_back_step_prepare  = NULL;
+static pfn_dynpath_back_finalize_t pfn_dynpath_back_step_finalize = NULL;
+
 typedef void (WINAPI *pfn_set_location_t)(int, int);
 static pfn_set_location_t pfn_set_location = NULL;
 
@@ -893,6 +912,14 @@ static void rm_bridge_resolve(void)
     pfn_dynpath_get_effective_auto = (pfn_dynpath_get_effective_auto_t)GetProcAddress(mm, "dynpath_get_effective_auto");
     pfn_dynpath_set_dest_room = (pfn_dynpath_set_dest_room_t)GetProcAddress(mm, "dynpath_set_dest_room");
     pfn_dynpath_needs_repath  = (pfn_dynpath_needs_repath_t)GetProcAddress(mm, "dynpath_needs_repath");
+    pfn_dynpath_get_path_rooms = (pfn_dynpath_get_path_rooms_t)GetProcAddress(mm, "dynpath_get_path_rooms");
+    pfn_dynpath_get_path_dirs  = (pfn_dynpath_get_path_dirs_t)GetProcAddress(mm, "dynpath_get_path_dirs");
+    pfn_dynpath_set_run_mode  = (pfn_dynpath_set_run_mode_t)GetProcAddress(mm, "dynpath_set_run_mode");
+    pfn_dynpath_get_run_mode  = (pfn_dynpath_simple_int_t)GetProcAddress(mm, "dynpath_get_run_mode");
+    pfn_dynpath_toggle_pause  = (pfn_dynpath_simple_int_t)GetProcAddress(mm, "dynpath_toggle_pause");
+    pfn_dynpath_is_paused     = (pfn_dynpath_simple_int_t)GetProcAddress(mm, "dynpath_is_paused");
+    pfn_dynpath_back_step_prepare  = (pfn_dynpath_back_prepare_t)GetProcAddress(mm, "dynpath_back_step_prepare");
+    pfn_dynpath_back_step_finalize = (pfn_dynpath_back_finalize_t)GetProcAddress(mm, "dynpath_back_step_finalize");
     pfn_set_location          = (pfn_set_location_t)GetProcAddress(mm, "set_location");
 }
 
@@ -4640,6 +4667,37 @@ static void push_text_ui(int px, int py, const char *str,
     #undef UT2Y
 }
 
+/* Push a textured quad from the UI font atlas, rotated around (cx,cy).
+ * Uses raw pixel UV region (px0,py0)-(px1,py1) in atlas coords.
+ * angle rotates the quad in screen space. flip_u mirrors horizontally. */
+static void push_glyph_rotated_ui(float cx, float cy, float hw, float hh,
+                                   float tex_px0, float tex_py0,
+                                   float tex_px1, float tex_py1,
+                                   float angle, int flip_u,
+                                   float r, float g, float b, float a,
+                                   int vp_w, int vp_h) {
+    if (quad_count >= MAX_QUADS) return;
+    float u0 = tex_px0 / (float)ui_atlas_w;
+    float v0 = tex_py0 / (float)ui_atlas_h;
+    float u1 = tex_px1 / (float)ui_atlas_w;
+    float v1 = tex_py1 / (float)ui_atlas_h;
+    if (flip_u) { float t = u0; u0 = u1; u1 = t; }
+    float ca = cosf(angle), sa = sinf(angle);
+    float lx[4] = {-hw, +hw, +hw, -hw};
+    float ly[4] = {-hh, -hh, +hh, +hh};
+    float uv_u[4] = {u0, u1, u1, u0};
+    float uv_v[4] = {v0, v0, v1, v1};
+    int vi = quad_count * 4;
+    for (int i = 0; i < 4; i++) {
+        float rx = cx + lx[i] * ca - ly[i] * sa;
+        float ry = cy + lx[i] * sa + ly[i] * ca;
+        float nx = (rx / (float)vp_w) * 2.0f - 1.0f;
+        float ny = (ry / (float)vp_h) * 2.0f - 1.0f;
+        vk_vdata[vi+i] = (vertex_t){ nx, ny, uv_u[i], uv_v[i], r, g, b, a };
+    }
+    quad_count++;
+}
+
 /* Vulkan-rendered Map Walker panel (defined in vk_mudmap.h). Must be included
  * after ui_font_ready, push_solid_ui, push_text_ui, ui_themes, and VSB_CHAR_*
  * are declared. */
@@ -6971,17 +7029,26 @@ static void vsb_draw(int vp_w, int vp_h)
     float vr = t->text[0], vg = t->text[1], vb = t->text[2];
 
     /* Section: Path/Loop name (always shown as first cell) */
-    if (vsb_path_name[0]) {
-        const char *plabel = vsb_looping ? "Loop: " : "Path: ";
-        if (vsb_looping && vsb_lap_count > 0) {
-            _snprintf(buf, sizeof(buf), "%s  Lap %d", vsb_path_name, vsb_lap_count);
+    {
+        int dp_step = 0, dp_count = 0, dp_on = 0;
+        if (pfn_dynpath_get_progress)
+            pfn_dynpath_get_progress(&dp_step, &dp_count, &dp_on);
+        if (dp_on) {
+            _snprintf(buf, sizeof(buf), "Dynamic Path (%d/%d)", dp_step, dp_count);
+            buf[sizeof(buf) - 1] = '\0';
+            VSB_SECTION("", buf, 0.6f, 0.2f, 1.0f, 0.7f, 0.35f, 1.0f);
+        } else if (vsb_path_name[0]) {
+            const char *plabel = vsb_looping ? "Loop: " : "Path: ";
+            if (vsb_looping && vsb_lap_count > 0) {
+                _snprintf(buf, sizeof(buf), "%s  Lap %d", vsb_path_name, vsb_lap_count);
+            } else {
+                _snprintf(buf, sizeof(buf), "%s", vsb_path_name);
+            }
+            buf[sizeof(buf) - 1] = '\0';
+            VSB_SECTION(plabel, buf, lr, lg, lb, vr, vg, vb);
         } else {
-            _snprintf(buf, sizeof(buf), "%s", vsb_path_name);
+            VSB_SECTION("Path: ", "No Path", lr, lg, lb, lr, lg, lb);
         }
-        buf[sizeof(buf) - 1] = '\0';
-        VSB_SECTION(plabel, buf, lr, lg, lb, vr, vg, vb);
-    } else {
-        VSB_SECTION("Path: ", "No Path", lr, lg, lb, lr, lg, lb);
     }
 
     /* Section: Step */
@@ -7179,9 +7246,23 @@ static void vib_click(int idx)
 
     if (vib_buttons[idx].is_toggle) {
         if (idx == VIB_BTN_GO) {
-            /* Stop/Go — send MegaMUD's toolbar WM_COMMAND */
-            HWND mw = api->get_mmmain_hwnd();
-            if (mw) SendMessageA(mw, WM_COMMAND, 0x0803, 0);
+            /* Stop/Go button.
+             *
+             * Three meanings depending on state:
+             *   - Dynpath active AND not paused → pause the walk (combat/heal ON).
+             *   - Dynpath active AND already paused → resume the walk.
+             *   - No dynpath → fall back to MegaMUD's native Stop/Go toolbar cmd.
+             */
+            int dp_step = 0, dp_count = 0, dp_on = 0;
+            if (pfn_dynpath_get_progress)
+                pfn_dynpath_get_progress(&dp_step, &dp_count, &dp_on);
+            (void)dp_step; (void)dp_count;
+            if (dp_on && pfn_dynpath_toggle_pause) {
+                pfn_dynpath_toggle_pause();
+            } else {
+                HWND mw = api->get_mmmain_hwnd();
+                if (mw) SendMessageA(mw, WM_COMMAND, 0x0803, 0);
+            }
         } else {
             /* Toggle: read from config, flip, write to BOTH config and runtime */
             int cur = *(int *)(base + vib_buttons[idx].cfg_off);
@@ -7201,8 +7282,14 @@ static void vib_click(int idx)
             *(int *)(base + VIB_OFF_CONFIRM_HU) = 0;
         }
         SendMessageA(mw, WM_COMMAND, 0x07D4, 0);
+    } else if (idx == VIB_BTN_BACK) {
+        /* Back button: back-step the current dynpath by one room. Works whether
+         * the walk is running or already paused — if running, this first pauses
+         * (auto_combat + auto_heal ON), then issues a fresh 1-step back path so
+         * asymmetric exits resolve correctly. Decrements dpw_step without
+         * disturbing the rest of the saved path, so resume continues cleanly. */
+        mdw_do_back_step();
     }
-    /* VIB_BTN_BACK: not hooked up yet */
 }
 
 /* Push a single icon quad from the icon atlas. icon_idx = 0..VIB_ICON_COUNT-1.
@@ -9266,6 +9353,49 @@ static void vkt_init_ui_font(void)
             }
     }
 
+    /* Bake footprint image into cells 0-1 (48x48 square region at top-left).
+     * Source: footprint_data.h — 48x48 alpha array from user's footprint.png. */
+    {
+        #include "footprint_data.h"
+        for (int yy = 0; yy < 48 && yy < (int)ah; yy++)
+            for (int xx = 0; xx < 48 && xx < (int)aw; xx++) {
+                int idx4 = (yy * aw + xx) * 4;
+                unsigned char a = footprint_48x48[yy * 48 + xx];
+                pixels[idx4 + 0] = 255;
+                pixels[idx4 + 1] = 255;
+                pixels[idx4 + 2] = 255;
+                pixels[idx4 + 3] = a;
+            }
+    }
+
+    /* Bake circular bullseye alpha at (48,0)-(96,48) in atlas */
+    {
+        #include "bullseye_data.h"
+        for (int yy = 0; yy < 48 && yy < (int)ah; yy++)
+            for (int xx = 0; xx < 48 && (xx + 48) < (int)aw; xx++) {
+                int idx4 = (yy * aw + (xx + 48)) * 4;
+                unsigned char a = bullseye_48x48[yy * 48 + xx];
+                pixels[idx4 + 0] = 255;
+                pixels[idx4 + 1] = 255;
+                pixels[idx4 + 2] = 255;
+                pixels[idx4 + 3] = a;
+            }
+    }
+
+    /* Bake sword alpha at (96,0)-(144,48) in atlas */
+    {
+        #include "sword_data.h"
+        for (int yy = 0; yy < 48 && yy < (int)ah; yy++)
+            for (int xx = 0; xx < 48 && (xx + 96) < (int)aw; xx++) {
+                int idx4 = (yy * aw + (xx + 96)) * 4;
+                unsigned char a = sword_48x48[yy * 48 + xx];
+                pixels[idx4 + 0] = 255;
+                pixels[idx4 + 1] = 255;
+                pixels[idx4 + 2] = 255;
+                pixels[idx4 + 3] = a;
+            }
+    }
+
     ui_atlas_w = aw; ui_atlas_h = ah;
 
     /* Create VkImage */
@@ -9719,7 +9849,7 @@ static int vkt_create_buffers(void)
     /* Index buffer — static, generated once */
     uint32_t idx_count = MAX_QUADS * 6;
     VkBufferCreateInfo ibci = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
-    ibci.size = idx_count * sizeof(uint16_t);
+    ibci.size = idx_count * sizeof(uint32_t);
     ibci.usage = VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
     vkCreateBuffer(vk_dev, &ibci, NULL, &vk_ibuf);
 
@@ -9733,10 +9863,10 @@ static int vkt_create_buffers(void)
     vkBindBufferMemory(vk_dev, vk_ibuf, vk_imem, 0);
 
     /* Fill index buffer: 0,1,2, 2,3,0 for each quad */
-    uint16_t *idata;
+    uint32_t *idata;
     vkMapMemory(vk_dev, vk_imem, 0, imr.size, 0, (void **)&idata);
     for (int q = 0; q < MAX_QUADS; q++) {
-        uint16_t base = (uint16_t)(q * 4);
+        uint32_t base = (uint32_t)(q * 4);
         idata[q * 6 + 0] = base + 0;
         idata[q * 6 + 1] = base + 1;
         idata[q * 6 + 2] = base + 2;
@@ -10338,7 +10468,7 @@ static void vkt_render_frame(void)
 
     VkDeviceSize offset = 0;
     vkCmdBindVertexBuffers(vk_cmd_buf, 0, 1, &vk_vbuf, &offset);
-    vkCmdBindIndexBuffer(vk_cmd_buf, vk_ibuf, 0, VK_INDEX_TYPE_UINT16);
+    vkCmdBindIndexBuffer(vk_cmd_buf, vk_ibuf, 0, VK_INDEX_TYPE_UINT32);
 
     /* Draw 0: Animated background (if active) */
     int term_start = 0;
@@ -18110,6 +18240,8 @@ static void vkt_save_settings(void)
     SAVE_INT("mdw_cur_map_view", (int)mdw_cur_map_view);
     SAVE_INT("mdw_auto_recenter", mdw_auto_recenter);
     SAVE_INT("mdw_use_rm", mdw_use_rm);
+    SAVE_INT("mdw_walk_mode", mdw_walk_mode);
+    SAVE_INT("mdw_show_path_panel", mdw_show_path_panel);
     /* Recent destinations */
     SAVE_INT("recent_count", vkm_goto_count);
     for (int i = 0; i < vkm_goto_count; i++) {
@@ -18293,6 +18425,8 @@ static void vkt_load_settings(void)
     { int v; LOAD_INT("mdw_cur_map_view", v, 1); mdw_cur_map_view = (uint16_t)v; }
     LOAD_INT("mdw_auto_recenter", mdw_auto_recenter, 1);
     LOAD_INT("mdw_use_rm", mdw_use_rm, 1);
+    LOAD_INT("mdw_walk_mode", mdw_walk_mode, 0);
+    LOAD_INT("mdw_show_path_panel", mdw_show_path_panel, 0);
     /* Recent destinations */
     LOAD_INT("recent_count", vkm_goto_count, 0);
     if (vkm_goto_count > VKM_GOTO_MAX) vkm_goto_count = VKM_GOTO_MAX;

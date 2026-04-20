@@ -4059,7 +4059,28 @@ static int              dpw_saved_auto_bless = 0;
 static int              dpw_walk_used_sneak  = 0;
 static int              dpw_walk_used_hide   = 0;
 static int              dpw_walk_used_bless  = 0;
-static int              dpw_saved_auto_combat = 0;
+/* The walker reads auto_combat (0x4D00) LIVE each tick to determine the
+ * current mode — user toggling auto_combat mid-walk flips the mode instantly.
+ * We do NOT suppress auto_combat during the walk: menu sets it once at start
+ * (Walk=1, Run=0), then it's driven by the user from there. Walker never
+ * writes 0x4D00 mid-walk except for the "incap override" rescue mechanism. */
+static int              dpw_saved_auto_combat = 0;  /* user value at walk start (for logging) */
+static int              dpw_saved_auto_heal = 0;    /* user value at walk start (for logging) */
+static int              dpw_run_mode_next = 0;      /* latched by dynpath_set_run_mode for next inject */
+static volatile LONG    dpw_paused = 0;             /* 1 while user paused the walk via Stop button */
+/* Incap override: if in Run mode (live auto_combat=0) AND player is CC'd
+ * (held/blinded) AND there are hostiles, walker forces auto_combat=1 to fight
+ * out of the stuck state. When CC clears or hostiles are gone, walker writes
+ * the saved value back so Run mode resumes even mid-combat. */
+static int              dpw_incap_override = 0;
+static int              dpw_incap_saved_combat = 0;
+/* COMBAT_WAIT probe: we enter on (in_combat || hostiles>0) — catches real
+ * hostiles even before MegaMUD sets in_combat. If the walker never sees
+ * in_combat=1 while waiting, the mob is a Friend/Avoid tag and MegaMUD
+ * chose not to engage — exit after a short probe window instead of hanging. */
+static DWORD            dpw_combat_enter_tick = 0;
+static int              dpw_combat_saw_engage = 0;
+#define DPW_FRIEND_PROBE_MS 1000
 static int              dpw_dst_map = 0;
 static int              dpw_dst_room = 0;
 static volatile LONG    dpw_needs_repath = 0;
@@ -4157,14 +4178,22 @@ static void dpw_restore_auto_stealth(unsigned char *sbp)
     dpw_walk_used_sneak   = 0;
     dpw_walk_used_hide    = 0;
     dpw_walk_used_bless   = 0;
+    /* Always leave player idle-safe: auto_combat ON and auto_heal ON.
+     * Regardless of Walk/Run mode, the walker ends with the player safe. */
     *(int *)(sbp + 0x4D00) = 1;
+    *(int *)(sbp + 0x4D08) = 1;
     dpw_saved_auto_combat = 0;
-    logmsg("[dynpath] end-of-walk: auto_combat=ON\n");
+    dpw_saved_auto_heal = 0;
+    InterlockedExchange(&dpw_paused, 0);
+    logmsg("[dynpath] end-of-walk: auto_combat=ON auto_heal=ON\n");
 }
 
 static void dpw_tick(void)
 {
     if (dpw_state == DPW_DONE || !struct_base) return;
+    /* Paused by user (Stop button). Don't advance, don't touch state —
+     * the idle-safe flags (auto_combat, auto_heal) were already set on pause. */
+    if (dpw_paused) return;
 
     unsigned char *sbp = (unsigned char *)struct_base;
 
@@ -4195,15 +4224,19 @@ static void dpw_tick(void)
     int max_mana    = *(int *)(sbp + 0x53E8);
     int hp_full_pct = *(int *)(sbp + 0x3788);
     int hp_rest_pct = *(int *)(sbp + 0x378C);
+    int hp_run_pct  = *(int *)(sbp + 0x3798);   /* HP_RUN_PCT: run-if-below threshold */
     int mn_full_pct = *(int *)(sbp + 0x37A4);
     int mn_rest_pct = *(int *)(sbp + 0x37A8);
     int in_combat   = *(int *)(sbp + 0x5698);
     int is_resting  = *(int *)(sbp + 0x5678);
     int is_medit    = *(int *)(sbp + 0x567C);
     int is_held     = *(int *)(sbp + 0x56CC);
+    int is_stunned  = *(int *)(sbp + 0x56D0);
     int is_blinded  = *(int *)(sbp + 0x56AC);
+    int combat_cond = *(int *)(sbp + 0x5510);   /* COMBAT_CONDITION — poison/disease etc */
+    int status_56B0 = *(int *)(sbp + 0x56B0);
     int ign_blind   = *(int *)(sbp + 0x3A38);
-    int auto_combat = *(int *)(sbp + 0x4D00);
+    int auto_combat = *(int *)(sbp + 0x4D00);   /* LIVE — user can toggle mid-walk */
     int auto_sneak  = dpw_saved_auto_sneak;
     int auto_hide   = dpw_saved_auto_hide;
     int is_sneaking = *(int *)(sbp + 0x5688);
@@ -4212,6 +4245,37 @@ static void dpw_tick(void)
     int action_pending = *(int *)(sbp + 0x5778);
     int hostiles    = dpw_count_hostiles(sbp);
     int prev_state  = dpw_state;
+
+    /* "Incapacitated" — MegaMUD's own stuck-on-condition set from FUN_00407920
+     * gating (see MEGAMUD_RE.md: STAT REFRESH trigger conditions). Any one of
+     * these means the player can't proceed normally until it wears off. */
+    int is_incap = (combat_cond > 0) || is_held || is_stunned ||
+                   (is_blinded && !ign_blind) || status_56B0 != 0;
+
+    /* Incap override: when Run mode (auto_combat=0) catches a CC + hostiles
+     * situation, force auto_combat=1 so MegaMUD fights its way out. Restore
+     * the user's Run setting the instant the CC clears or hostiles are gone —
+     * even mid-combat, so "just run" semantics resume immediately. */
+    if (dpw_incap_override) {
+        if (!is_incap || hostiles <= 0) {
+            *(int *)(sbp + 0x4D00) = dpw_incap_saved_combat;
+            logmsg("[dynpath] incap override cleared (incap=%d hostiles=%d) "
+                   "— auto_combat restored to %d\n",
+                   is_incap, hostiles, dpw_incap_saved_combat);
+            auto_combat = dpw_incap_saved_combat;
+            dpw_incap_override = 0;
+        }
+    } else {
+        if (is_incap && hostiles > 0 && !auto_combat) {
+            dpw_incap_saved_combat = auto_combat;  /* = 0, Run mode */
+            *(int *)(sbp + 0x4D00) = 1;
+            dpw_incap_override = 1;
+            auto_combat = 1;
+            logmsg("[dynpath] incap override ENGAGED: held=%d stunned=%d blind=%d "
+                   "cond=%d hostiles=%d — forcing auto_combat=1\n",
+                   is_held, is_stunned, is_blinded, combat_cond, hostiles);
+        }
+    }
 
     switch (dpw_state) {
     case DPW_READY:
@@ -4224,8 +4288,8 @@ static void dpw_tick(void)
             dpw_update_statusbar();
             break;
         }
-        if (busy_lock && dpw_saved_auto_combat) break;
-        if (action_pending && dpw_saved_auto_combat) break;
+        if (busy_lock && auto_combat) break;
+        if (action_pending && auto_combat) break;
         if (cur_hp < 1) {
             dpw_clear_pathing_active(sbp);
             dpw_restore_auto_stealth(sbp);
@@ -4240,35 +4304,52 @@ static void dpw_tick(void)
             logmsg("[dynpath] CC at step %d: held=%d blind=%d at %d,%d "
                    "— entering COMBAT_WAIT\n",
                    dpw_step, is_held, is_blinded, loc_map, loc_room);
-            if (hostiles > 0 && dpw_saved_auto_combat) {
-                *(int *)(sbp + 0x4D00) = 1;
-                logmsg("[dynpath] CC'd with %d hostiles — enabling auto_combat\n", hostiles);
+            dpw_state = DPW_COMBAT_WAIT;
+            break;
+        }
+
+        /* Enter COMBAT_WAIT on (in_combat || hostiles>0) so we catch real
+         * hostiles even before MegaMUD's auto_combat has set in_combat=1 —
+         * critical to avoid racing past mobs when the room parses in the
+         * same packet that moved us. Friend/Avoid mobs (ent[0]==2 but won't
+         * engage) are handled by the probe grace in COMBAT_WAIT below. */
+        if (auto_combat && (in_combat || hostiles > 0)) {
+            logmsg("[dynpath] combat at step %d: in_combat=%d hostiles=%d at %d,%d "
+                   "— entering COMBAT_WAIT\n",
+                   dpw_step, in_combat, hostiles, loc_map, loc_room);
+            dpw_combat_enter_tick = GetTickCount();
+            dpw_combat_saw_engage = in_combat ? 1 : 0;
+            dpw_state = DPW_COMBAT_WAIT;
+            break;
+        }
+
+        {
+            int rest_hp_thresh = max_hp > 0 ? (max_hp * hp_rest_pct) / 100 : 0;
+            int run_hp_thresh  = (max_hp > 0 && hp_run_pct > 0)
+                                   ? (max_hp * hp_run_pct)  / 100 : 0;
+            if (cur_hp < rest_hp_thresh) {
+                int ent2 = dpw_count_hostiles(sbp);
+                /* Skip rest (advance to next room) when:
+                 *   Run mode (auto_combat=0), OR
+                 *   Walk mode but HP dropped at/under the Run-if-below threshold
+                 * ...AND there's a combat-class mob in the room. */
+                int under_run_thresh = (run_hp_thresh > 0 && cur_hp <= run_hp_thresh);
+                int use_skip = !auto_combat || under_run_thresh;
+                if (ent2 > 0 && use_skip) {
+                    logmsg("[dynpath] low HP at step %d (%d/%d) but %d mob(s) in "
+                           "room %d,%d — %s — advancing to find safe rest spot\n",
+                           dpw_step, cur_hp, max_hp, ent2, loc_map, loc_room,
+                           !auto_combat ? "Run mode"
+                                        : "HP under run-if-below threshold");
+                    /* fall through to sneak/hide/direction block */
+                } else {
+                    logmsg("[dynpath] low HP at step %d: %d/%d (%d%% threshold) at %d,%d "
+                           "— entering REST_WAIT\n",
+                           dpw_step, cur_hp, max_hp, hp_rest_pct, loc_map, loc_room);
+                    dpw_state = DPW_REST_WAIT;
+                    break;
+                }
             }
-            dpw_state = DPW_COMBAT_WAIT;
-            break;
-        }
-
-        /* Trust MegaMUD's own in_combat decision.
-         * hostiles>0 (ent[0]==2) only means "room-slot is combat-class" — MegaMUD
-         * still checks the per-NPC category (Friend/Avoid/Enemy/Flee, see MEGAMUD_RE.md)
-         * and won't engage Friend/Avoid/Flee mobs. Using hostiles count here would
-         * lock up the walker at Friend-tagged mobs like default guardsmen.
-         * in_combat is MegaMUD's authoritative "we are actually fighting" signal. */
-        if (dpw_saved_auto_combat && in_combat) {
-            *(int *)(sbp + 0x4D00) = 1;
-            logmsg("[dynpath] combat at step %d: in_combat=1 hostiles=%d at %d,%d "
-                   "— entering COMBAT_WAIT (auto_combat enabled)\n",
-                   dpw_step, hostiles, loc_map, loc_room);
-            dpw_state = DPW_COMBAT_WAIT;
-            break;
-        }
-
-        if (cur_hp < (max_hp > 0 ? (max_hp * hp_rest_pct) / 100 : 0)) {
-            logmsg("[dynpath] low HP at step %d: %d/%d (%d%% threshold) at %d,%d "
-                   "— entering REST_WAIT\n",
-                   dpw_step, cur_hp, max_hp, hp_rest_pct, loc_map, loc_room);
-            dpw_state = DPW_REST_WAIT;
-            break;
         }
 
         {
@@ -4320,12 +4401,7 @@ static void dpw_tick(void)
     case DPW_SNEAK_WAIT:
         if (in_combat) {
             logmsg("[dynpath] combat during sneak wait at %d,%d\n", loc_map, loc_room);
-            if (dpw_saved_auto_combat) {
-                *(int *)(sbp + 0x4D00) = 1;
-                dpw_state = DPW_COMBAT_WAIT;
-            } else {
-                dpw_state = DPW_READY;
-            }
+            dpw_state = auto_combat ? DPW_COMBAT_WAIT : DPW_READY;
             break;
         }
         if (is_sneaking) {
@@ -4350,12 +4426,7 @@ static void dpw_tick(void)
     case DPW_HIDE_WAIT:
         if (in_combat) {
             logmsg("[dynpath] combat during hide wait at %d,%d\n", loc_map, loc_room);
-            if (dpw_saved_auto_combat) {
-                *(int *)(sbp + 0x4D00) = 1;
-                dpw_state = DPW_COMBAT_WAIT;
-            } else {
-                dpw_state = DPW_READY;
-            }
+            dpw_state = auto_combat ? DPW_COMBAT_WAIT : DPW_READY;
             break;
         }
         if (is_hiding) {
@@ -4415,11 +4486,12 @@ static void dpw_tick(void)
             }
             break;
         }
-        if (dpw_saved_auto_combat && in_combat && hostiles > 0) {
-            *(int *)(sbp + 0x4D00) = 1;
+        if (auto_combat && (in_combat || hostiles > 0)) {
             logmsg("[dynpath] combat while waiting for move: in_combat=%d hostiles=%d "
-                   "at %d,%d step %d — enabling auto_combat\n",
+                   "at %d,%d step %d — entering COMBAT_WAIT\n",
                    in_combat, hostiles, loc_map, loc_room, dpw_step);
+            dpw_combat_enter_tick = GetTickCount();
+            dpw_combat_saw_engage = in_combat ? 1 : 0;
             dpw_state = DPW_COMBAT_WAIT;
             break;
         }
@@ -4460,15 +4532,29 @@ static void dpw_tick(void)
     }
 
     case DPW_COMBAT_WAIT:
-        if (in_combat && dpw_saved_auto_bless && *(int *)(sbp + 0x4D0C) == 0) {
-            *(int *)(sbp + 0x4D0C) = dpw_saved_auto_bless;
-            logmsg("[dynpath] combat engaged: re-enabled auto_bless\n");
+        if (in_combat) {
+            dpw_combat_saw_engage = 1;
+            if (dpw_saved_auto_bless && *(int *)(sbp + 0x4D0C) == 0) {
+                *(int *)(sbp + 0x4D0C) = dpw_saved_auto_bless;
+                logmsg("[dynpath] combat engaged: re-enabled auto_bless\n");
+            }
         }
-        /* Exit when MegaMUD says combat is over (in_combat=0) and we aren't
-         * held/blinded. Don't require hostiles<=0 — a Friend/Avoid/Flee mob
-         * still in the room keeps ent[0]==2 forever, but MegaMUD already
-         * decided not to fight it (see MEGAMUD_RE.md NPC Categories). */
-        if (!in_combat && !is_held &&
+        /* Friend/Avoid probe: entered on hostiles>0 but MegaMUD never engaged
+         * (in_combat stayed 0 for the whole grace window). Treat as non-hostile
+         * and walk past — the mob is tagged Friend/Avoid/Flee. */
+        if (!in_combat && !dpw_combat_saw_engage &&
+            (GetTickCount() - dpw_combat_enter_tick) > DPW_FRIEND_PROBE_MS &&
+            !is_held && !(is_blinded && !ign_blind)) {
+            logmsg("[dynpath] no-engage probe: %d mob(s) at %d,%d but MegaMUD "
+                   "didn't engage within %dms — treating as Friend/Avoid, walking\n",
+                   hostiles, loc_map, loc_room, DPW_FRIEND_PROBE_MS);
+            if (dpw_saved_auto_bless) *(int *)(sbp + 0x4D0C) = 0;
+            dpw_state = DPW_READY;
+            dpw_last_loc = DPW_PACK_LOC(loc_map, loc_room);
+            break;
+        }
+        /* Normal exit: mob actually dead — in_combat=0 AND hostiles<=0. */
+        if (!in_combat && hostiles <= 0 && !is_held &&
             !(is_blinded && !ign_blind)) {
             logmsg("[dynpath] combat clear at %d,%d — resuming walk at step %d\n",
                    loc_map, loc_room, dpw_step);
@@ -4476,8 +4562,7 @@ static void dpw_tick(void)
                 *(int *)(sbp + 0x4D0C) = 0;
                 logmsg("[dynpath] suppressed auto_bless for movement\n");
             }
-            *(int *)(sbp + 0x4D00) = 0;
-            logmsg("[dynpath] combat clear: auto_combat disabled for walking\n");
+            /* Don't touch auto_combat here — the user controls it live. */
             unsigned int post_combat_loc = DPW_PACK_LOC(loc_map, loc_room);
             if (post_combat_loc != dpw_last_loc && post_combat_loc != 0) {
                 int found = -1;
@@ -4507,30 +4592,39 @@ static void dpw_tick(void)
         break;
 
     case DPW_REST_WAIT: {
-        int hp_full_thresh = max_hp > 0 ? (max_hp * hp_full_pct) / 100 : 0;
-        int mn_full_thresh = max_mana > 0 ? (max_mana * mn_full_pct) / 100 : 0;
-        int hp_done = (cur_hp >= hp_full_thresh);
-        int mn_done = (max_mana <= 0) || (cur_mana >= mn_full_thresh);
+        /* Rest ends when HP rises above the rest-if-below threshold.
+         * (Not the full-HP threshold — user only wants to rest until safe to move.) */
+        int rest_hp_thresh = max_hp > 0 ? (max_hp * hp_rest_pct) / 100 : 0;
+        int run_hp_thresh  = (max_hp > 0 && hp_run_pct > 0)
+                               ? (max_hp * hp_run_pct)  / 100 : 0;
 
         if (in_combat) {
             logmsg("[dynpath] combat during rest at %d,%d\n", loc_map, loc_room);
-            if (dpw_saved_auto_combat) {
-                *(int *)(sbp + 0x4D00) = 1;
-                dpw_state = DPW_COMBAT_WAIT;
-            } else {
-                dpw_state = DPW_READY;
+            dpw_state = auto_combat ? DPW_COMBAT_WAIT : DPW_READY;
+            break;
+        }
+        /* If a mob entered and we shouldn't fight here (Run mode OR Walk-but-under-
+         * run-threshold), abandon rest and advance. DPW_READY will recheck HP vs
+         * hostile and either rest again (next room clear) or advance further. */
+        {
+            int under_run_thresh = (run_hp_thresh > 0 && cur_hp <= run_hp_thresh);
+            int use_skip = !auto_combat || under_run_thresh;
+            if (use_skip) {
+                int ent2 = dpw_count_hostiles(sbp);
+                if (ent2 > 0) {
+                    logmsg("[dynpath] rest interrupted: %d mob(s) in room %d,%d "
+                           "(%s) — advancing\n",
+                           ent2, loc_map, loc_room,
+                           !auto_combat ? "Run mode" : "HP under run threshold");
+                    dpw_state = DPW_READY;
+                    break;
+                }
             }
-            break;
         }
-        if (hp_done && mn_done) {
-            logmsg("[dynpath] rest done: HP %d/%d mana %d/%d at %d,%d — resuming\n",
-                   cur_hp, max_hp, cur_mana, max_mana, loc_map, loc_room);
-            dpw_state = DPW_READY;
-            break;
-        }
-        if (!is_resting && !is_medit && hp_done) {
-            logmsg("[dynpath] HP full (%d/%d), not resting/meditating at %d,%d — resuming\n",
-                   cur_hp, max_hp, loc_map, loc_room);
+        if (cur_hp > rest_hp_thresh) {
+            logmsg("[dynpath] rest done: HP %d/%d above rest threshold %d at %d,%d "
+                   "— resuming\n",
+                   cur_hp, max_hp, rest_hp_thresh, loc_map, loc_room);
             dpw_state = DPW_READY;
             break;
         }
@@ -4594,22 +4688,39 @@ static void dynpath_do_inject(void)
      * is already zeroed by the previous walk — inherit the saved values
      * instead of reading zeroes from the struct. */
     unsigned char *sbp = (unsigned char *)struct_base;
+    /* dpw_run_mode_next: 0 = Walk (auto_combat=1 at start), 1 = Run (auto_combat=0).
+     * After this initial write, auto_combat is driven LIVE by the user — walker
+     * reads it each tick to determine mode (see dpw_tick). */
+    int initial_auto_combat = dpw_run_mode_next ? 0 : 1;
     if (dp_active) {
-        /* Already walking — keep current saved stealth/combat state (struct is zeroed) */
-        logmsg("[dynpath] chained walk: inheriting auto_sneak=%d auto_hide=%d auto_bless=%d auto_combat=%d\n",
-               dpw_saved_auto_sneak, dpw_saved_auto_hide, dpw_saved_auto_bless, dpw_saved_auto_combat);
+        /* Chained walk: keep suppressed stealth flags, just reset the mode. */
+        *(int *)(sbp + 0x4D00) = initial_auto_combat;
+        *(int *)(sbp + 0x4D08) = 1;
+        logmsg("[dynpath] chained walk (%s): auto_combat=%d auto_heal=1\n",
+               dpw_run_mode_next ? "Run" : "Walk", initial_auto_combat);
     } else {
         dpw_saved_auto_sneak  = *(int *)(sbp + 0x4D20);
         dpw_saved_auto_hide   = *(int *)(sbp + 0x4D24);
         dpw_saved_auto_bless  = *(int *)(sbp + 0x4D0C);
+        dpw_saved_auto_heal   = *(int *)(sbp + 0x4D08);
         dpw_saved_auto_combat = *(int *)(sbp + 0x4D00);
         *(int *)(sbp + 0x4D20) = 0;
         *(int *)(sbp + 0x4D24) = 0;
         *(int *)(sbp + 0x4D0C) = 0;
-        *(int *)(sbp + 0x4D00) = 0;
-        logmsg("[dynpath] suppressed auto_sneak=%d auto_hide=%d auto_bless=%d auto_combat=%d\n",
-               dpw_saved_auto_sneak, dpw_saved_auto_hide, dpw_saved_auto_bless, dpw_saved_auto_combat);
+        /* Set initial combat mode; auto_heal forced ON for walks. */
+        *(int *)(sbp + 0x4D00) = initial_auto_combat;
+        *(int *)(sbp + 0x4D08) = 1;
+        logmsg("[dynpath] %s mode start: auto_sneak=%d(suppressed) "
+               "auto_hide=%d(suppressed) auto_bless=%d(suppressed) "
+               "auto_combat=%d auto_heal=1(forced) [user's pre-walk combat=%d heal=%d]\n",
+               dpw_run_mode_next ? "Run" : "Walk",
+               dpw_saved_auto_sneak, dpw_saved_auto_hide, dpw_saved_auto_bless,
+               initial_auto_combat,
+               dpw_saved_auto_combat, dpw_saved_auto_heal);
     }
+    InterlockedExchange(&dpw_paused, 0);
+    dpw_incap_override = 0;
+    dpw_incap_saved_combat = 0;
     dpw_walk_used_sneak = dpw_saved_auto_sneak ? 1 : 0;
     dpw_walk_used_hide  = dpw_saved_auto_hide  ? 1 : 0;
     dpw_walk_used_bless = dpw_saved_auto_bless ? 1 : 0;
@@ -4747,6 +4858,96 @@ int WINAPI dynpath_needs_repath(int *out_map, int *out_room)
     if (out_room) *out_room = dpw_dst_room;
     InterlockedExchange(&dpw_needs_repath, 0);
     return 1;
+}
+
+/* Run mode: 0 = Walk (combat ON during walk), 1 = Run (combat OFF during walk).
+ * Call this BEFORE dynpath_inject. It latches the mode for the next walk start
+ * (and for chained walks, switches mid-walk on the next inject). */
+void WINAPI dynpath_set_run_mode(int run_mode)
+{
+    dpw_run_mode_next = run_mode ? 1 : 0;
+}
+
+int WINAPI dynpath_get_run_mode(void)
+{
+    if (!dp_active || !struct_base) return dpw_run_mode_next;
+    /* Live: mode is determined by the current auto_combat flag. 0=Run, 1=Walk. */
+    return (*(int *)((unsigned char *)struct_base + 0x4D00)) ? 0 : 1;
+}
+
+/* Toggle pause state. When pausing an active walk: freeze the state machine and
+ * force idle-safe flags (auto_combat ON, auto_heal ON). When resuming: don't
+ * touch auto_combat — the user's current toggle state IS the mode they want. */
+int WINAPI dynpath_toggle_pause(void)
+{
+    if (!dp_active || !struct_base) return 0;
+    unsigned char *sbp = (unsigned char *)struct_base;
+    if (!dpw_paused) {
+        InterlockedExchange(&dpw_paused, 1);
+        *(int *)(sbp + 0x4D00) = 1;  /* auto_combat ON while paused (idle-safe) */
+        *(int *)(sbp + 0x4D08) = 1;  /* auto_heal ON while paused */
+        logmsg("[dynpath] PAUSED at step %d/%d — auto_combat=ON auto_heal=ON\n",
+               dpw_step, dpw_count);
+        dpw_update_statusbar();
+        return 1;
+    } else {
+        InterlockedExchange(&dpw_paused, 0);
+        /* Don't touch auto_combat — user may have toggled it during the pause
+         * and that toggle *is* their intended mode for resuming. Leave as-is. */
+        *(int *)(sbp + 0x4D08) = 1;  /* ensure auto_heal stays ON during walks */
+        logmsg("[dynpath] RESUMED at step %d/%d — auto_combat=%d (live, user-controlled)\n",
+               dpw_step, dpw_count, *(int *)(sbp + 0x4D00));
+        dpw_update_statusbar();
+        return 0;
+    }
+}
+
+int WINAPI dynpath_is_paused(void)
+{
+    return dp_active ? (int)dpw_paused : 0;
+}
+
+/* Back-step (prepare): if a walk is active and we aren't already on step 0,
+ * ensure the walk is paused (Stop semantics) and report the previous step's
+ * room so the caller can pathfind a 1-step trip back to it.
+ *
+ * The caller is responsible for actually issuing the movement (the walker
+ * map has the graph; this DLL doesn't). Once the movement is issued, call
+ * dynpath_back_step_finalize() to decrement dpw_step and keep the main
+ * dynpath intact for later resume.
+ *
+ * Returns 1 on success (can back), 0 otherwise. */
+int WINAPI dynpath_back_step_prepare(int *out_prev_map, int *out_prev_room)
+{
+    if (!dp_active || !dpw_steps || !struct_base) return 0;
+    if (dpw_step <= 0) return 0;  /* at starting room, can't go back */
+    unsigned char *sbp = (unsigned char *)struct_base;
+    /* Ensure paused — if user hit back while running, this stops the walk
+     * and then the caller performs the 1-step movement. */
+    if (!dpw_paused) {
+        InterlockedExchange(&dpw_paused, 1);
+        *(int *)(sbp + 0x4D00) = 1;
+        *(int *)(sbp + 0x4D08) = 1;
+        logmsg("[dynpath] PAUSED (via back) at step %d/%d\n",
+               dpw_step, dpw_count);
+    }
+    int prev = dpw_step - 1;
+    if (out_prev_map)  *out_prev_map  = (int)dpw_steps[prev].map;
+    if (out_prev_room) *out_prev_room = (int)dpw_steps[prev].room;
+    return 1;
+}
+
+/* Back-step (finalize): decrement dpw_step and resync dpw_last_loc.
+ * Call after the 1-step movement completes (or is issued — the walker is
+ * paused so subsequent location updates just write loc_map/loc_room). */
+void WINAPI dynpath_back_step_finalize(void)
+{
+    if (!dp_active || dpw_step <= 0) return;
+    dpw_step--;
+    dpw_last_loc = DPW_PACK_LOC(loc_map, loc_room);
+    logmsg("[dynpath] back-step finalize: dpw_step now %d/%d at %d,%d\n",
+           dpw_step, dpw_count, loc_map, loc_room);
+    dpw_update_statusbar();
 }
 
 int WINAPI get_player_strength(void)

@@ -121,10 +121,11 @@ static char     mdw_cur_room_code[8] = "";
 static int      mdw_cur_room_known = 0;   /* 1 = known in MegaMUD */
 static uint32_t mdw_cur_room_code_ri = 0xFFFFFFFF; /* which ri we last checked */
 
-/* Per-room known cache — refreshed on room change, avoids per-frame API calls */
-#define MDW_KNOWN_MAX 4096
-static int      mdw_known_flags[MDW_KNOWN_MAX];
-static char     mdw_known_codes[MDW_KNOWN_MAX][8];
+/* Per-room known cache — refreshed on map change / every 5s, avoids per-frame API calls.
+ * Dynamically allocated to match mdw_room_count when binary is loaded. */
+static int     *mdw_known_flags = NULL;
+static char   (*mdw_known_codes)[8] = NULL;
+static uint32_t mdw_known_cap = 0;
 static DWORD    mdw_known_tick = 0;
 static uint16_t mdw_known_map = 0xFFFF;
 
@@ -141,6 +142,55 @@ static uint32_t mdw_pending_recenter_ri = 0xFFFFFFFF;
  * stays put — useful for AFK loop scripting where you set the framing once
  * and just watch the player marker move around the visible map. */
 static int mdw_auto_recenter = 1;
+
+/* ---- Footstep path visualization ----
+ * Shows animated footprints on tiles the dynpath walker still needs to traverse.
+ * Each path tile wobbles with unique random phase; walking over one triggers a
+ * settle snap + radial dust puff.  All rendering uses psolid — portable to Android. */
+#define MDW_FP_MAX 512
+typedef struct {
+    uint32_t ri;
+    float    wobble_phase;
+    float    wobble_freq;
+    float    wobble_amp;
+    int      dir;  /* 0=N,1=S,2=E,3=W,4=NE,5=NW,6=SE,7=SW,8=U,9=D,-1=unknown */
+} MdwFootstep;
+static MdwFootstep mdw_fp[MDW_FP_MAX];
+static int      mdw_fp_count = 0;
+static int      mdw_fp_cur_step = 0;
+static int      mdw_fp_prev_step = -1;
+static int      mdw_fp_active = 0;
+
+/* Dust particles spawned when a footprint tile is stepped on */
+#define MDW_DUST_MAX 2048
+typedef struct {
+    float wx, wy;
+    float vx, vy;
+    float size;
+    float alpha;
+    DWORD t0;
+} MdwDustParticle;
+static MdwDustParticle mdw_dust[MDW_DUST_MAX];
+static int mdw_dust_count = 0;
+static uint32_t mdw_puff_prev_ri = 0xFFFFFFFF;
+
+/* Settle animation: tiles transitioning from wobble → still */
+#define MDW_SETTLE_MAX 32
+typedef struct {
+    uint32_t ri;
+    DWORD    t0;
+    float    init_amp;
+} MdwSettle;
+static MdwSettle mdw_settle[MDW_SETTLE_MAX];
+static int mdw_settle_count = 0;
+
+static uint32_t mdw_fp_seed = 0x12345678;
+static float mdw_fp_rand(void) {
+    mdw_fp_seed ^= mdw_fp_seed << 13;
+    mdw_fp_seed ^= mdw_fp_seed >> 17;
+    mdw_fp_seed ^= mdw_fp_seed << 5;
+    return (float)(mdw_fp_seed & 0xFFFF) / 65535.0f;
+}
 
 /* ---- Path recorder (ported from mudmap_test.c) ----
  * Records each room transition as an MME-compatible step so we can write a
@@ -162,13 +212,15 @@ static uint32_t     mdw_rec_n       = 0;
 static uint32_t     mdw_rec_cap     = 0;
 static uint32_t     mdw_rec_start_ri = 0xFFFFFFFF;
 static int          mdw_rec_gen_mpx = 1;   /* checkbox — sidecar by default */
-static int          mdw_show_path_panel = 1;
+static int          mdw_show_path_panel = 0;
 static int          mdw_path_focus = 0;
+static int          mdw_walk_mode = 0;
 
 /* Right-click context menu on map rooms */
 #define MDW_CTX_MAX_ITEMS 24
 enum {
     MDW_CTX_TYPE_WALK = 0,
+    MDW_CTX_TYPE_RUN,
     MDW_CTX_TYPE_CENTER,
     MDW_CTX_TYPE_SEP,
     MDW_CTX_TYPE_START,
@@ -205,6 +257,8 @@ static float mdw_cd_btn_ok_x0 = 0, mdw_cd_btn_ok_x1 = 0;
 static float mdw_cd_btn_cancel_x0 = 0, mdw_cd_btn_cancel_x1 = 0;
 static float mdw_btn_mpx_x0 = 0, mdw_btn_mpx_x1 = 0;
 static float mdw_btn_panel_x0 = 0, mdw_btn_panel_x1 = 0;
+static float mdw_btn_mode_x0 = 0, mdw_btn_mode_x1 = 0;
+static float mdw_btn_path_x0 = 0, mdw_btn_path_x1 = 0;
 
 /* Path panel scroll offset (how many steps scrolled up from bottom) */
 static int mdw_path_scroll = 0;
@@ -1464,6 +1518,7 @@ static char mdw_room_buf[8] = "";
 static int  mdw_input_focus = 0;          /* 0=none, 1=map, 2=room */
 /* Hit rects for the bottom control strip (filled every frame by mdw_draw) */
 static float mdw_ctrl_y0 = 0, mdw_ctrl_y1 = 0;
+static float mdw_tool_y0 = 0, mdw_tool_y1 = 0;
 static float mdw_cb_use_rm_x0 = 0,  mdw_cb_use_rm_x1 = 0;
 static float mdw_cb_auto_x0   = 0,  mdw_cb_auto_x1   = 0;
 static float mdw_cb_noev_x0   = 0,  mdw_cb_noev_x1   = 0;
@@ -1472,6 +1527,7 @@ static DWORD mdw_walk_status_tick = 0;
 
 static int      mdw_confirm_showing = 0;
 static uint32_t mdw_confirm_dest_ri = 0xFFFFFFFF;
+static int      mdw_confirm_run_mode = 0;  /* 0=Walk, 1=Run — latched from menu click */
 static float    mdw_confirm_x0, mdw_confirm_y0, mdw_confirm_x1, mdw_confirm_y1;
 static float    mdw_confirm_btn_run_x0, mdw_confirm_btn_run_x1;
 static float    mdw_confirm_btn_cancel_x0, mdw_confirm_btn_cancel_x1;
@@ -1556,6 +1612,15 @@ static int mdw_load_bin(const char *path)
     mdw_room_count = rc;
     mdw_map_count = mc;
     mdw_rooms = (MdwRoom *)calloc(rc, sizeof(MdwRoom));
+
+    /* Resize known-room cache to match actual room count */
+    free(mdw_known_flags);
+    free(mdw_known_codes);
+    mdw_known_flags = (int *)calloc(rc, sizeof(int));
+    mdw_known_codes = (char (*)[8])calloc(rc, 8);
+    mdw_known_cap = rc;
+    mdw_known_map = 0xFFFF;
+    mdw_known_tick = 0;
 
     long rooms_start = ftell(f);
     uint32_t total_exits = 0;
@@ -2276,6 +2341,41 @@ static void mdw_draw_cross(float cx, float cy, float size,
            0.95f, 0.10f, 0.10f, 1.0f, vp_w, vp_h);
 }
 
+/* Footprint tile — renders user's footprint.png from atlas (48x48 at 0,0).
+ * Replaces the room tile entirely. Square, direction-rotated, pulsing.
+ * Draws white outline first (slightly larger), then fill on top. */
+static void mdw_draw_footprint(float cx, float cy, float tile, int dir,
+                                float alpha, int is_left,
+                                float fr, float fg, float fb,
+                                int vp_w, int vp_h) {
+    if (!ui_font_ready) return;
+    float hs = tile;
+    if (hs < 2.0f) return;
+
+    float angle = 0.0f;
+    switch (dir) {
+        case 0: angle =  0.0f;    break;
+        case 1: angle =  3.1416f; break;
+        case 2: angle =  1.5708f; break;
+        case 3: angle = -1.5708f; break;
+        case 4: angle =  0.7854f; break;
+        case 5: angle = -0.7854f; break;
+        case 6: angle =  2.3562f; break;
+        case 7: angle = -2.3562f; break;
+        case 8: angle = -0.7854f; break;
+        case 9: angle =  2.3562f; break;
+    }
+
+    int flip = is_left ? 0 : 1;
+    float outline = hs * 1.18f;
+    float olr = 1.0f, olg = 0.85f, olb = 0.15f;
+    if (fr > 0.5f) { olr = 1.0f; olg = 0.35f; olb = 0.1f; }
+    push_glyph_rotated_ui(cx, cy, outline, outline, 0.5f, 0.5f, 47.5f, 47.5f,
+                           angle, flip, olr, olg, olb, alpha * 0.9f, vp_w, vp_h);
+    push_glyph_rotated_ui(cx, cy, hs, hs, 0.5f, 0.5f, 47.5f, 47.5f,
+                           angle, flip, fr, fg, fb, alpha, vp_w, vp_h);
+}
+
 /* Line via 1 quad (orthogonal) or max 4 stepped quads (diagonal). Clipped.
  * Caps total quads/line to keep mdw_draw well under MAX_QUADS even with
  * thousands of exits on a 56K-room map. */
@@ -2430,8 +2530,8 @@ static void mdw_draw(int vp_w, int vp_h)
     if (mdw_cur_map_view != mdw_known_map || ktick - mdw_known_tick > 5000) {
         mdw_known_map = mdw_cur_map_view;
         mdw_known_tick = ktick;
-        if (api && api->room_is_known) {
-            uint32_t cap = mdw_room_count < MDW_KNOWN_MAX ? mdw_room_count : MDW_KNOWN_MAX;
+        if (api && api->room_is_known && mdw_known_flags) {
+            uint32_t cap = mdw_room_count < mdw_known_cap ? mdw_room_count : mdw_known_cap;
             for (uint32_t ki = 0; ki < cap; ki++) {
                 mdw_known_codes[ki][0] = 0;
                 mdw_known_flags[ki] = api->room_is_known(
@@ -2485,16 +2585,18 @@ static void mdw_draw(int vp_w, int vp_h)
     int close_tx = (int)x1 - pad - cw;
     ptext(close_tx, title_ty, "X", 1.0f, 0.3f, 0.3f, vp_w, vp_h, cw, ch);
 
-    /* Reserve a fixed-height controls strip at the bottom for the checkbox,
-     * map/room inputs, Set Room button, and zoom buttons. */
+    /* Top toolbar row (under title) + bottom control strip */
     int ctrl_h = ch + 10;
+    int toolbar_h = ch + 8;
+    float tool_y0 = tb_y1 + 1.0f;
+    float tool_y1 = tool_y0 + (float)toolbar_h;
     float ctrl_y0 = y1 - 6 - (float)ctrl_h;
     float ctrl_y1 = y1 - 6;
 
     /* ---- Content area (shrink for path panel if visible) ---- */
     int pp_cols = 30;  /* path panel width in characters */
     int pp_w_px = mdw_show_path_panel ? (pp_cols * cw + 16) : 0;
-    float c_x0 = x0 + 6, c_y0 = (float)tb_y1 + 3;
+    float c_x0 = x0 + 6, c_y0 = tool_y1 + 2.0f;
     float c_x1 = x1 - 6 - (float)pp_w_px, c_y1 = ctrl_y0 - 2;
     float pp_x0f = c_x1, pp_x1f = x1 - 6;
     mdw_pp_x0 = pp_x0f; mdw_pp_x1 = pp_x1f;
@@ -2539,6 +2641,88 @@ static void mdw_draw(int vp_w, int vp_h)
         if (pulse < breathe) pulse = breathe;
     }
 
+    /* ---- Footstep path update ---- */
+    {
+        unsigned short fp_maps[MDW_FP_MAX], fp_rooms[MDW_FP_MAX];
+        int fp_cur = 0;
+        int fp_n = pfn_dynpath_get_path_rooms
+            ? pfn_dynpath_get_path_rooms(fp_maps, fp_rooms, &fp_cur, MDW_FP_MAX) : 0;
+
+        if (fp_n > 0 && mdw_loaded) {
+            if (mdw_fp_active && fp_cur > mdw_fp_prev_step && mdw_fp_prev_step >= 0) {
+                for (int si = mdw_fp_prev_step; si < fp_cur && si < mdw_fp_count; si++) {
+                    uint32_t ri = mdw_fp[si].ri;
+                    if (ri == 0xFFFFFFFF) continue;
+                    MdwRoom *r = &mdw_rooms[ri];
+                    if (r->gx == INT16_MIN || r->map != mdw_cur_map_view) continue;
+                    if (mdw_settle_count < MDW_SETTLE_MAX) {
+                        MdwSettle *st = &mdw_settle[mdw_settle_count++];
+                        st->ri = ri; st->t0 = now;
+                        st->init_amp = 6.0f;
+                    }
+                }
+            }
+            if (!mdw_fp_active || fp_n != mdw_fp_count || fp_cur < mdw_fp_prev_step) {
+                mdw_fp_count = fp_n;
+                mdw_fp_seed = now * 2654435761u;
+                signed char fp_dirs[MDW_FP_MAX];
+                int nd = pfn_dynpath_get_path_dirs
+                    ? pfn_dynpath_get_path_dirs(fp_dirs, MDW_FP_MAX) : 0;
+                for (int i = 0; i < fp_n; i++) {
+                    mdw_fp[i].ri = mdw_room_lookup(fp_maps[i], fp_rooms[i]);
+                    mdw_fp[i].wobble_phase = mdw_fp_rand() * 0.4f;
+                    mdw_fp[i].wobble_freq = 0;
+                    mdw_fp[i].wobble_amp = 0.85f + mdw_fp_rand() * 0.3f;
+                    mdw_fp[i].dir = (i < nd) ? (int)fp_dirs[i] : -1;
+                }
+                mdw_settle_count = 0;
+                mdw_dust_count = 0;
+            }
+            mdw_fp_prev_step = fp_cur;
+            mdw_fp_cur_step = fp_cur;
+            mdw_fp_active = 1;
+        } else if (mdw_fp_active && fp_n == 0) {
+            mdw_fp_active = 0;
+            mdw_fp_count = 0;
+            mdw_fp_prev_step = -1;
+        }
+    }
+
+    /* Immediate puff: fire when player enters a footprint room (before combat).
+     * The dynpath step counter doesn't advance until after combat, but
+     * mdw_cur_ri updates instantly on the RM command. */
+    if (mdw_fp_active && mdw_cur_ri != mdw_puff_prev_ri && mdw_cur_ri != 0xFFFFFFFF) {
+        for (int fi = 0; fi < mdw_fp_count; fi++) {
+            if (mdw_fp[fi].ri == mdw_cur_ri) {
+                MdwRoom *pr = &mdw_rooms[mdw_cur_ri];
+                if (pr->gx != INT16_MIN && pr->map == mdw_cur_map_view) {
+                    float fwx = pr->gx * 20.0f;
+                    float fwy = pr->gy * 20.0f;
+                    float ring_r = 7.0f;
+                    int nparts = 48 + (int)(zfac * 20.0f);
+                    if (nparts > 90) nparts = 90;
+                    float psz_base = 1.2f + 1.5f / (zfac > 0.2f ? zfac : 0.2f);
+                    mdw_fp_seed = now * 2654435761u;
+                    for (int p = 0; p < nparts && mdw_dust_count < MDW_DUST_MAX; p++) {
+                        float angle = (float)p / nparts * 6.2832f + mdw_fp_rand() * 1.0f;
+                        float speed = 10.0f + mdw_fp_rand() * 30.0f;
+                        MdwDustParticle *dp = &mdw_dust[mdw_dust_count++];
+                        float roff = ring_r * (0.6f + mdw_fp_rand() * 0.4f);
+                        dp->wx = fwx + cosf(angle) * roff;
+                        dp->wy = fwy + sinf(angle) * roff;
+                        dp->vx = cosf(angle) * speed;
+                        dp->vy = sinf(angle) * speed;
+                        dp->size = psz_base * (0.6f + mdw_fp_rand() * 0.8f);
+                        dp->alpha = 0.55f + mdw_fp_rand() * 0.4f;
+                        dp->t0 = now;
+                    }
+                }
+                break;
+            }
+        }
+        mdw_puff_prev_ri = mdw_cur_ri;
+    }
+
     /* Exits first — aggressive viewport cull. An exit line from a room fully
      * off-screen can still clip through the viewport only if its neighbor is
      * on-screen (rooms are adjacent on the BFS grid, ≤1 cell apart, so a
@@ -2560,11 +2744,24 @@ static void mdw_draw(int vp_w, int vp_h)
             uint32_t ni = mdw_room_lookup(ex->tmap, ex->troom);
             if (ni == 0xFFFFFFFF) continue;
             if (mdw_rooms[ni].gx == INT16_MIN) continue;
+            int dgx = r->gx - mdw_rooms[ni].gx;
+            int dgy = r->gy - mdw_rooms[ni].gy;
+            if (dgx > 2 || dgx < -2 || dgy > 2 || dgy < -2) continue;
             float sx1 = cview_x + (mdw_rooms[ni].gx * 20.0f - mdw_view_x) * zfac;
             float sy1 = cview_y + (mdw_rooms[ni].gy * 20.0f - mdw_view_y) * zfac;
             /* Skip lines where both endpoints are off-screen on the same side */
             if ((sx0 < c_x0 && sx1 < c_x0) || (sx0 > c_x1 && sx1 > c_x1)) continue;
             if ((sy0 < c_y0 && sy1 < c_y0) || (sy0 > c_y1 && sy1 > c_y1)) continue;
+            /* Hide exit lines touching unwalked footprint/bullseye rooms */
+            if (mdw_fp_active) {
+                int src_fp = 0, dst_fp = 0;
+                for (int fi = mdw_fp_cur_step; fi < mdw_fp_count; fi++) {
+                    if (mdw_fp[fi].ri == i)  src_fp = 1;
+                    if (mdw_fp[fi].ri == ni) dst_fp = 1;
+                    if (src_fp || dst_fp) break;
+                }
+                if (src_fp || dst_fp) continue;
+            }
             float lr = 0.45f, lg = 0.45f, lb = 0.50f;
             if (ex->flags & 0x0001) { lr = 0.85f; lg = 0.55f; lb = 0.20f; }
             if (ex->flags & 0x0002) { lr = 0.35f; lg = 0.35f; lb = 0.35f; }
@@ -2589,6 +2786,46 @@ static void mdw_draw(int vp_w, int vp_h)
         if (r->map != mdw_cur_map_view) continue;
         float sx = cview_x + (r->gx * 20.0f - mdw_view_x) * zfac;
         float sy = cview_y + (r->gy * 20.0f - mdw_view_y) * zfac;
+
+        /* Wobble offset for tiles on the active dynpath */
+        int fp_idx = -1;
+        if (mdw_fp_active) {
+            for (int fi = mdw_fp_cur_step; fi < mdw_fp_count; fi++) {
+                if (mdw_fp[fi].ri == i) { fp_idx = fi; break; }
+            }
+        }
+        float settle_amp = 0.0f;
+        int settling = 0;
+        if (fp_idx < 0) {
+            for (int si = 0; si < mdw_settle_count; si++) {
+                if (mdw_settle[si].ri == i) {
+                    float dt = (float)(now - mdw_settle[si].t0) / 1000.0f;
+                    settle_amp = mdw_settle[si].init_amp * expf(-dt * 8.0f);
+                    if (settle_amp < 0.05f) {
+                        mdw_settle[si] = mdw_settle[--mdw_settle_count];
+                    } else {
+                        settling = 1;
+                        float t = (float)now / 1000.0f;
+                        sx += settle_amp * sinf(t * 15.0f + (float)i);
+                        sy += settle_amp * cosf(t * 11.0f + (float)i * 1.3f);
+                    }
+                    break;
+                }
+            }
+        }
+        if (fp_idx >= 0) {
+            float t = (float)now / 1000.0f;
+            MdwFootstep *fp = &mdw_fp[fp_idx];
+            int path_rem = mdw_fp_count - mdw_fp_cur_step;
+            int step_in = fp_idx - mdw_fp_cur_step;
+            float norm = (path_rem > 1) ? (float)step_in / (float)(path_rem - 1) : 0.5f;
+            float sag = 4.0f * norm * (1.0f - norm);
+            float amp = (3.0f + sag * 5.0f) * fp->wobble_amp;
+            float ph = step_in * 0.45f + fp->wobble_phase;
+            sx += amp * sinf(t * 1.8f + ph);
+            sy += amp * 0.6f * cosf(t * 2.3f + ph + 1.2f) + sag * 2.5f;
+        }
+
         if (sx + tile < c_x0 || sx - tile > c_x1) continue;
         if (sy + tile < c_y0 || sy - tile > c_y1) continue;
 
@@ -2624,10 +2861,44 @@ static void mdw_draw(int vp_w, int vp_h)
         float orng_r = acr, orng_g = acg, orng_b = acb;
         if (i != mdw_cur_ri) { orng_r = dmr; orng_g = dmg; orng_b = dmb; }
 
-        mdw_tile_3d(sx, sy, tile, rc, gc, bc,
-                    orng_r, orng_g, orng_b,
-                    bgdark_r, bgdark_g, bgdark_b, glow,
-                    c_x0, c_y0, c_x1, c_y1, vp_w, vp_h);
+        /* For active dynpath tiles: draw footprint or bullseye INSTEAD of room tile */
+        if (fp_idx >= 0 && i != mdw_cur_ri) {
+            int is_dest = (fp_idx == mdw_fp_count - 1);
+            if (is_dest) {
+                /* Circular dartboard bullseye — inward-traveling color wave */
+                float bp = 1.0f + 0.08f * sinf((float)now / 400.0f);
+                float bs = tile * bp;
+                float ba = 0.95f;
+                /* Dartboard palette: red, cream, green, black */
+                static const float db_r[] = {0.85f, 0.95f, 0.15f, 0.12f};
+                static const float db_g[] = {0.12f, 0.90f, 0.65f, 0.12f};
+                static const float db_b[] = {0.10f, 0.75f, 0.20f, 0.12f};
+                int nrings = 10;
+                float wave = (float)now / 600.0f;
+                for (int ri = 0; ri < nrings; ri++) {
+                    float rs = bs * (1.0f - (float)ri / nrings);
+                    int ci = ((int)(wave + (float)ri)) % 4;
+                    if (ci < 0) ci += 4;
+                    push_glyph_rotated_ui(sx, sy, rs, rs,
+                        48.5f, 0.5f, 95.5f, 47.5f,
+                        0.0f, 0, db_r[ci], db_g[ci], db_b[ci], ba, vp_w, vp_h);
+                }
+            } else {
+                float fp_pulse = 1.0f + 0.08f * sinf((float)now / 400.0f + fp_idx * 0.6f);
+                float fp_hs = tile * fp_pulse;
+                int is_left = (fp_idx % 2) == 0;
+                float fpr = 0.35f, fpg = 0.35f, fpb = 0.38f;
+                if (r->npc && !r->shop)
+                    { fpr = 0.85f; fpg = 0.15f; fpb = 0.15f; }
+                mdw_draw_footprint(sx, sy, fp_hs, mdw_fp[fp_idx].dir,
+                                   0.92f, is_left, fpr, fpg, fpb, vp_w, vp_h);
+            }
+        } else {
+            mdw_tile_3d(sx, sy, tile, rc, gc, bc,
+                        orng_r, orng_g, orng_b,
+                        bgdark_r, bgdark_g, bgdark_b, glow,
+                        c_x0, c_y0, c_x1, c_y1, vp_w, vp_h);
+        }
 
         /* Clip gate for all text/glyphs: the tile itself is shader-clipped
          * to the content rect, but ptext/draw_skull/draw_cross aren't.
@@ -2750,7 +3021,7 @@ static void mdw_draw(int vp_w, int vp_h)
         }
 
         /* Known room: animated clockwise green dots border + room code */
-        if (i != mdw_cur_ri && i < MDW_KNOWN_MAX && mdw_known_flags[i]) {
+        if (i != mdw_cur_ri && mdw_known_flags && i < mdw_known_cap && mdw_known_flags[i]) {
                 char *kcode = mdw_known_codes[i];
                 float boff = tile + 2.5f;
                 float dot_sz = tile * 0.15f;
@@ -2795,8 +3066,76 @@ static void mdw_draw(int vp_w, int vp_h)
                     ptext(kx + 1, ky, kcode, 0.3f, 1.0f, 0.4f, vp_w, vp_h, kcw, kch);
                 }
         }
+
+        /* Combat swords: counterclockwise orbiting sprite swords */
+        if (i == mdw_cur_ri && vsb_in_combat && tile >= 3.0f) {
+            float sw_size = tile * 1.1f;
+            if (sw_size < 10.0f) sw_size = 10.0f;
+            float boff = tile + sw_size * 0.55f + 2.0f;
+            int nswords = 4;
+            float orbit_t = (float)(now % 3000) / 3000.0f;
+            float sa_pulse = 0.75f + 0.25f * sinf((float)(now % 800) / 800.0f * 6.28318f);
+            for (int sw = 0; sw < nswords; sw++) {
+                float ang = -orbit_t * 6.28318f + (float)sw / nswords * 6.28318f;
+                float swx = sx + cosf(ang) * boff;
+                float swy = sy + sinf(ang) * boff;
+                if (swx < c_x0 - sw_size || swx > c_x1 + sw_size ||
+                    swy < c_y0 - sw_size || swy > c_y1 + sw_size) continue;
+                float rot = ang + 0.7854f;
+                if (sw & 1) rot += 3.14159f;
+                push_glyph_rotated_ui(swx, swy, sw_size, sw_size,
+                    96.5f, 0.5f, 143.5f, 47.5f,
+                    rot, 0, 0.9f, 0.9f, 0.95f, sa_pulse, vp_w, vp_h);
+            }
+        }
+
+        /* ---- Lair count on active dynpath tiles (no glow ring) ---- */
+        if (fp_idx >= 0 && text_ok && tile >= 5.0f && r->lair_count) {
+            char lbuf[8];
+            _snprintf(lbuf, sizeof(lbuf), "%d", (int)r->lair_count);
+            int lcw = (int)(tile * 0.45f);
+            if (lcw < cw) lcw = cw;
+            int lch = lcw * 2;
+            int llen = (int)strlen(lbuf);
+            int lw = llen * lcw;
+            int lx = (int)(sx - lw * 0.5f);
+            int ly = (int)(sy - lch * 0.5f);
+            ptext(lx - 1, ly, lbuf, 0.0f, 0.0f, 0.0f, vp_w, vp_h, lcw, lch);
+            ptext(lx + 1, ly, lbuf, 0.0f, 0.0f, 0.0f, vp_w, vp_h, lcw, lch);
+            ptext(lx, ly - 1, lbuf, 0.0f, 0.0f, 0.0f, vp_w, vp_h, lcw, lch);
+            ptext(lx, ly + 1, lbuf, 0.0f, 0.0f, 0.0f, vp_w, vp_h, lcw, lch);
+            ptext(lx, ly, lbuf, 1.0f, 1.0f, 1.0f, vp_w, vp_h, lcw, lch);
+        }
     }
     mdw_hover_ri = hover_ri;
+
+    /* ---- Yellow smoke ring particles (world-space, moves with map) ---- */
+    {
+        int alive = 0;
+        for (int di = 0; di < mdw_dust_count; di++) {
+            MdwDustParticle *dp = &mdw_dust[di];
+            float dt = (float)(now - dp->t0) / 1000.0f;
+            if (dt > 0.8f) continue;
+            float progress = dt / 0.8f;
+            float drag = 1.0f / (1.0f + dt * 2.5f);
+            float world_x = dp->wx + dp->vx * dt * drag;
+            float world_y = dp->wy + dp->vy * dt * drag;
+            float px = cview_x + (world_x - mdw_view_x) * zfac;
+            float py = cview_y + (world_y - mdw_view_y) * zfac;
+            float sz = dp->size * zfac * (0.6f + progress * 2.0f);
+            float fade = (1.0f - progress);
+            float al = dp->alpha * fade * fade * fade;
+            if (al < 0.01f) continue;
+            if (px + sz >= c_x0 && px - sz <= c_x1 &&
+                py + sz >= c_y0 && py - sz <= c_y1) {
+                float cr = 1.0f, cg = 0.85f - progress * 0.3f, cb = 0.15f;
+                psolid(px - sz, py - sz, px + sz, py + sz,
+                       cr, cg, cb, al, vp_w, vp_h);
+            }
+            mdw_dust[alive++] = mdw_dust[di];
+        }
+        mdw_dust_count = alive;
+    }
 
     /* Hover just cleared? Flush any queued recenter so the camera catches
      * up with the player's current room (only when auto-recenter is on —
@@ -3619,88 +3958,126 @@ static void mdw_draw(int vp_w, int vp_h)
         }
     }
 
+    /* ---- Top toolbar row ---- */
+    mdw_tool_y0 = tool_y0;
+    mdw_tool_y1 = tool_y1;
+    psolid(c_x0, tool_y0, x1 - 6, tool_y1,
+           bgr + 0.03f, bgg + 0.03f, bgb + 0.03f, 0.98f, vp_w, vp_h);
+    psolid(c_x0, tool_y1 - 1, x1 - 6, tool_y1, 0.0f, 0.0f, 0.0f, 0.3f, vp_w, vp_h);
+    {
+        int ty = (int)(tool_y0 + (float)(toolbar_h - ch) / 2.0f);
+        int tx = (int)c_x0 + 6;
+
+        /* [X] use rm checkbox */
+        {
+            int bx0 = tx, by0 = ty, bx1 = tx + ch, by1 = ty + ch;
+            mdw_cb_use_rm_x0 = (float)bx0; mdw_cb_use_rm_x1 = (float)bx1;
+            psolid((float)bx0, (float)by0, (float)bx1, (float)by1,
+                   bgr * 0.2f, bgg * 0.2f, bgb * 0.2f, 1.0f, vp_w, vp_h);
+            psolid((float)bx0, (float)by0, (float)bx1, (float)by0 + 1, acr, acg, acb, 0.8f, vp_w, vp_h);
+            psolid((float)bx0, (float)by1 - 1, (float)bx1, (float)by1, acr, acg, acb, 0.8f, vp_w, vp_h);
+            psolid((float)bx0, (float)by0, (float)bx0 + 1, (float)by1, acr, acg, acb, 0.8f, vp_w, vp_h);
+            psolid((float)bx1 - 1, (float)by0, (float)bx1, (float)by1, acr, acg, acb, 0.8f, vp_w, vp_h);
+            if (mdw_use_rm) {
+                psolid((float)bx0 + 3, (float)by0 + 3, (float)bx1 - 3, (float)by1 - 3,
+                       0.25f, 0.95f, 0.35f, 1.0f, vp_w, vp_h);
+            }
+            ptext(bx1 + 4, ty, "use rm", txr, txg, txb, vp_w, vp_h, cw, ch);
+            tx = bx1 + 4 + 6 * cw + 14;
+        }
+
+        /* [X] auto checkbox */
+        {
+            int bx0 = tx, by0 = ty, bx1 = tx + ch, by1 = ty + ch;
+            mdw_cb_auto_x0 = (float)bx0; mdw_cb_auto_x1 = (float)bx1;
+            psolid((float)bx0, (float)by0, (float)bx1, (float)by1,
+                   bgr * 0.2f, bgg * 0.2f, bgb * 0.2f, 1.0f, vp_w, vp_h);
+            psolid((float)bx0, (float)by0, (float)bx1, (float)by0 + 1, acr, acg, acb, 0.8f, vp_w, vp_h);
+            psolid((float)bx0, (float)by1 - 1, (float)bx1, (float)by1, acr, acg, acb, 0.8f, vp_w, vp_h);
+            psolid((float)bx0, (float)by0, (float)bx0 + 1, (float)by1, acr, acg, acb, 0.8f, vp_w, vp_h);
+            psolid((float)bx1 - 1, (float)by0, (float)bx1, (float)by1, acr, acg, acb, 0.8f, vp_w, vp_h);
+            if (mdw_auto_recenter) {
+                psolid((float)bx0 + 3, (float)by0 + 3, (float)bx1 - 3, (float)by1 - 3,
+                       0.25f, 0.95f, 0.35f, 1.0f, vp_w, vp_h);
+            }
+            ptext(bx1 + 4, ty, "auto", txr, txg, txb, vp_w, vp_h, cw, ch);
+            tx = bx1 + 4 + 4 * cw + 14;
+        }
+
+        /* [X] no events checkbox */
+        {
+            int noev = pfn_dynpath_get_suspend_events ? pfn_dynpath_get_suspend_events() : 0;
+            int bx0 = tx, by0 = ty, bx1 = tx + ch, by1 = ty + ch;
+            mdw_cb_noev_x0 = (float)bx0; mdw_cb_noev_x1 = (float)bx1;
+            psolid((float)bx0, (float)by0, (float)bx1, (float)by1,
+                   bgr * 0.2f, bgg * 0.2f, bgb * 0.2f, 1.0f, vp_w, vp_h);
+            psolid((float)bx0, (float)by0, (float)bx1, (float)by0 + 1, acr, acg, acb, 0.8f, vp_w, vp_h);
+            psolid((float)bx0, (float)by1 - 1, (float)bx1, (float)by1, acr, acg, acb, 0.8f, vp_w, vp_h);
+            psolid((float)bx0, (float)by0, (float)bx0 + 1, (float)by1, acr, acg, acb, 0.8f, vp_w, vp_h);
+            psolid((float)bx1 - 1, (float)by0, (float)bx1, (float)by1, acr, acg, acb, 0.8f, vp_w, vp_h);
+            if (noev) {
+                psolid((float)bx0 + 3, (float)by0 + 3, (float)bx1 - 3, (float)by1 - 3,
+                       0.95f, 0.6f, 0.2f, 1.0f, vp_w, vp_h);
+            }
+            ptext(bx1 + 4, ty, "no events", txr, txg, txb, vp_w, vp_h, cw, ch);
+        }
+
+        /* Right-aligned: [Recorder] [Mode:WALK/VIEW] */
+        {
+            int tby0 = ty - 2, tby1 = ty + ch + 2;
+            int rx = (int)x1 - 12;
+
+            /* [Mode: WALK] or [Mode: VIEW] */
+            {
+                const char *mlbl = mdw_walk_mode ? "WALK" : "VIEW";
+                int mw = 10 * cw + 10;
+                int bx0 = rx - mw, bx1 = rx;
+                mdw_btn_mode_x0 = (float)bx0; mdw_btn_mode_x1 = (float)bx1;
+                float mr = mdw_walk_mode ? 0.15f : 0.1f;
+                float mg = mdw_walk_mode ? 0.35f : 0.15f;
+                float mb = mdw_walk_mode ? 0.12f : 0.35f;
+                psolid((float)bx0, (float)tby0, (float)bx1, (float)tby1, mr, mg, mb, 1.0f, vp_w, vp_h);
+                psolid((float)bx0, (float)tby0, (float)bx1, (float)tby0 + 1, mr + 0.2f, mg + 0.2f, mb + 0.2f, 0.9f, vp_w, vp_h);
+                psolid((float)bx0, (float)tby1 - 1, (float)bx1, (float)tby1, mr * 0.3f, mg * 0.3f, mb * 0.3f, 0.9f, vp_w, vp_h);
+                psolid((float)bx0, (float)tby0, (float)bx0 + 1, (float)tby1, mr + 0.15f, mg + 0.15f, mb + 0.15f, 0.8f, vp_w, vp_h);
+                psolid((float)bx1 - 1, (float)tby0, (float)bx1, (float)tby1, mr * 0.3f, mg * 0.3f, mb * 0.3f, 0.8f, vp_w, vp_h);
+                ptext(bx0 + 5, ty, "Mode:", txr, txg, txb, vp_w, vp_h, cw, ch);
+                float wr = mdw_walk_mode ? 0.3f : 0.6f;
+                float wg = mdw_walk_mode ? 1.0f : 0.7f;
+                float wb = mdw_walk_mode ? 0.4f : 1.0f;
+                ptext(bx0 + 5 + 5 * cw + 2, ty, mlbl, wr, wg, wb, vp_w, vp_h, cw, ch);
+                rx = bx0 - 6;
+            }
+
+            /* [Recorder] toggle button — extra padding + full border so it reads as a button */
+            rx -= 12;
+            {
+                const char *plbl = "Recorder";
+                int pw = (int)strlen(plbl) * cw + 20;
+                int bx0 = rx - pw, bx1 = rx;
+                mdw_btn_path_x0 = (float)bx0; mdw_btn_path_x1 = (float)bx1;
+                float pr = mdw_show_path_panel ? 0.2f : 0.12f;
+                float pg = mdw_show_path_panel ? 0.35f : 0.12f;
+                float pb = mdw_show_path_panel ? 0.15f : 0.12f;
+                psolid((float)bx0, (float)tby0, (float)bx1, (float)tby1, pr, pg, pb, 1.0f, vp_w, vp_h);
+                psolid((float)bx0, (float)tby0, (float)bx1, (float)tby0 + 1, pr + 0.2f, pg + 0.2f, pb + 0.2f, 0.9f, vp_w, vp_h);
+                psolid((float)bx0, (float)tby1 - 1, (float)bx1, (float)tby1, pr * 0.3f, pg * 0.3f, pb * 0.3f, 0.9f, vp_w, vp_h);
+                psolid((float)bx0, (float)tby0, (float)bx0 + 1, (float)tby1, pr + 0.15f, pg + 0.15f, pb + 0.15f, 0.8f, vp_w, vp_h);
+                psolid((float)bx1 - 1, (float)tby0, (float)bx1, (float)tby1, pr * 0.3f, pg * 0.3f, pb * 0.3f, 0.8f, vp_w, vp_h);
+                ptext(bx0 + 10, ty, plbl, txr, txg, txb, vp_w, vp_h, cw, ch);
+            }
+        }
+    }
+
     /* ---- Bottom controls strip ---- */
     mdw_ctrl_y0 = ctrl_y0;
     mdw_ctrl_y1 = ctrl_y1;
-    /* Strip background (slightly lighter than content) */
     psolid(c_x0, ctrl_y0, c_x1, ctrl_y1,
            bgr + 0.05f, bgg + 0.05f, bgb + 0.05f, 0.98f, vp_w, vp_h);
     psolid(c_x0, ctrl_y0, c_x1, ctrl_y0 + 1, acr, acg, acb, 0.5f, vp_w, vp_h);
-
+    {
     int cy = (int)(ctrl_y0 + (ctrl_h - ch) / 2);
     int cx = (int)c_x0 + 6;
-
-    /* [X] use rm checkbox */
-    {
-        int bx0 = cx, by0 = cy, bx1 = cx + ch, by1 = cy + ch;
-        mdw_cb_use_rm_x0 = (float)bx0; mdw_cb_use_rm_x1 = (float)bx1;
-        /* Box */
-        psolid((float)bx0, (float)by0, (float)bx1, (float)by1,
-               bgr * 0.2f, bgg * 0.2f, bgb * 0.2f, 1.0f, vp_w, vp_h);
-        psolid((float)bx0, (float)by0, (float)bx1, (float)by0 + 1,
-               acr, acg, acb, 0.8f, vp_w, vp_h);
-        psolid((float)bx0, (float)by1 - 1, (float)bx1, (float)by1,
-               acr, acg, acb, 0.8f, vp_w, vp_h);
-        psolid((float)bx0, (float)by0, (float)bx0 + 1, (float)by1,
-               acr, acg, acb, 0.8f, vp_w, vp_h);
-        psolid((float)bx1 - 1, (float)by0, (float)bx1, (float)by1,
-               acr, acg, acb, 0.8f, vp_w, vp_h);
-        /* Check */
-        if (mdw_use_rm) {
-            psolid((float)bx0 + 3, (float)by0 + 3,
-                   (float)bx1 - 3, (float)by1 - 3,
-                   0.25f, 0.95f, 0.35f, 1.0f, vp_w, vp_h);
-        }
-        ptext(bx1 + 4, cy, "use rm", txr, txg, txb, vp_w, vp_h, cw, ch);
-        cx = bx1 + 4 + 6 * cw + 10;
-    }
-
-    /* [X] auto checkbox — auto-recenter map on room change vs manual pan */
-    {
-        int bx0 = cx, by0 = cy, bx1 = cx + ch, by1 = cy + ch;
-        mdw_cb_auto_x0 = (float)bx0; mdw_cb_auto_x1 = (float)bx1;
-        psolid((float)bx0, (float)by0, (float)bx1, (float)by1,
-               bgr * 0.2f, bgg * 0.2f, bgb * 0.2f, 1.0f, vp_w, vp_h);
-        psolid((float)bx0, (float)by0, (float)bx1, (float)by0 + 1,
-               acr, acg, acb, 0.8f, vp_w, vp_h);
-        psolid((float)bx0, (float)by1 - 1, (float)bx1, (float)by1,
-               acr, acg, acb, 0.8f, vp_w, vp_h);
-        psolid((float)bx0, (float)by0, (float)bx0 + 1, (float)by1,
-               acr, acg, acb, 0.8f, vp_w, vp_h);
-        psolid((float)bx1 - 1, (float)by0, (float)bx1, (float)by1,
-               acr, acg, acb, 0.8f, vp_w, vp_h);
-        if (mdw_auto_recenter) {
-            psolid((float)bx0 + 3, (float)by0 + 3,
-                   (float)bx1 - 3, (float)by1 - 3,
-                   0.25f, 0.95f, 0.35f, 1.0f, vp_w, vp_h);
-        }
-        ptext(bx1 + 4, cy, "auto", txr, txg, txb, vp_w, vp_h, cw, ch);
-        cx = bx1 + 4 + 4 * cw + 10;
-    }
-
-    /* [X] no events — suspend timed events during map walk */
-    {
-        int noev = pfn_dynpath_get_suspend_events ? pfn_dynpath_get_suspend_events() : 0;
-        int bx0 = cx, by0 = cy, bx1 = cx + ch, by1 = cy + ch;
-        mdw_cb_noev_x0 = (float)bx0; mdw_cb_noev_x1 = (float)bx1;
-        psolid((float)bx0, (float)by0, (float)bx1, (float)by1,
-               bgr * 0.2f, bgg * 0.2f, bgb * 0.2f, 1.0f, vp_w, vp_h);
-        psolid((float)bx0, (float)by0, (float)bx1, (float)by0 + 1,
-               acr, acg, acb, 0.8f, vp_w, vp_h);
-        psolid((float)bx0, (float)by1 - 1, (float)bx1, (float)by1,
-               acr, acg, acb, 0.8f, vp_w, vp_h);
-        psolid((float)bx0, (float)by0, (float)bx0 + 1, (float)by1,
-               acr, acg, acb, 0.8f, vp_w, vp_h);
-        psolid((float)bx1 - 1, (float)by0, (float)bx1, (float)by1,
-               acr, acg, acb, 0.8f, vp_w, vp_h);
-        if (noev) {
-            psolid((float)bx0 + 3, (float)by0 + 3,
-                   (float)bx1 - 3, (float)by1 - 3,
-                   0.95f, 0.6f, 0.2f, 1.0f, vp_w, vp_h);
-        }
-        ptext(bx1 + 4, cy, "no events", txr, txg, txb, vp_w, vp_h, cw, ch);
-        cx = bx1 + 4 + 9 * cw + 10;
-    }
 
     /* Map: [  ]  Room: [    ] */
     {
@@ -3764,8 +4141,9 @@ static void mdw_draw(int vp_w, int vp_h)
         cx = bx1 + 8;
     }
 
-    /* [Code Room] button — color changes based on known status */
-    {
+    /* [Code Room] button — only show when recorder panel is open */
+    mdw_btn_code_x0 = mdw_btn_code_x1 = 0;
+    if (mdw_show_path_panel) {
         const char *lbl = mdw_cur_room_known ? mdw_cur_room_code : "Code";
         float cbr, cbg, cbb;
         if (mdw_cur_room_known) {
@@ -3785,31 +4163,6 @@ static void mdw_draw(int vp_w, int vp_h)
         ptext(bx0 + 5, cy, lbl, txr, txg, txb, vp_w, vp_h, cw, ch);
     }
 
-    /* [-] [+] zoom buttons, right-aligned */
-    {
-        int bw = 2 * cw + 8;
-        int bx1 = (int)c_x1 - 6;
-        int bx0 = bx1 - bw;
-        int by0 = cy - 2, by1 = cy + ch + 2;
-        mdw_btn_zoom_in_x0 = (float)bx0; mdw_btn_zoom_in_x1 = (float)bx1;
-        psolid((float)bx0, (float)by0, (float)bx1, (float)by1,
-               acr * 0.4f + bgr * 0.4f, acg * 0.4f + bgg * 0.4f, acb * 0.4f + bgb * 0.4f,
-               1.0f, vp_w, vp_h);
-        psolid((float)bx0, (float)by0, (float)bx1, (float)by0 + 1, acr, acg, acb, 0.9f, vp_w, vp_h);
-        psolid((float)bx0, (float)by0, (float)bx0 + 1, (float)by1, acr, acg, acb, 0.8f, vp_w, vp_h);
-        psolid((float)bx1 - 1, (float)by0, (float)bx1, (float)by1, acr * 0.3f, acg * 0.3f, acb * 0.3f, 0.8f, vp_w, vp_h);
-        ptext(bx0 + 4, cy, "+", txr, txg, txb, vp_w, vp_h, cw, ch);
-
-        bx1 = bx0 - 4;
-        bx0 = bx1 - bw;
-        mdw_btn_zoom_out_x0 = (float)bx0; mdw_btn_zoom_out_x1 = (float)bx1;
-        psolid((float)bx0, (float)by0, (float)bx1, (float)by1,
-               acr * 0.4f + bgr * 0.4f, acg * 0.4f + bgg * 0.4f, acb * 0.4f + bgb * 0.4f,
-               1.0f, vp_w, vp_h);
-        psolid((float)bx0, (float)by0, (float)bx1, (float)by0 + 1, acr, acg, acb, 0.9f, vp_w, vp_h);
-        psolid((float)bx0, (float)by0, (float)bx0 + 1, (float)by1, acr, acg, acb, 0.8f, vp_w, vp_h);
-        psolid((float)bx1 - 1, (float)by0, (float)bx1, (float)by1, acr * 0.3f, acg * 0.3f, acb * 0.3f, 0.8f, vp_w, vp_h);
-        ptext(bx0 + 4, cy, "-", txr, txg, txb, vp_w, vp_h, cw, ch);
     }
 }
 
@@ -3873,8 +4226,8 @@ static int mdw_mouse_down(int mx, int my)
         mdw_drag_oy = (float)my - mdw_y;
         return 1;
     }
-    /* Bottom control strip */
-    if ((float)my >= mdw_ctrl_y0 && (float)my <= mdw_ctrl_y1) {
+    /* Top toolbar */
+    if ((float)my >= mdw_tool_y0 && (float)my <= mdw_tool_y1) {
         float fmx = (float)mx;
         if (fmx >= mdw_cb_use_rm_x0 && fmx <= mdw_cb_use_rm_x1) {
             mdw_use_rm = !mdw_use_rm;
@@ -3891,8 +4244,6 @@ static int mdw_mouse_down(int mx, int my)
         }
         if (fmx >= mdw_cb_auto_x0 && fmx <= mdw_cb_auto_x1) {
             mdw_auto_recenter = !mdw_auto_recenter;
-            /* Flipping auto back ON while a room is known snaps view to it
-             * so the user doesn't have to wait for the next movement. */
             if (mdw_auto_recenter && mdw_cur_ri != 0xFFFFFFFF &&
                 mdw_cur_ri < mdw_room_count &&
                 mdw_rooms[mdw_cur_ri].gx != INT16_MIN) {
@@ -3902,6 +4253,22 @@ static int mdw_mouse_down(int mx, int my)
             mdw_input_focus = 0;
             return 1;
         }
+        if (fmx >= mdw_btn_mode_x0 && fmx <= mdw_btn_mode_x1) {
+            mdw_walk_mode = !mdw_walk_mode;
+            mdw_input_focus = 0;
+            return 1;
+        }
+        if (fmx >= mdw_btn_path_x0 && fmx <= mdw_btn_path_x1) {
+            mdw_show_path_panel = !mdw_show_path_panel;
+            mdw_input_focus = 0;
+            return 1;
+        }
+        mdw_input_focus = 0;
+        return 1;
+    }
+    /* Bottom control strip */
+    if ((float)my >= mdw_ctrl_y0 && (float)my <= mdw_ctrl_y1) {
+        float fmx = (float)mx;
         if (fmx >= mdw_in_map_x0 && fmx <= mdw_in_map_x1) {
             mdw_input_focus = 1;
             return 1;
@@ -3934,16 +4301,6 @@ static int mdw_mouse_down(int mx, int my)
                 mdw_roomsmd_lookup(cr->checksum, NULL, 0, mdw_code_area, sizeof(mdw_code_area), NULL, 0);
                 mdw_code_status[0] = 0;
             }
-            mdw_input_focus = 0;
-            return 1;
-        }
-        if (fmx >= mdw_btn_zoom_in_x0 && fmx <= mdw_btn_zoom_in_x1) {
-            mdw_zoom *= 1.2f; if (mdw_zoom > 10.0f) mdw_zoom = 10.0f;
-            mdw_input_focus = 0;
-            return 1;
-        }
-        if (fmx >= mdw_btn_zoom_out_x0 && fmx <= mdw_btn_zoom_out_x1) {
-            mdw_zoom /= 1.2f; if (mdw_zoom < 0.25f) mdw_zoom = 0.25f;
             mdw_input_focus = 0;
             return 1;
         }
@@ -4099,12 +4456,15 @@ static int mdw_mouse_down(int mx, int my)
                         pfn_dynpath_set_dest_room(
                             mdw_rooms[mdw_confirm_dest_ri].map,
                             mdw_rooms[mdw_confirm_dest_ri].room);
+                    if (pfn_dynpath_set_run_mode)
+                        pfn_dynpath_set_run_mode(mdw_confirm_run_mode);
                     int rv = pfn_dynpath_inject(
                         (dynpath_step_t *)cdp->steps, cdp->count,
                         (mdw_rooms[mdw_player_ri].map << 16) | mdw_rooms[mdw_player_ri].room,
                         (mdw_rooms[mdw_confirm_dest_ri].map << 16) | mdw_rooms[mdw_confirm_dest_ri].room);
                     if (rv == 0)
-                        wsprintfA(mdw_walk_status, "Walking to %s (%d steps)",
+                        wsprintfA(mdw_walk_status, "%s to %s (%d steps)",
+                                  mdw_confirm_run_mode ? "Running" : "Walking",
                                   mdw_rooms[mdw_confirm_dest_ri].name, cdp->count);
                     else
                         wsprintfA(mdw_walk_status, "Inject failed (%d)", rv);
@@ -4193,8 +4553,8 @@ static void mdw_mouse_move(int mx, int my)
         if (mdw_resize_edge & 2) { mdw_w = mdw_resize_sw + dx; }
         if (mdw_resize_edge & 4) { mdw_y = mdw_resize_sy + dy; mdw_h = mdw_resize_sh - dy; }
         if (mdw_resize_edge & 8) { mdw_h = mdw_resize_sh + dy; }
-        if (mdw_w < 200) mdw_w = 200;
-        if (mdw_h < 150) mdw_h = 150;
+        if (mdw_w < 380) mdw_w = 380;
+        if (mdw_h < 200) mdw_h = 200;
         return;
     }
     if (mdw_panning) {
@@ -4225,11 +4585,18 @@ static void mdw_ctx_build(uint32_t ri)
     if (ri >= mdw_room_count) return;
     MdwRoom *room = &mdw_rooms[ri];
 
-    /* Walk to this room */
+    /* Walk to this room (auto_combat ON during walk) */
     MdwCtxItem *it = &mdw_ctx_items[mdw_ctx_count++];
     it->type = MDW_CTX_TYPE_WALK;
     it->dest_ri = ri;
     wsprintfA(it->label, "Walk to %d,%d  %s", room->map, room->room, room->name);
+    it->label[79] = 0;
+
+    /* Run to this room (auto_combat OFF during walk, skip hostile rooms) */
+    it = &mdw_ctx_items[mdw_ctx_count++];
+    it->type = MDW_CTX_TYPE_RUN;
+    it->dest_ri = ri;
+    wsprintfA(it->label, "Run to %d,%d  %s", room->map, room->room, room->name);
     it->label[79] = 0;
 
     /* Center on room */
@@ -4299,7 +4666,8 @@ static int mdw_rbutton_down(int mx, int my)
     float ctrl_y0_r = y1 - 6 - (float)ctrl_h_r;
     int pp_cols_r = 30;
     int pp_w_px_r = mdw_show_path_panel ? (pp_cols_r * cw + 16) : 0;
-    float c_x0 = x0 + 6, c_y0 = tb_y1 + 3;
+    int toolbar_h_r = ch + 8;
+    float c_x0 = x0 + 6, c_y0 = tb_y1 + (float)toolbar_h_r + 3;
     float c_x1 = x1 - 6 - (float)pp_w_px_r, c_y1 = ctrl_y0_r - 2;
     if ((float)mx < c_x0 || (float)mx > c_x1 ||
         (float)my < c_y0 || (float)my > c_y1) {
@@ -4375,7 +4743,12 @@ static int mdw_ctx_hit(int mx, int my)
     return -1;
 }
 
-static void mdw_ctx_walk_to(uint32_t dest_ri)
+/* run_mode: 0 = Walk (auto_combat ON during walk), 1 = Run (auto_combat OFF) */
+static void mdw_ctx_walk_to_mode(uint32_t dest_ri, int run_mode);
+static void mdw_ctx_walk_to(uint32_t dest_ri) { mdw_ctx_walk_to_mode(dest_ri, 0); }
+static void mdw_ctx_run_to(uint32_t dest_ri)  { mdw_ctx_walk_to_mode(dest_ri, 1); }
+
+static void mdw_ctx_walk_to_mode(uint32_t dest_ri, int run_mode)
 {
     if (dest_ri >= mdw_room_count) return;
     if (mdw_player_ri >= mdw_room_count) {
@@ -4406,6 +4779,7 @@ static void mdw_ctx_walk_to(uint32_t dest_ri)
 
     if (dp->req_count > 0) {
         mdw_confirm_dest_ri = dest_ri;
+        mdw_confirm_run_mode = run_mode;
         mdw_confirm_showing = 1;
         return;
     }
@@ -4420,13 +4794,16 @@ static void mdw_ctx_walk_to(uint32_t dest_ri)
     if (pfn_dynpath_set_dest_room)
         pfn_dynpath_set_dest_room(mdw_rooms[dest_ri].map,
                                   mdw_rooms[dest_ri].room);
+    if (pfn_dynpath_set_run_mode)
+        pfn_dynpath_set_run_mode(run_mode);
     mdw_browsing = 0;
     mdw_set_current(mdw_rooms[mdw_player_ri].map, mdw_rooms[mdw_player_ri].room);
     int rv = pfn_dynpath_inject((dynpath_step_t *)dp->steps, dp->count,
                                 (mdw_rooms[mdw_player_ri].map << 16) | mdw_rooms[mdw_player_ri].room,
                                 (mdw_rooms[dest_ri].map << 16) | mdw_rooms[dest_ri].room);
     if (rv == 0)
-        wsprintfA(mdw_walk_status, "Walking to %s (%d steps)",
+        wsprintfA(mdw_walk_status, "%s to %s (%d steps)",
+                  run_mode ? "Running" : "Walking",
                   mdw_rooms[dest_ri].name, dp->count);
     else
         wsprintfA(mdw_walk_status, "Inject failed (%d)", rv);
@@ -4445,6 +4822,9 @@ static int mdw_ctx_click(int mx, int my)
     switch (it->type) {
     case MDW_CTX_TYPE_WALK:
         mdw_ctx_walk_to(it->dest_ri);
+        break;
+    case MDW_CTX_TYPE_RUN:
+        mdw_ctx_run_to(it->dest_ri);
         break;
     case MDW_CTX_TYPE_EXIT:
         if (it->dest_ri < mdw_room_count) {
@@ -4536,7 +4916,8 @@ static void mdw_ctx_draw(int vp_w, int vp_h)
                        0.18f, vp_w, vp_h);
         }
         float lr = t->text[0], lg = t->text[1], lb = t->text[2];
-        if (it->type == MDW_CTX_TYPE_WALK && mdw_cur_ri >= mdw_room_count) {
+        if ((it->type == MDW_CTX_TYPE_WALK || it->type == MDW_CTX_TYPE_RUN)
+            && mdw_cur_ri >= mdw_room_count) {
             lr = t->dim[0] * 0.5f; lg = t->dim[1] * 0.5f; lb = t->dim[2] * 0.5f;
         }
         push_text(cx + s4 + 4, iy + (ih - item_ch) / 2,
@@ -4551,6 +4932,66 @@ static void mdw_send_rm(void)
     if (!api || !api->inject_command) return;
     if (pfn_auto_rm_queue_increment) pfn_auto_rm_queue_increment();
     api->inject_command("rm");
+}
+
+/* Back-step the current dynpath. If a walk is active:
+ *   - If at step 0: no-op (can't go back from starting room)
+ *   - If not yet paused: pauses (Stop semantics), then goes back one step
+ *   - Builds a fresh 1-step BFS from current room to the previous step's room
+ *     so asymmetric exits resolve correctly. Common examples: ladder/hole,
+ *     plus the many hidden exit d-commands whose inverse is not just the
+ *     reversed cardinal. (u/d pairs ARE symmetric and would reverse fine —
+ *     they're not the reason for the BFS.)
+ *   - Does NOT replace the main dynpath — main dpw_steps stay intact, only
+ *     dpw_step is decremented so the walk can be resumed from the earlier step
+ * Returns 1 on success, 0 if no back possible. */
+static int mdw_do_back_step(void)
+{
+    if (!pfn_dynpath_back_step_prepare || !pfn_dynpath_back_step_finalize) return 0;
+    if (!api || !api->inject_command) return 0;
+
+    int prev_map = 0, prev_room = 0;
+    if (!pfn_dynpath_back_step_prepare(&prev_map, &prev_room)) {
+        wsprintfA(mdw_walk_status, "Can't go back — at starting room");
+        mdw_walk_status_tick = GetTickCount();
+        return 0;
+    }
+
+    /* Find the prev-room's index in our mudmap, then BFS from player room. */
+    if (mdw_player_ri >= mdw_room_count) {
+        wsprintfA(mdw_walk_status, "Back: player position unknown");
+        mdw_walk_status_tick = GetTickCount();
+        return 0;
+    }
+    uint32_t prev_ri = mdw_room_lookup((uint16_t)prev_map, (uint16_t)prev_room);
+    if (prev_ri >= mdw_room_count) {
+        wsprintfA(mdw_walk_status, "Back: prev room %d,%d not in map", prev_map, prev_room);
+        mdw_walk_status_tick = GetTickCount();
+        return 0;
+    }
+    MdwDynPath *bp = mdw_find_path(mdw_player_ri, prev_ri);
+    if (bp->error != MDW_DPERR_NONE || bp->count <= 0 || !bp->steps) {
+        wsprintfA(mdw_walk_status, "Back: no path to %d,%d", prev_map, prev_room);
+        mdw_walk_status_tick = GetTickCount();
+        return 0;
+    }
+    /* We only care about the first step — whatever direction actually leaves
+     * the current room toward the prev-room. (Usually 1 step; if asymmetric
+     * routing happens to need more, we'll only take one and let the walker
+     * handle any residual on resume.) */
+    const char *dir = bp->steps[0].dir;
+    if (!dir || !dir[0]) {
+        wsprintfA(mdw_walk_status, "Back: empty direction");
+        mdw_walk_status_tick = GetTickCount();
+        return 0;
+    }
+    api->inject_command(dir);
+    if (pfn_auto_rm_queue_increment) pfn_auto_rm_queue_increment();
+    api->inject_command("rm");
+    pfn_dynpath_back_step_finalize();
+    wsprintfA(mdw_walk_status, "Back: sent '%s' to %d,%d", dir, prev_map, prev_room);
+    mdw_walk_status_tick = GetTickCount();
+    return 1;
 }
 
 static int mdw_verify_room(void)
@@ -4882,10 +5323,13 @@ static int mdw_key_down(unsigned int vk)
         return 1;
     }
 
-    /* Numpad walks the MAP when path panel has focus. If recording, also capture steps.
+    /* Numpad walks the MAP when: path panel visible and focused, OR walk mode
+     * is active (panel hidden). If recording, also capture steps.
      * VK_NUMPAD* keys are only generated when NumLock is on; when off, Windows
      * sends VK_UP/VK_DOWN/etc. instead — so no NumLock gate needed here. */
-    if (mdw_path_focus && mdw_cur_ri < mdw_room_count) {
+    int numpad_to_map = mdw_path_focus ||
+                        (!mdw_show_path_panel && mdw_walk_mode);
+    if (numpad_to_map && mdw_cur_ri < mdw_room_count) {
         int dir = -1;
         switch (vk) {
         case VK_NUMPAD8: dir = 0; break; /* N  */
