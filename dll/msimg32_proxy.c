@@ -4246,7 +4246,47 @@ static int              dpw_incap_saved_combat = 0;
  * chose not to engage — exit after a short probe window instead of hanging. */
 static DWORD            dpw_combat_enter_tick = 0;
 static int              dpw_combat_saw_engage = 0;
+static int              dpw_combat_clear_streak = 0;  /* consecutive ticks condition held */
+static volatile LONG    dpw_saw_kill_line = 0;  /* set by line FSM on "X is DEAD!" */
 #define DPW_FRIEND_PROBE_MS 1000
+/* Exit COMBAT_WAIT when (!in_combat && hostiles<=0) holds for 2 consecutive
+ * polls OR the line FSM witnessed a kill line ("X is DEAD!"). MegaMUD's
+ * in_combat flickers to 0 for a single tick between swing rounds and
+ * ent[0]==2 counts transiently drop during array mutation — a single-poll
+ * snapshot gives false clears, causing the walker to race past mid-fight.
+ * Two polls is ~one packet round-trip on this walker's cadence, effectively
+ * zero overhead; the FSM path is immediate. */
+#define DPW_COMBAT_CLEAR_STABLE_POLLS 2
+
+/* Friend-probed location cache. When COMBAT_WAIT exits via the no-engage
+ * probe (hostiles>0 but MegaMUD never set in_combat — Friend/Avoid/Flee),
+ * we record the room here so the next DPW_READY tick at the SAME loc
+ * doesn't immediately re-enter COMBAT_WAIT on hostiles>0. Without this
+ * cache the walker loops every tick on Friend rooms; with it we still
+ * respect hostiles>0 as an entry condition so real hostiles (where
+ * MegaMUD hasn't flagged in_combat yet due to packet race) get a grace
+ * window to engage before the walker flees past. */
+#define DPW_FRIEND_CACHE_N 16
+static unsigned int dpw_friend_cache[DPW_FRIEND_CACHE_N] = {0};
+static int          dpw_friend_cache_head = 0;
+static int dpw_is_friend_loc(unsigned int loc)
+{
+    if (!loc) return 0;
+    for (int i = 0; i < DPW_FRIEND_CACHE_N; i++)
+        if (dpw_friend_cache[i] == loc) return 1;
+    return 0;
+}
+static void dpw_mark_friend_loc(unsigned int loc)
+{
+    if (!loc || dpw_is_friend_loc(loc)) return;
+    dpw_friend_cache[dpw_friend_cache_head] = loc;
+    dpw_friend_cache_head = (dpw_friend_cache_head + 1) % DPW_FRIEND_CACHE_N;
+}
+static void dpw_clear_friend_cache(void)
+{
+    for (int i = 0; i < DPW_FRIEND_CACHE_N; i++) dpw_friend_cache[i] = 0;
+    dpw_friend_cache_head = 0;
+}
 
 /* DOOR_WAIT: walker detected closed exit in direction dpw_step, issued the
  * appropriate command (op/pi/ba/sea), now waiting for ROOM_EXITS[dir_idx] to
@@ -4521,19 +4561,22 @@ static void dpw_tick(void)
             break;
         }
 
-        /* Enter COMBAT_WAIT ONLY on in_combat. ent[0]==2 is the combat-slot
-         * type, NOT "MegaMUD will engage" — Friend/Avoid NPCs (e.g. guardsman)
-         * also populate ent[0]==2 but MegaMUD silently ignores them. Relying
-         * on hostiles>0 here caused a re-entry loop on every Friend room:
-         * probe clears, READY sees hostiles>0, re-enters COMBAT_WAIT forever.
-         * We still kick FUN_00406b40 below so MegaMUD's own auto_combat sets
-         * in_combat on the same tick if the mob is actually hostile. */
-        if (auto_combat && in_combat) {
-            logmsg("[dynpath] combat at step %d: in_combat=1 hostiles=%d at %d,%d "
+        /* Enter COMBAT_WAIT on in_combat OR (hostiles>0 in a non-Friend room).
+         * Rationale: in_combat may still be 0 on the tick after player enters
+         * a hostile room (MegaMUD's auto_combat races our poll). Sending a
+         * direction in that window flees the mob. hostiles>0 catches it.
+         * Friend/Avoid NPCs also register hostiles>0 but MegaMUD won't engage
+         * — the no-engage probe in COMBAT_WAIT below records those rooms in
+         * dpw_friend_cache, so the next tick at the same loc skips re-entry. */
+        unsigned int cur_loc_pk = DPW_PACK_LOC(loc_map, loc_room);
+        int is_friend_room = dpw_is_friend_loc(cur_loc_pk);
+        if (auto_combat &&
+            (in_combat || (hostiles > 0 && !is_friend_room))) {
+            logmsg("[dynpath] combat at step %d: in_combat=%d hostiles=%d at %d,%d "
                    "— entering COMBAT_WAIT\n",
-                   dpw_step, hostiles, loc_map, loc_room);
+                   dpw_step, in_combat, hostiles, loc_map, loc_room);
             dpw_combat_enter_tick = GetTickCount();
-            dpw_combat_saw_engage = 1;
+            dpw_combat_saw_engage = in_combat ? 1 : 0;
             dpw_state = DPW_COMBAT_WAIT;
             /* Kick MegaMUD's automation dispatcher immediately so it engages
              * this tick instead of waiting for its next internal combat loop.
@@ -4811,16 +4854,21 @@ static void dpw_tick(void)
             }
             break;
         }
-        if (auto_combat && in_combat) {
-            logmsg("[dynpath] combat while waiting for move: hostiles=%d "
-                   "at %d,%d step %d — entering COMBAT_WAIT\n",
-                   hostiles, loc_map, loc_room, dpw_step);
-            dpw_combat_enter_tick = GetTickCount();
-            dpw_combat_saw_engage = 1;
-            dpw_state = DPW_COMBAT_WAIT;
-            /* Kick MegaMUD's automation dispatcher — engage this tick. */
-            dpw_kick_automation();
-            break;
+        {
+            unsigned int cur_loc_pk2 = DPW_PACK_LOC(loc_map, loc_room);
+            int is_friend_room2 = dpw_is_friend_loc(cur_loc_pk2);
+            if (auto_combat &&
+                (in_combat || (hostiles > 0 && !is_friend_room2))) {
+                logmsg("[dynpath] combat while waiting for move: in_combat=%d "
+                       "hostiles=%d at %d,%d step %d — entering COMBAT_WAIT\n",
+                       in_combat, hostiles, loc_map, loc_room, dpw_step);
+                dpw_combat_enter_tick = GetTickCount();
+                dpw_combat_saw_engage = in_combat ? 1 : 0;
+                dpw_state = DPW_COMBAT_WAIT;
+                /* Kick MegaMUD's automation dispatcher — engage this tick. */
+                dpw_kick_automation();
+                break;
+            }
         }
         /* Re-type rm every 5s in case the first one got lost */
         if (GetTickCount() - dpw_last_rm > 5000) {
@@ -4935,15 +4983,31 @@ static void dpw_tick(void)
                    "didn't engage within %dms — treating as Friend/Avoid, walking\n",
                    hostiles, loc_map, loc_room, DPW_FRIEND_PROBE_MS);
             if (dpw_saved_auto_bless) *(int *)(sbp + 0x4D0C) = 0;
+            dpw_mark_friend_loc(DPW_PACK_LOC(loc_map, loc_room));
             dpw_state = DPW_READY;
             dpw_last_loc = DPW_PACK_LOC(loc_map, loc_room);
             break;
         }
-        /* Normal exit: mob actually dead — in_combat=0 AND hostiles<=0. */
-        if (!in_combat && hostiles <= 0 && !is_held &&
-            !(is_blinded && !ign_blind)) {
-            logmsg("[dynpath] combat clear at %d,%d — resuming walk at step %d\n",
-                   loc_map, loc_room, dpw_step);
+        /* Normal exit: mob actually dead — in_combat=0 AND hostiles<=0 must
+         * hold STABLE for DPW_COMBAT_CLEAR_STABLE_MS. MegaMUD flickers
+         * in_combat to 0 for a single tick between rounds; hostiles briefly
+         * hits 0 during ent-array mutation. Both flickers falsely triggered
+         * an early exit, causing walker to send the next direction while
+         * the player was still actively fighting. */
+        int clear_now = (!in_combat && hostiles <= 0 && !is_held &&
+                         !(is_blinded && !ign_blind));
+        int kill_seen = InterlockedExchange(&dpw_saw_kill_line, 0);
+        if (!clear_now) {
+            dpw_combat_clear_streak = 0;
+        } else {
+            dpw_combat_clear_streak++;
+        }
+        if (clear_now && (kill_seen ||
+                          dpw_combat_clear_streak >= DPW_COMBAT_CLEAR_STABLE_POLLS)) {
+            logmsg("[dynpath] combat clear at %d,%d (%s) — resuming walk at step %d\n",
+                   loc_map, loc_room,
+                   kill_seen ? "kill-line" : "stable", dpw_step);
+            dpw_combat_clear_streak = 0;
             if (dpw_saved_auto_bless) {
                 *(int *)(sbp + 0x4D0C) = 0;
                 logmsg("[dynpath] suppressed auto_bless for movement\n");
@@ -5395,6 +5459,7 @@ static void dynpath_do_inject(void)
 
     InterlockedExchange(&dp_active, 1);
     dpw_state = DPW_READY;
+    dpw_clear_friend_cache();
 
     logmsg("[dynpath] walk started: %d steps, from=%d,%d dst=%d,%d\n",
            dpw_count, loc_map, loc_room, dpw_dst_map, dpw_dst_room);
