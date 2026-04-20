@@ -603,7 +603,8 @@ static char dpw_statusbar_override[256] = "";
 static volatile LONG dp_active;
 enum {
     DPW_DONE = 0, DPW_READY, DPW_SNEAK_WAIT, DPW_HIDE_WAIT,
-    DPW_DIR_SENT, DPW_COMBAT_WAIT, DPW_REST_WAIT, DPW_REPATH_WAIT
+    DPW_DIR_SENT, DPW_COMBAT_WAIT, DPW_REST_WAIT, DPW_REPATH_WAIT,
+    DPW_DOOR_WAIT
 };
 static int dpw_state;
 static int dpw_step;
@@ -615,6 +616,8 @@ typedef struct {
     unsigned short flags;
     char           dir[32];
     unsigned short map, room;
+    unsigned short pick_req;   /* min picklocks skill to pick (0 = no pick option) */
+    unsigned short bash_req;   /* min strength to bash        (0 = no bash option) */
 } dynpath_step_t;
 
 static dynpath_step_t *dpw_steps;
@@ -622,6 +625,15 @@ static dynpath_step_t *dpw_steps;
 static void type_into_megamud(const char *cmd);
 static void api_inject_command(const char *cmd);
 static int dpw_count_hostiles(unsigned char *sbp);
+static int mdw_dir_code(const char *d);
+/* Bitmask 0..9 indexed by dir_idx: bit set = MegaMUD printed
+ * "You found an exit ... <dirname>" for that direction since the last
+ * time the walker consumed it. Parsing the LAST WORD of the line tells us
+ * which direction the found exit is in. */
+static volatile LONG dpw_found_exit_mask;
+static volatile LONG dpw_wall_hit_pending;
+int WINAPI get_player_picklocks(void);
+int WINAPI get_player_strength(void);
 static void dpw_clear_pathing_active(unsigned char *sbp);
 static void dpw_restore_auto_stealth(unsigned char *sbp);
 static void dpw_update_statusbar(void);
@@ -1947,6 +1959,60 @@ static void __cdecl hooked_process_incoming(int sbase, void *data, int len)
                     p[i+8]=='t' && p[i+9]==' ' && p[i+10]=='t' && p[i+11]=='h' &&
                     p[i+12]=='i' && p[i+13]=='n' && p[i+14]=='k')
                     found_dont_think = 1;
+                /* "You found an exit <some descriptor> <direction>"
+                 *   e.g. "You found an exit beautiful passage to heaven east"
+                 *        "You found an exit glorious butthole up"
+                 * The LAST WORD of the line is the direction — that tells us
+                 * which hidden exit was revealed, and we set only that bit
+                 * in dpw_found_exit_mask so DOOR_WAIT only consumes its own. */
+                if (i + 17 < len &&
+                    p[i+4]=='f' && p[i+5]=='o' && p[i+6]=='u' && p[i+7]=='n' && p[i+8]=='d' &&
+                    p[i+9]==' ' && p[i+10]=='a' && p[i+11]=='n' && p[i+12]==' ' &&
+                    p[i+13]=='e' && p[i+14]=='x' && p[i+15]=='i' && p[i+16]=='t' &&
+                    p[i+17]==' ') {
+                    /* Scan to end-of-line, trimming any trailing punctuation.
+                     * Then walk backwards to isolate the last whitespace-delimited
+                     * word, match it (case-insensitively) against the ten direction
+                     * names, and set the corresponding bit. */
+                    int line_end = i + 18;
+                    while (line_end < len && p[line_end] != '\n' && p[line_end] != '\r')
+                        line_end++;
+                    /* Trim trailing punctuation/whitespace. */
+                    int w_end = line_end;
+                    while (w_end > i + 18 &&
+                           (p[w_end-1] == ' ' || p[w_end-1] == '\t' ||
+                            p[w_end-1] == '.' || p[w_end-1] == '!' ||
+                            p[w_end-1] == ',' || p[w_end-1] == ';' ||
+                            p[w_end-1] == '"' || p[w_end-1] == '\''))
+                        w_end--;
+                    int w_begin = w_end;
+                    while (w_begin > i + 18 && p[w_begin-1] != ' ' && p[w_begin-1] != '\t')
+                        w_begin--;
+                    int wlen = w_end - w_begin;
+                    int dir_idx = -1;
+                    /* Case-insensitive word compare helper. */
+                    #define WORD_EQ(s) (wlen == (int)(sizeof(s)-1) && \
+                        !_strnicmp(p + w_begin, s, (int)(sizeof(s)-1)))
+                    if      (WORD_EQ("north"))     dir_idx = 0;
+                    else if (WORD_EQ("south"))     dir_idx = 1;
+                    else if (WORD_EQ("east"))      dir_idx = 2;
+                    else if (WORD_EQ("west"))      dir_idx = 3;
+                    else if (WORD_EQ("northeast")) dir_idx = 4;
+                    else if (WORD_EQ("northwest")) dir_idx = 5;
+                    else if (WORD_EQ("southeast")) dir_idx = 6;
+                    else if (WORD_EQ("southwest")) dir_idx = 7;
+                    else if (WORD_EQ("up"))        dir_idx = 8;
+                    else if (WORD_EQ("down"))      dir_idx = 9;
+                    #undef WORD_EQ
+                    if (dir_idx >= 0) {
+                        LONG before, after;
+                        do {
+                            before = dpw_found_exit_mask;
+                            after  = before | (1L << dir_idx);
+                        } while (InterlockedCompareExchange(
+                                    &dpw_found_exit_mask, after, before) != before);
+                    }
+                }
             }
         }
         if (found_you_gain)
@@ -2681,6 +2747,16 @@ static void inject_server_data_impl(const char *data, int len)
 
 /* Internal function VAs from Ghidra RE */
 /* All routed through mega_va() — ASLR-safe at runtime */
+#define VA_AUTO_DISPATCH mega_va(0x00406b40)  /* int(int *struct) — master automation dispatch (combat/bless/heal/etc) */
+/* Kick MegaMUD's automation dispatcher so combat/rest/bless/loot fire the
+ * same tick we decide we need them, not 1 round later on its own loop. */
+static inline void dpw_kick_automation(void)
+{
+    if (!struct_base) return;
+    typedef int (__cdecl *fn_auto_dispatch_t)(int *);
+    fn_auto_dispatch_t auto_dispatch = (fn_auto_dispatch_t)VA_AUTO_DISPATCH;
+    auto_dispatch((int *)struct_base);
+}
 #define VA_STOP_PATH     mega_va(0x00428970)  /* void(int struct) — stop current path/movement */
 #define VA_PREP_LOOP     mega_va(0x0045fee0)  /* void(void *struct, int dest_buf) — prepare loop dest */
 #define VA_LOAD_PATH     mega_va(0x0045f860)  /* void(int struct, char *dest, void *entry, int 0) */
@@ -4066,6 +4142,8 @@ static int              dpw_walk_used_bless  = 0;
  * writes 0x4D00 mid-walk except for the "incap override" rescue mechanism. */
 static int              dpw_saved_auto_combat = 0;  /* user value at walk start (for logging) */
 static int              dpw_saved_auto_heal = 0;    /* user value at walk start (for logging) */
+static int              dpw_saved_auto_train = 0;   /* user value at walk start, restored at end */
+static int              dpw_saved_auto_light = 0;   /* user value at walk start, restored at end */
 static int              dpw_run_mode_next = 0;      /* latched by dynpath_set_run_mode for next inject */
 static volatile LONG    dpw_paused = 0;             /* 1 while user paused the walk via Stop button */
 /* Incap override: if in Run mode (live auto_combat=0) AND player is CC'd
@@ -4081,6 +4159,39 @@ static int              dpw_incap_saved_combat = 0;
 static DWORD            dpw_combat_enter_tick = 0;
 static int              dpw_combat_saw_engage = 0;
 #define DPW_FRIEND_PROBE_MS 1000
+
+/* DOOR_WAIT: walker detected closed exit in direction dpw_step, issued the
+ * appropriate command (op/pi/ba/sea), now waiting for ROOM_EXITS[dir_idx] to
+ * reach 3 (open). Cooldown prevents command spam; max-attempt escalation
+ * from pick → bash mirrors MegaMUD's own DOOR_HANDLER (FUN_00404600). */
+static DWORD            dpw_door_last_cmd_tick = 0;
+static int              dpw_door_dir_idx = -1;
+static int              dpw_door_pick_tries = 0;
+static int              dpw_door_bash_tries = 0;
+static int              dpw_door_search_tries = 0;
+static int              dpw_door_op_sent = 0;  /* one-shot — op fires once per DOOR_WAIT session */
+/* Which branch we're handling while in DOOR_WAIT:
+ *   0 = closed door (op/pi/bash only — never search)
+ *   1 = hidden exit  (search only  — never op/pi/bash, even after reveal)
+ * Latched when DPW_READY routes into DOOR_WAIT so subsequent state flips
+ * don't cause the other branch's commands to fire. */
+static int              dpw_door_is_hidden = 0;
+/* Set by the stream-matcher in hooked_process_incoming when MegaMUD prints
+ * "You found an exit" after a successful search. Consumed by DOOR_WAIT to
+ * trigger a single enter-refresh then advance. */
+static volatile LONG    dpw_found_exit_pending = 0;
+/* pi/sea: no server rate limit, 15ms micro-cooldown just prevents burst spam
+ * inside one walker tick.
+ * op/ba: rate-limited (server parses them like any action, and the walker
+ * shouldn't hammer them — one per second is plenty). */
+#define DPW_FAST_CMD_COOLDOWN_MS     15
+#define DPW_OPBASH_COOLDOWN_MS     1000
+#define DPW_DOOR_TIMEOUT_MS       15000
+#define DPW_DOOR_PICK_MAX             5
+/* Mirrors MDW_EX_HIDDEN from vk_mudmap.h — the path builder copies the exit's
+ * flag bits into dpw_steps[i].flags, so we can preemptively search hidden
+ * exits instead of waiting for a wall-hit STUCK timeout. */
+#define DPW_EX_HIDDEN             0x0002
 static int              dpw_dst_map = 0;
 static int              dpw_dst_room = 0;
 static volatile LONG    dpw_needs_repath = 0;
@@ -4182,10 +4293,18 @@ static void dpw_restore_auto_stealth(unsigned char *sbp)
      * Regardless of Walk/Run mode, the walker ends with the player safe. */
     *(int *)(sbp + 0x4D00) = 1;
     *(int *)(sbp + 0x4D08) = 1;
+    /* Restore user's saved auto_train and auto_light (we forced both OFF
+     * during the walk because MegaMUD's native implementations are
+     * universally disabled by users). */
+    *(int *)(sbp + 0x3780) = dpw_saved_auto_train;
+    *(int *)(sbp + 0x4D10) = dpw_saved_auto_light;
+    logmsg("[dynpath] end-of-walk: auto_combat=ON auto_heal=ON auto_train=%d auto_light=%d (restored)\n",
+           dpw_saved_auto_train, dpw_saved_auto_light);
     dpw_saved_auto_combat = 0;
     dpw_saved_auto_heal = 0;
+    dpw_saved_auto_train = 0;
+    dpw_saved_auto_light = 0;
     InterlockedExchange(&dpw_paused, 0);
-    logmsg("[dynpath] end-of-walk: auto_combat=ON auto_heal=ON\n");
 }
 
 static void dpw_tick(void)
@@ -4320,6 +4439,11 @@ static void dpw_tick(void)
             dpw_combat_enter_tick = GetTickCount();
             dpw_combat_saw_engage = in_combat ? 1 : 0;
             dpw_state = DPW_COMBAT_WAIT;
+            /* Kick MegaMUD's automation dispatcher immediately so it engages
+             * this tick instead of waiting for its next internal combat loop.
+             * FUN_00406b40 is what MegaMUD's native walker calls on every
+             * packet — running it here puts us at parity with native speed. */
+            dpw_kick_automation();
             break;
         }
 
@@ -4347,6 +4471,8 @@ static void dpw_tick(void)
                            "— entering REST_WAIT\n",
                            dpw_step, cur_hp, max_hp, hp_rest_pct, loc_map, loc_room);
                     dpw_state = DPW_REST_WAIT;
+                    /* Kick auto-dispatch so MegaMUD starts resting this tick. */
+                    dpw_kick_automation();
                     break;
                 }
             }
@@ -4380,6 +4506,57 @@ static void dpw_tick(void)
                 dpw_timeout = GetTickCount();
                 dpw_state = DPW_HIDE_WAIT;
                 break;
+            }
+        }
+
+        /* Door / hidden-exit check.
+         *   Hidden flag (dpw_steps[dpw_step].flags & DPW_EX_HIDDEN): the
+         *     mudmap DB tagged this exit as hidden — go search BEFORE
+         *     sending the direction. DOOR_WAIT's state==0 branch spams
+         *     "sea <dir>" until "You found an exit" fires.
+         *   state 2 → closed locked → DOOR_WAIT (pi then ba fallback)
+         *   state 5 → closed unlocked → DOOR_WAIT ("op <dir>")
+         * Other states (1/3/4/...) pass through to direction send. */
+        {
+            int d_idx = mdw_dir_code(dpw_steps[dpw_step].dir);
+            int ex_flags = dpw_steps[dpw_step].flags;
+            if (d_idx >= 0 && d_idx < 10) {
+                int exit_state = *(int *)(sbp + 0x2E78 + d_idx * 4);
+                int is_hidden = (ex_flags & DPW_EX_HIDDEN) != 0;
+                /* MDB ExitType is mutually exclusive (MME frmMain.frm 22841+):
+                 * hidden != door. Don't let a hidden-flagged step fall into the
+                 * door branch just because ROOM_EXITS is stale or shows a
+                 * state-5 after reveal. Only route into DOOR_WAIT when:
+                 *   - hidden flag set AND exit not already shown as open → SEARCH
+                 *   - NOT hidden AND state 2/5 → door (pi/ba/op)
+                 * Other states on non-hidden steps just pass through and send
+                 * the direction; server will reject if actually blocked. */
+                /* Only enter DOOR_WAIT for a hidden exit when it's actually
+                 * still hidden (state == 0 — not yet revealed). Once it's any
+                 * non-zero state (MegaMUD parses as 1, 4, etc. for secret
+                 * passages once found), just send the direction like a
+                 * normal exit — no need to re-search. */
+                int route_search = is_hidden && exit_state == 0;
+                int route_door   = !is_hidden && (exit_state == 2 || exit_state == 5);
+                if (route_search || route_door) {
+                    logmsg("[dynpath] %s dir='%s' state=%d flags=0x%04x at "
+                           "%d,%d — entering DOOR_WAIT\n",
+                           route_search ? "hidden exit" : "closed door",
+                           dpw_steps[dpw_step].dir, exit_state, ex_flags,
+                           loc_map, loc_room);
+                    dpw_door_dir_idx = d_idx;
+                    dpw_door_is_hidden = route_search ? 1 : 0;
+                    dpw_door_pick_tries = 0;
+                    dpw_door_bash_tries = 0;
+                    dpw_door_search_tries = 0;
+                    dpw_door_op_sent = 0;
+                    dpw_door_last_cmd_tick = 0;
+                    InterlockedAnd(&dpw_found_exit_mask, ~(1L << d_idx));
+                    dpw_timeout = GetTickCount();
+                    dpw_last_loc = DPW_PACK_LOC(loc_map, loc_room);
+                    dpw_state = DPW_DOOR_WAIT;
+                    break;
+                }
             }
         }
 
@@ -4452,8 +4629,13 @@ static void dpw_tick(void)
                 dpw_update_statusbar();
                 break;
             }
+            /* Scan the ENTIRE path — player may have moved backwards (held,
+             * feared, door re-closed, fled) or forwards unexpectedly. If the
+             * current room is anywhere on the saved path, recalibrate dpw_step
+             * to that index and resume from there. Only truly-off-path rooms
+             * stop the walk. */
             int found = -1;
-            for (int i = dpw_step; i < dpw_count; i++) {
+            for (int i = 0; i < dpw_count; i++) {
                 if (dpw_steps[i].map == (unsigned short)loc_map &&
                     dpw_steps[i].room == (unsigned short)loc_room) {
                     found = i;
@@ -4461,13 +4643,18 @@ static void dpw_tick(void)
                 }
             }
             if (found >= 0) {
-                if (found != dpw_step)
-                    logmsg("[dynpath] moved to %d,%d — skipped to step %d (was %d)\n",
-                           loc_map, loc_room, found, dpw_step);
-                else
+                if (found == dpw_step)
                     logmsg("[dynpath] moved to %d,%d — on path step %d\n",
                            loc_map, loc_room, found);
+                else if (found > dpw_step)
+                    logmsg("[dynpath] moved to %d,%d — advanced to step %d "
+                           "(was %d)\n", loc_map, loc_room, found, dpw_step);
+                else
+                    logmsg("[dynpath] moved to %d,%d — backtracked to step %d "
+                           "(was %d) — recalibrating and resuming\n",
+                           loc_map, loc_room, found, dpw_step);
                 dpw_step = found;
+                dpw_last_loc = cur_loc;  /* refresh — stops stale false positives later */
                 dpw_state = DPW_READY;
                 dpw_update_statusbar();
             } else {
@@ -4493,6 +4680,8 @@ static void dpw_tick(void)
             dpw_combat_enter_tick = GetTickCount();
             dpw_combat_saw_engage = in_combat ? 1 : 0;
             dpw_state = DPW_COMBAT_WAIT;
+            /* Kick MegaMUD's automation dispatcher — engage this tick. */
+            dpw_kick_automation();
             break;
         }
         /* Re-type rm every 5s in case the first one got lost */
@@ -4502,6 +4691,59 @@ static void dpw_tick(void)
             dpw_last_rm = GetTickCount();
             logmsg("[dynpath] re-sent rm (still at %d,%d, waiting for move)\n",
                    loc_map, loc_room);
+        }
+        /* Rare-case: door/hidden exit closed between our opening it and the
+         * direction executing. The direction command fails silently, player
+         * stays in prev room (we "bump the wall"). Detect by comparing the
+         * current location against the step we sent:
+         *   - cur_loc == dpw_last_loc   (we're still at the room we left from)
+         *   - prev step flagged HIDDEN or DOOR (we had opened/revealed something)
+         *   - ROOM_EXITS[prev dir] is now != 3 (the exit we used is no longer
+         *     open — the re-close signal)
+         * On match: decrement dpw_step (undo the READY increment) and go back
+         * to DOOR_WAIT so the walker re-opens / re-searches. The re-read of
+         * ROOM_EXITS is what gates this — we don't need a time guard: as long
+         * as state is still 3 (actually open) we leave the walker alone. */
+        if (dpw_step > 0) {
+            unsigned int cur_loc_check = DPW_PACK_LOC(loc_map, loc_room);
+            int prev_dir_idx = mdw_dir_code(dpw_steps[dpw_step - 1].dir);
+            int prev_flags   = dpw_steps[dpw_step - 1].flags;
+            int prev_hidden  = (prev_flags & DPW_EX_HIDDEN) != 0;
+            int prev_door    = (prev_flags & 0x0001) != 0;
+            if (cur_loc_check == dpw_last_loc && cur_loc_check != 0 &&
+                prev_dir_idx >= 0 && prev_dir_idx < 10 &&
+                (prev_hidden || prev_door))
+            {
+                int es = *(int *)(sbp + 0x2E78 + prev_dir_idx * 4);
+                /* "Re-closed" depends on which type of exit:
+                 *   hidden → state reverted to 0 (not revealed anymore)
+                 *   door   → state is anything other than 3 (not open)
+                 * Do NOT treat a hidden-revealed state (1/4) as a re-close. */
+                int reclosed = prev_hidden ? (es == 0) : (es != 3);
+                if (reclosed) {
+                    logmsg("[dynpath] %s re-closed mid-move: dir='%s' "
+                           "expected %u,%u exit_state=%d at %d,%d — rewinding "
+                           "to DOOR_WAIT\n",
+                           prev_hidden ? "hidden" : "door",
+                           dpw_steps[dpw_step - 1].dir,
+                           (unsigned)(dpw_step < dpw_count ? dpw_steps[dpw_step].map : 0),
+                           (unsigned)(dpw_step < dpw_count ? dpw_steps[dpw_step].room : 0),
+                           es, loc_map, loc_room);
+                    dpw_step--;
+                    dpw_door_dir_idx = prev_dir_idx;
+                    dpw_door_is_hidden = prev_hidden ? 1 : 0;
+                    dpw_door_pick_tries = 0;
+                    dpw_door_bash_tries = 0;
+                    dpw_door_search_tries = 0;
+                    dpw_door_op_sent = 0;
+                    dpw_door_last_cmd_tick = 0;
+                    InterlockedAnd(&dpw_found_exit_mask, ~(1L << prev_dir_idx));
+                    dpw_timeout = GetTickCount();
+                    dpw_state = DPW_DOOR_WAIT;
+                    dpw_update_statusbar();
+                    break;
+                }
+            }
         }
         if (GetTickCount() - dpw_timeout > DPW_MOVE_TIMEOUT_MS) {
             cur_loc = DPW_PACK_LOC(loc_map, loc_room);
@@ -4563,10 +4805,14 @@ static void dpw_tick(void)
                 logmsg("[dynpath] suppressed auto_bless for movement\n");
             }
             /* Don't touch auto_combat here — the user controls it live. */
+            /* Kick auto-dispatch so loot/train/auto-get run this tick. */
+            dpw_kick_automation();
             unsigned int post_combat_loc = DPW_PACK_LOC(loc_map, loc_room);
             if (post_combat_loc != dpw_last_loc && post_combat_loc != 0) {
+                /* Scan entire path — flee/fear/stun may have pushed the player
+                 * backwards onto an earlier step. */
                 int found = -1;
-                for (int i = dpw_step; i < dpw_count; i++) {
+                for (int i = 0; i < dpw_count; i++) {
                     if (dpw_steps[i].map == (unsigned short)loc_map &&
                         dpw_steps[i].room == (unsigned short)loc_room) {
                         found = i; break;
@@ -4627,6 +4873,234 @@ static void dpw_tick(void)
                    cur_hp, max_hp, rest_hp_thresh, loc_map, loc_room);
             dpw_state = DPW_READY;
             break;
+        }
+        break;
+    }
+
+    case DPW_DOOR_WAIT: {
+        /* Waiting for the exit in dpw_door_dir_idx to transition to state 3
+         * (open). ROOM_EXITS updates automatically as MegaMUD parses the
+         * room's exit lines. Mirrors FUN_00404600's command selection:
+         *   state 5 → "op <dir>"
+         *   state 2 → "pi <dir>" (if CAN_PICK_LOCKS and pick tries < max),
+         *            else "ba <dir>"
+         *   state 3 → exit is open, resume walk. */
+        if (in_combat) {
+            logmsg("[dynpath] combat during door wait at %d,%d\n",
+                   loc_map, loc_room);
+            dpw_state = auto_combat ? DPW_COMBAT_WAIT : DPW_READY;
+            break;
+        }
+        int dir_idx = dpw_door_dir_idx;
+        if (dir_idx < 0 || dir_idx >= 10) {
+            dpw_state = DPW_READY;
+            break;
+        }
+        /* Auto-walk detection: compare against the current step's STARTING
+         * room (dpw_steps[dpw_step].map/room), which is stable — never stale.
+         * If we're still there, no auto-walk happened and we just keep issuing
+         * the door command. If we moved, MajorMUD's "op"/"pi"/"ba" auto-walked
+         * us through; advance dpw_step to the new location. */
+        if (dpw_step < dpw_count) {
+            unsigned short step_map  = dpw_steps[dpw_step].map;
+            unsigned short step_room = dpw_steps[dpw_step].room;
+            if (loc_map != (int)step_map || loc_room != (int)step_room) {
+                /* Moved. Find where. */
+                if (loc_map == dpw_dst_map && loc_room == dpw_dst_room) {
+                    logmsg("[dynpath] door cmd auto-walked to destination %d,%d\n",
+                           loc_map, loc_room);
+                    dpw_step = dpw_count;
+                    dpw_door_dir_idx = -1;
+                    dpw_door_is_hidden = 0;
+                    dpw_last_loc = DPW_PACK_LOC(loc_map, loc_room);
+                    dpw_state = DPW_READY;
+                    break;
+                }
+                int found = -1;
+                for (int i = 0; i < dpw_count; i++) {
+                    if (dpw_steps[i].map == (unsigned short)loc_map &&
+                        dpw_steps[i].room == (unsigned short)loc_room) {
+                        found = i;
+                        break;
+                    }
+                }
+                if (found >= 0) {
+                    logmsg("[dynpath] door cmd auto-walked to %d,%d — at "
+                           "step %d (was %d)\n",
+                           loc_map, loc_room, found, dpw_step);
+                    dpw_step = found;
+                    dpw_door_dir_idx = -1;
+                    dpw_door_is_hidden = 0;
+                    dpw_last_loc = DPW_PACK_LOC(loc_map, loc_room);
+                    dpw_state = DPW_READY;
+                    break;
+                }
+                logmsg("[dynpath] door cmd moved us off path to %d,%d — stopping\n",
+                       loc_map, loc_room);
+                dpw_clear_pathing_active(sbp);
+                dpw_restore_auto_stealth(sbp);
+                dpw_state = DPW_DONE;
+                InterlockedExchange(&dp_active, 0);
+                dpw_update_statusbar();
+                break;
+            }
+        }
+        int exit_state = *(int *)(sbp + 0x2E78 + dir_idx * 4);
+        /* Exit conditions diverge by branch:
+         *   HIDDEN: state != 0 means the exit is revealed (state 4 = "special",
+         *           which is what MegaMUD sets for hidden/secret passages once
+         *           found — they never hit state 3). Anything non-zero = walkable.
+         *   DOOR:   state == 3 is the only "open and clear" signal. */
+        int revealed_ok = dpw_door_is_hidden ? (exit_state != 0)
+                                             : (exit_state == 3);
+        if (revealed_ok) {
+            logmsg("[dynpath] %s revealed (dir_idx=%d state=%d) at %d,%d — resuming\n",
+                   dpw_door_is_hidden ? "hidden exit" : "door",
+                   dir_idx, exit_state, loc_map, loc_room);
+            dpw_door_dir_idx = -1;
+            dpw_door_is_hidden = 0;
+            dpw_state = DPW_READY;
+            break;
+        }
+        if (GetTickCount() - dpw_timeout > DPW_DOOR_TIMEOUT_MS) {
+            logmsg("[dynpath] door timeout (dir_idx=%d state=%d hidden=%d) at %d,%d "
+                   "— stopping walk\n",
+                   dir_idx, exit_state, dpw_door_is_hidden, loc_map, loc_room);
+            dpw_clear_pathing_active(sbp);
+            dpw_restore_auto_stealth(sbp);
+            dpw_state = DPW_DONE;
+            InterlockedExchange(&dp_active, 0);
+            dpw_update_statusbar();
+            break;
+        }
+        const char *dir_str = dpw_steps[dpw_step].dir;
+        char cmd[32];
+
+        /* Hidden-exit branch — ONLY sea, never op/pi/ba. Hidden and door are
+         * mutually exclusive ExitTypes in the MDB (MME source line 22841+).
+         * Spam search; when the stream matcher sets our bit in the found
+         * mask, send one blank enter to refresh the exit list. */
+        if (dpw_door_is_hidden) {
+            LONG want_bit = 1L << dir_idx;
+            LONG before;
+            int consumed = 0;
+            do {
+                before = dpw_found_exit_mask;
+                if ((before & want_bit) == 0) break;
+                LONG after = before & ~want_bit;
+                if (InterlockedCompareExchange(&dpw_found_exit_mask, after, before) == before) {
+                    consumed = 1;
+                    break;
+                }
+            } while (1);
+            if (consumed) {
+                api_inject_command("");
+                logmsg("[dynpath] hidden exit FOUND for dir_idx=%d — sending enter "
+                       "to refresh\n", dir_idx);
+                dpw_door_last_cmd_tick = GetTickCount();
+                break;
+            }
+            if (GetTickCount() - dpw_door_last_cmd_tick < DPW_FAST_CMD_COOLDOWN_MS)
+                break;
+            wsprintfA(cmd, "sea %s", dir_str);
+            api_inject_command(cmd);
+            dpw_door_search_tries++;
+            dpw_door_last_cmd_tick = GetTickCount();
+            if ((dpw_door_search_tries & 31) == 1)
+                logmsg("[dynpath] hidden: searching → '%s' (try %d)\n",
+                       cmd, dpw_door_search_tries);
+            break;
+        }
+
+        /* Door branch — op/pi/ba. Never runs for hidden exits. */
+        int picklocks = (int)get_player_picklocks();
+        int strength  = (int)get_player_strength();
+        int pick_req  = (int)dpw_steps[dpw_step].pick_req;
+        int bash_req  = (int)dpw_steps[dpw_step].bash_req;
+        if (exit_state == 5) {
+            /* op is one-shot per DOOR_WAIT session. If it didn't produce
+             * state==3, we just wait for the state change via DOOR_WAIT's
+             * revealed-ok check; don't hammer the command. */
+            if (dpw_door_op_sent) break;
+            if (GetTickCount() - dpw_door_last_cmd_tick < DPW_OPBASH_COOLDOWN_MS)
+                break;
+            wsprintfA(cmd, "op %s", dir_str);
+            api_inject_command(cmd);
+            dpw_door_op_sent = 1;
+            logmsg("[dynpath] door: state=5 (closed unlocked) → '%s' (one-shot)\n", cmd);
+            dpw_door_last_cmd_tick = GetTickCount();
+        } else if (exit_state == 2) {
+            int pick_max = *(int *)(sbp + 0x54EC);
+            int bash_max = *(int *)(sbp + 0x54E4);
+            if (pick_max <= 0) pick_max = DPW_DOOR_PICK_MAX;
+            if (bash_max <= 0) bash_max = 10;
+            int can_pick = (pick_req > 0) && (picklocks >= pick_req);
+            int can_bash = (bash_req > 0) && (strength >= bash_req);
+            if (can_pick && dpw_door_pick_tries < pick_max) {
+                if (GetTickCount() - dpw_door_last_cmd_tick < DPW_FAST_CMD_COOLDOWN_MS)
+                    break;
+                wsprintfA(cmd, "pi %s", dir_str);
+                dpw_door_pick_tries++;
+                api_inject_command(cmd);
+                dpw_door_last_cmd_tick = GetTickCount();
+                logmsg("[dynpath] door: state=2 pick (skill=%d req=%d) → '%s' "
+                       "(try %d/%d)\n",
+                       picklocks, pick_req, cmd, dpw_door_pick_tries, pick_max);
+            } else if (can_bash) {
+                if (dpw_door_bash_tries >= bash_max) {
+                    logmsg("[dynpath] door: bash tries exhausted (%d >= max %d) "
+                           "— stopping walk\n",
+                           dpw_door_bash_tries, bash_max);
+                    dpw_clear_pathing_active(sbp);
+                    dpw_restore_auto_stealth(sbp);
+                    dpw_state = DPW_DONE;
+                    InterlockedExchange(&dp_active, 0);
+                    dpw_update_statusbar();
+                    break;
+                }
+                int rest_hp_thresh = max_hp > 0
+                    ? (max_hp * hp_rest_pct) / 100 : 0;
+                if (cur_hp <= rest_hp_thresh) {
+                    logmsg("[dynpath] door: state=2 need to bash but HP %d/%d "
+                           "(<= rest %d%%) — resting first\n",
+                           cur_hp, max_hp, hp_rest_pct);
+                    dpw_state = DPW_REST_WAIT;
+                    dpw_kick_automation();
+                    break;
+                }
+                if (GetTickCount() - dpw_door_last_cmd_tick < DPW_OPBASH_COOLDOWN_MS)
+                    break;
+                wsprintfA(cmd, "ba %s", dir_str);
+                dpw_door_bash_tries++;
+                api_inject_command(cmd);
+                dpw_door_last_cmd_tick = GetTickCount();
+                logmsg("[dynpath] door: state=2 bash (str=%d req=%d) → '%s' "
+                       "(try %d/%d, HP %d/%d)\n",
+                       strength, bash_req, cmd, dpw_door_bash_tries, bash_max,
+                       cur_hp, max_hp);
+            } else {
+                /* TODO: key path — verify key in inventory, send "use <key>
+                 * <dir>" then "op <dir>". For now just log and stop. */
+                logmsg("[dynpath] door: state=2 can't pick (skill=%d/req=%d) "
+                       "or bash (str=%d/req=%d) — key/item needed; TODO, "
+                       "stopping walk\n",
+                       picklocks, pick_req, strength, bash_req);
+                dpw_clear_pathing_active(sbp);
+                dpw_restore_auto_stealth(sbp);
+                dpw_state = DPW_DONE;
+                InterlockedExchange(&dp_active, 0);
+                dpw_update_statusbar();
+                break;
+            }
+        } else {
+            /* state 4 (special) or unknown — try op as best guess */
+            if (GetTickCount() - dpw_door_last_cmd_tick < DPW_FAST_CMD_COOLDOWN_MS)
+                break;
+            wsprintfA(cmd, "op %s", dir_str);
+            api_inject_command(cmd);
+            logmsg("[dynpath] door: state=%d (special) → '%s'\n",
+                   exit_state, cmd);
+            dpw_door_last_cmd_tick = GetTickCount();
         }
         break;
     }
@@ -4704,9 +5178,17 @@ static void dynpath_do_inject(void)
         dpw_saved_auto_bless  = *(int *)(sbp + 0x4D0C);
         dpw_saved_auto_heal   = *(int *)(sbp + 0x4D08);
         dpw_saved_auto_combat = *(int *)(sbp + 0x4D00);
+        dpw_saved_auto_train  = *(int *)(sbp + 0x3780);
+        dpw_saved_auto_light  = *(int *)(sbp + 0x4D10);
         *(int *)(sbp + 0x4D20) = 0;
         *(int *)(sbp + 0x4D24) = 0;
         *(int *)(sbp + 0x4D0C) = 0;
+        /* Force auto_train and auto_light OFF during a temporary dynpath —
+         * both of MegaMUD's native implementations are garbage and nobody
+         * wants them firing mid-walk. We restore the user's saved values
+         * at end-of-walk. */
+        *(int *)(sbp + 0x3780) = 0;
+        *(int *)(sbp + 0x4D10) = 0;
         /* Set initial combat mode; auto_heal forced ON for walks. */
         *(int *)(sbp + 0x4D00) = initial_auto_combat;
         *(int *)(sbp + 0x4D08) = 1;
@@ -4719,6 +5201,7 @@ static void dynpath_do_inject(void)
                dpw_saved_auto_combat, dpw_saved_auto_heal);
     }
     InterlockedExchange(&dpw_paused, 0);
+    InterlockedExchange(&dpw_found_exit_mask, 0);
     dpw_incap_override = 0;
     dpw_incap_saved_combat = 0;
     dpw_walk_used_sneak = dpw_saved_auto_sneak ? 1 : 0;

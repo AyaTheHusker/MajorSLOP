@@ -1921,6 +1921,8 @@ typedef struct {
     uint16_t flags;
     char     dir[32];
     uint16_t map, room;
+    uint16_t pick_req;   /* min picklocks to pick (0 = no pick option) */
+    uint16_t bash_req;   /* min strength to bash  (0 = no bash option) */
 } MdwDynStep;
 
 typedef struct {
@@ -2118,10 +2120,12 @@ static MdwDynPath *mdw_find_path(uint32_t from_ri, uint32_t to_ri)
             uint32_t pri = prev[ri];
             MdwRoom *pr = &mdw_rooms[pri];
             MdwExit *ex = &mdw_exits[pr->exit_ofs + exit_idx[ri]];
-            dp->steps[si].cksum = pr->checksum;
-            dp->steps[si].flags = ex->flags & 0x1FFF;
-            dp->steps[si].map   = pr->map;
-            dp->steps[si].room  = pr->room;
+            dp->steps[si].cksum    = pr->checksum;
+            dp->steps[si].flags    = ex->flags & 0x1FFF;
+            dp->steps[si].map      = pr->map;
+            dp->steps[si].room     = pr->room;
+            dp->steps[si].pick_req = ex->pick_req;
+            dp->steps[si].bash_req = ex->bash_req;
             const char *stepdir = (ex->text_cmd[0])
                 ? ex->text_cmd
                 : ((ex->dir <= 9) ? mdw_dir_lo[ex->dir] : "look");
@@ -3342,6 +3346,48 @@ static void mdw_draw(int vp_w, int vp_h)
 
         /* CMD index (special trigger/command hook on this room) */
         if (hr->cmd) _snprintf(lines[nlines++], 96, "CMD: %u", (unsigned)hr->cmd);
+
+        /* Hidden / door / special exits + text-command exits. Flags and
+         * text_cmd come straight from the bin packer in mudmap_api.py — we
+         * just surface them. */
+        if (nlines < 12 && hr->exit_count > 0) {
+            for (int ei = 0; ei < hr->exit_count && nlines < 12; ei++) {
+                MdwExit *ex = &mdw_exits[hr->exit_ofs + ei];
+                const char *dirname =
+                    (ex->dir < 10) ? mdw_dir_lo[ex->dir] : "?";
+                char tags[96]; tags[0] = 0;
+                int tlen2 = 0;
+                if (ex->flags & MDW_EX_HIDDEN)
+                    tlen2 += _snprintf(tags + tlen2, (int)sizeof(tags) - tlen2, "Hidden ");
+                if (ex->flags & MDW_EX_DOOR)
+                    tlen2 += _snprintf(tags + tlen2, (int)sizeof(tags) - tlen2, "Door ");
+                if (ex->flags & 0x0004)
+                    tlen2 += _snprintf(tags + tlen2, (int)sizeof(tags) - tlen2, "Trap ");
+                if (ex->flags & 0x0008)
+                    tlen2 += _snprintf(tags + tlen2, (int)sizeof(tags) - tlen2, "Key ");
+                if (ex->flags & 0x0010)
+                    tlen2 += _snprintf(tags + tlen2, (int)sizeof(tags) - tlen2, "ReqItem ");
+                if (ex->flags & 0x0100)
+                    tlen2 += _snprintf(tags + tlen2, (int)sizeof(tags) - tlen2, "Toll ");
+                if (ex->flags & 0x0200)
+                    tlen2 += _snprintf(tags + tlen2, (int)sizeof(tags) - tlen2, "Blocked ");
+                if (ex->flags & 0x0400)
+                    tlen2 += _snprintf(tags + tlen2, (int)sizeof(tags) - tlen2, "Cast ");
+                if (ex->flags & 0x0800)
+                    tlen2 += _snprintf(tags + tlen2, (int)sizeof(tags) - tlen2, "Gate ");
+                if (ex->flags & 0x1000)
+                    tlen2 += _snprintf(tags + tlen2, (int)sizeof(tags) - tlen2, "Text ");
+                if (tags[0] == 0 && !ex->text_cmd[0]) continue;
+                if (ex->text_cmd[0])
+                    _snprintf(lines[nlines++], 96, "%s: %s\"%s\" \x10 %u,%u",
+                              dirname, tags, ex->text_cmd,
+                              (unsigned)ex->tmap, (unsigned)ex->troom);
+                else
+                    _snprintf(lines[nlines++], 96, "%s: %s\x10 %u,%u",
+                              dirname, tags,
+                              (unsigned)ex->tmap, (unsigned)ex->troom);
+            }
+        }
         #undef MDW_LOOKUP_NAME_INTO
 
         /* Compute tooltip box size from longest line */
