@@ -142,6 +142,12 @@ static uint32_t mdw_pending_recenter_ri = 0xFFFFFFFF;
  * stays put — useful for AFK loop scripting where you set the framing once
  * and just watch the player marker move around the visible map. */
 static int mdw_auto_recenter = 1;
+/* Follow Map Changes — MME-style toggle. When set, moving into a room on a
+ * different map automatically switches the map view to that room's map.
+ * When cleared, the map view stays on the current map even when the player
+ * moves to another map (useful when browsing while character is walking). */
+static int mdw_follow_map_changes = 1;
+static float mdw_cb_follow_map_x0 = 0, mdw_cb_follow_map_x1 = 0;
 
 /* ---- Footstep path visualization ----
  * Shows animated footprints on tiles the dynpath walker still needs to traverse.
@@ -1790,21 +1796,14 @@ static void mdw_layout_bfs(uint16_t start_map, uint32_t start)
             int nx = r->gx + MDW_DX[ex->dir];
             int ny = r->gy + MDW_DY[ex->dir];
             if (nx < 0 || nx >= MDW_GRID_DIM || ny < 0 || ny >= MDW_GRID_DIM) continue;
-            if (used[ny * MDW_GRID_DIM + nx]) {
-                int placed = 0;
-                for (int rr = 1; rr <= 3 && !placed; rr++) {
-                    for (int oy = -rr; oy <= rr && !placed; oy++) {
-                        for (int ox = -rr; ox <= rr && !placed; ox++) {
-                            int tx = nx + ox, ty = ny + oy;
-                            if (tx < 0 || tx >= MDW_GRID_DIM) continue;
-                            if (ty < 0 || ty >= MDW_GRID_DIM) continue;
-                            if (used[ty * MDW_GRID_DIM + tx]) continue;
-                            nx = tx; ny = ty; placed = 1;
-                        }
-                    }
-                }
-                if (!placed) continue;
-            }
+            /* MME behavior: if the expected cell is already occupied by
+             * another room, DON'T place the target in a fallback slot —
+             * just skip this exit. The target may be reached and placed
+             * via another path (different parent's exit), or stay unplaced.
+             * Unplaced targets render as stubs from the source in the
+             * exit rendering loop, which preserves the "exit goes this way"
+             * signal without spatially misrepresenting where the room is. */
+            if (used[ny * MDW_GRID_DIM + nx]) continue;
             mdw_rooms[ni].gx = (int16_t)nx;
             mdw_rooms[ni].gy = (int16_t)ny;
             used[ny * MDW_GRID_DIM + nx] = 1;
@@ -1852,7 +1851,14 @@ static int mdw_set_current(int map_num, int room_num)
         mdw_auto_mpx_feed((uint16_t)map_num, (uint16_t)room_num, ck);
     }
     int map_switched = 0;
-    if (mdw_rooms[ri].map != mdw_cur_map_view || mdw_rooms[ri].gx == INT16_MIN) {
+    /* Auto-switch to the player's map ONLY when Follow Map Changes is on.
+     * When off, we keep the current view even if the player moved to
+     * another map — player's room just won't be visible until user
+     * manually switches maps via context menu or Set Room. */
+    int need_switch = (mdw_rooms[ri].map != mdw_cur_map_view &&
+                       mdw_follow_map_changes) ||
+                      mdw_rooms[ri].gx == INT16_MIN;
+    if (need_switch) {
         for (uint32_t k = 0; k < mdw_room_count; k++)
             mdw_rooms[k].gx = mdw_rooms[k].gy = INT16_MIN;
         mdw_layout_bfs(mdw_rooms[ri].map, ri);
@@ -2157,9 +2163,34 @@ cleanup:
     return dp;
 }
 
+/* Resolve MegaMUD root (where megamud.exe lives) and return an absolute
+ * path into it. Uses GetModuleFileNameA(NULL, ...) so we don't depend on
+ * CWD — CWD can be anything during plugin init (observed: Wine sometimes
+ * hands us a CWD != MegaMUD root at vkt_init time, which made the first
+ * mdw_try_load fail with "Load a map database..." until the user toggled
+ * the panel closed and reopened, after which CWD had shifted to root). */
+static void mdw_mmroot_path(const char *rel, char *out, int outlen)
+{
+    char exe[MAX_PATH];
+    GetModuleFileNameA(NULL, exe, MAX_PATH);
+    char *last = exe;
+    for (char *p = exe; *p; p++) if (*p == '\\' || *p == '/') last = p;
+    *(last + 1) = 0;
+    _snprintf(out, outlen, "%s%s", exe, rel);
+    out[outlen - 1] = 0;
+}
+
 static int mdw_bin_exists(void)
 {
-    FILE *f = fopen("mudmap/mmud.bin", "rb");
+    char path[MAX_PATH];
+    mdw_mmroot_path("mudmap\\mmud.bin", path, sizeof path);
+    FILE *f = fopen(path, "rb");
+    if (f) { fclose(f); return 1; }
+    mdw_mmroot_path("mmud.bin", path, sizeof path);
+    f = fopen(path, "rb");
+    if (f) { fclose(f); return 1; }
+    /* Last-resort CWD fallbacks (kept for test harness compatibility) */
+    f = fopen("mudmap/mmud.bin", "rb");
     if (f) { fclose(f); return 1; }
     f = fopen("mmud.bin", "rb");
     if (f) { fclose(f); return 1; }
@@ -2168,6 +2199,12 @@ static int mdw_bin_exists(void)
 
 static int mdw_try_load(void)
 {
+    char path[MAX_PATH];
+    mdw_mmroot_path("mudmap\\mmud.bin", path, sizeof path);
+    if (mdw_load_bin(path) == 0) return 0;
+    mdw_mmroot_path("mmud.bin", path, sizeof path);
+    if (mdw_load_bin(path) == 0) return 0;
+    /* CWD fallbacks */
     if (mdw_load_bin("mudmap/mmud.bin") == 0) return 0;
     if (mdw_load_bin("mmud.bin") == 0) return 0;
     return -1;
@@ -2741,27 +2778,26 @@ static void mdw_draw(int vp_w, int vp_h)
         float sx0 = cview_x + (r->gx * 20.0f - mdw_view_x) * zfac;
         float sy0 = cview_y + (r->gy * 20.0f - mdw_view_y) * zfac;
         if (sx0 < cull_x0 || sx0 > cull_x1 || sy0 < cull_y0 || sy0 > cull_y1) continue;
+        /* Exit rendering — matches MME's MapActivateCell behavior:
+         *   1. If the target room IS placed adjacent on the grid (the
+         *      expected case), draw a full room-to-room line.
+         *   2. If the target is unplaced OR far from expected adjacent
+         *      cell (BFS collision fallback placed it elsewhere), draw
+         *      a STUB from this room in the exit direction so the user
+         *      still sees "exit this way exists".
+         * MME's code does the same: MapActivateCell calls MapDrawOnRoom
+         * with a stub draw type when it can't place the target cell. */
         for (uint32_t e = 0; e < r->exit_count; e++) {
             MdwExit *ex = &mdw_exits[r->exit_ofs + e];
             if (ex->dir > 7) continue;
             if (ex->tmap != mdw_cur_map_view) continue;
             uint32_t ni = mdw_room_lookup(ex->tmap, ex->troom);
-            if (ni == 0xFFFFFFFF) continue;
-            if (mdw_rooms[ni].gx == INT16_MIN) continue;
-            int dgx = r->gx - mdw_rooms[ni].gx;
-            int dgy = r->gy - mdw_rooms[ni].gy;
-            if (dgx > 2 || dgx < -2 || dgy > 2 || dgy < -2) continue;
-            float sx1 = cview_x + (mdw_rooms[ni].gx * 20.0f - mdw_view_x) * zfac;
-            float sy1 = cview_y + (mdw_rooms[ni].gy * 20.0f - mdw_view_y) * zfac;
-            /* Skip lines where both endpoints are off-screen on the same side */
-            if ((sx0 < c_x0 && sx1 < c_x0) || (sx0 > c_x1 && sx1 > c_x1)) continue;
-            if ((sy0 < c_y0 && sy1 < c_y0) || (sy0 > c_y1 && sy1 > c_y1)) continue;
-            /* Hide exit lines touching unwalked footprint/bullseye rooms */
+            /* Footprint suppression (existing behavior). */
             if (mdw_fp_active) {
                 int src_fp = 0, dst_fp = 0;
                 for (int fi = mdw_fp_cur_step; fi < mdw_fp_count; fi++) {
                     if (mdw_fp[fi].ri == i)  src_fp = 1;
-                    if (mdw_fp[fi].ri == ni) dst_fp = 1;
+                    if (ni != 0xFFFFFFFF && mdw_fp[fi].ri == ni) dst_fp = 1;
                     if (src_fp || dst_fp) break;
                 }
                 if (src_fp || dst_fp) continue;
@@ -2770,13 +2806,38 @@ static void mdw_draw(int vp_w, int vp_h)
             if (ex->flags & 0x0001) { lr = 0.85f; lg = 0.55f; lb = 0.20f; }
             if (ex->flags & 0x0002) { lr = 0.35f; lg = 0.35f; lb = 0.35f; }
             if (ex->flags & 0x0004) { lr = 0.90f; lg = 0.15f; lb = 0.15f; }
-            /* Thickness scales mildly with zoom so the line doesn't vanish
-             * when zoomed out and doesn't overwhelm rooms when zoomed in. */
             float lthick = 3.0f * mdw_zoom;
             if (lthick < 2.0f) lthick = 2.0f;
             if (lthick > 6.0f) lthick = 6.0f;
-            mdw_line_h(sx0, sy0, sx1, sy1, lthick, lr, lg, lb, 0.85f,
-                       c_x0, c_y0, c_x1, c_y1, vp_w, vp_h);
+            /* sx0/sy0 is room center (world coord = gx*20). */
+            /* Is the target placed where we'd expect? Expected grid offset
+             * is (MDW_DX[dir], MDW_DY[dir]) — one cell in the exit direction. */
+            int expected_nx = r->gx + MDW_DX[ex->dir];
+            int expected_ny = r->gy + MDW_DY[ex->dir];
+            int target_ok = (ni != 0xFFFFFFFF) &&
+                            (mdw_rooms[ni].gx != INT16_MIN) &&
+                            (mdw_rooms[ni].map == mdw_cur_map_view) &&
+                            (mdw_rooms[ni].gx == expected_nx) &&
+                            (mdw_rooms[ni].gy == expected_ny);
+            if (target_ok) {
+                /* Standard room-to-room line. */
+                float sx1 = cview_x + (mdw_rooms[ni].gx * 20.0f - mdw_view_x) * zfac;
+                float sy1 = cview_y + (mdw_rooms[ni].gy * 20.0f - mdw_view_y) * zfac;
+                if ((sx0 < c_x0 && sx1 < c_x0) || (sx0 > c_x1 && sx1 > c_x1)) continue;
+                if ((sy0 < c_y0 && sy1 < c_y0) || (sy0 > c_y1 && sy1 > c_y1)) continue;
+                mdw_line_h(sx0, sy0, sx1, sy1, lthick, lr, lg, lb, 0.85f,
+                           c_x0, c_y0, c_x1, c_y1, vp_w, vp_h);
+            } else {
+                /* Stub fallback — exit direction known but target not
+                 * placed at the expected neighbor cell (collision, unplaced,
+                 * different map, etc). Draw a short line showing the user
+                 * there's an exit this way. */
+                float stub_half = cell * 0.5f;
+                float ex_x = sx0 + MDW_DX[ex->dir] * stub_half;
+                float ex_y = sy0 + MDW_DY[ex->dir] * stub_half;
+                mdw_line_h(sx0, sy0, ex_x, ex_y, lthick, lr, lg, lb, 0.85f,
+                           c_x0, c_y0, c_x1, c_y1, vp_w, vp_h);
+            }
         }
     }
 
@@ -4050,6 +4111,25 @@ static void mdw_draw(int vp_w, int vp_h)
             tx = bx1 + 4 + 4 * cw + 14;
         }
 
+        /* [X] follow map changes — when player moves to a different map,
+         * auto-switch the view. MME has the same toggle. */
+        {
+            int bx0 = tx, by0 = ty, bx1 = tx + ch, by1 = ty + ch;
+            mdw_cb_follow_map_x0 = (float)bx0; mdw_cb_follow_map_x1 = (float)bx1;
+            psolid((float)bx0, (float)by0, (float)bx1, (float)by1,
+                   bgr * 0.2f, bgg * 0.2f, bgb * 0.2f, 1.0f, vp_w, vp_h);
+            psolid((float)bx0, (float)by0, (float)bx1, (float)by0 + 1, acr, acg, acb, 0.8f, vp_w, vp_h);
+            psolid((float)bx0, (float)by1 - 1, (float)bx1, (float)by1, acr, acg, acb, 0.8f, vp_w, vp_h);
+            psolid((float)bx0, (float)by0, (float)bx0 + 1, (float)by1, acr, acg, acb, 0.8f, vp_w, vp_h);
+            psolid((float)bx1 - 1, (float)by0, (float)bx1, (float)by1, acr, acg, acb, 0.8f, vp_w, vp_h);
+            if (mdw_follow_map_changes) {
+                psolid((float)bx0 + 3, (float)by0 + 3, (float)bx1 - 3, (float)by1 - 3,
+                       0.25f, 0.95f, 0.35f, 1.0f, vp_w, vp_h);
+            }
+            ptext(bx1 + 4, ty, "follow map", txr, txg, txb, vp_w, vp_h, cw, ch);
+            tx = bx1 + 4 + 10 * cw + 14;
+        }
+
         /* [X] no events checkbox */
         {
             int noev = pfn_dynpath_get_suspend_events ? pfn_dynpath_get_suspend_events() : 0;
@@ -4296,6 +4376,11 @@ static int mdw_mouse_down(int mx, int my)
                 mdw_view_x = mdw_rooms[mdw_cur_ri].gx * 20.0f;
                 mdw_view_y = mdw_rooms[mdw_cur_ri].gy * 20.0f;
             }
+            mdw_input_focus = 0;
+            return 1;
+        }
+        if (fmx >= mdw_cb_follow_map_x0 && fmx <= mdw_cb_follow_map_x1) {
+            mdw_follow_map_changes = !mdw_follow_map_changes;
             mdw_input_focus = 0;
             return 1;
         }

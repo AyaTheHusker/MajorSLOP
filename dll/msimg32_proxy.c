@@ -626,12 +626,20 @@ static void type_into_megamud(const char *cmd);
 static void api_inject_command(const char *cmd);
 static int dpw_count_hostiles(unsigned char *sbp);
 static int mdw_dir_code(const char *d);
+static int dpw_saved_auto_sneak;  /* defined later in this TU; needed earlier for line parser */
 /* Bitmask 0..9 indexed by dir_idx: bit set = MegaMUD printed
  * "You found an exit ... <dirname>" for that direction since the last
  * time the walker consumed it. Parsing the LAST WORD of the line tells us
  * which direction the found exit is in. */
 static volatile LONG dpw_found_exit_mask;
 static volatile LONG dpw_wall_hit_pending;
+/* Stream matcher sets this when MegaMUD prints "The door was not locked" in
+ * response to a pi — means the door is already unlocked and we should stop
+ * spamming picks and issue a single op. */
+static volatile LONG dpw_door_not_locked_pending;
+static volatile LONG dpw_pi_in_flight;
+static volatile LONG dpw_ba_in_flight;
+static int           dpw_door_op_sent;
 int WINAPI get_player_picklocks(void);
 int WINAPI get_player_strength(void);
 static void dpw_clear_pathing_active(unsigned char *sbp);
@@ -1886,6 +1894,130 @@ static char recv_line_buf[RECV_LINE_BUF];
 static line_fsm_t recv_fsm;
 static int recv_fsm_inited = 0;
 
+/* Match at LINE START only — prevents injection via gossip/chat.
+ * A player could gossip "The door is already open" and trip our walker if
+ * we substring-matched anywhere; server responses always start at position 0. */
+static int dpw_line_startswith(const char *line, const char *needle)
+{
+    while (*needle) {
+        if (*line != *needle) return 0;
+        line++; needle++;
+    }
+    return 1;
+}
+
+static void dpw_on_clean_line(const char *line)
+{
+    if (!dp_active || !line) return;
+    /* Server response lines — ALL begin at column 0 (chat lines start with
+     * a player name so can't trip these). For door/gate variants, match any
+     * "The <noun> was not locked" via startswith("The ") + contains. */
+    if ((dpw_line_startswith(line, "The ") && strstr(line, " was not locked")) ||
+        dpw_line_startswith(line, "You successfully unlocked"))
+    {
+        InterlockedExchange(&dpw_door_not_locked_pending, 1);
+        InterlockedExchange(&dpw_pi_in_flight, 0);
+        logmsg("[dynpath] line: '%s' → op\n", line);
+        return;
+    }
+    /* Other pi-response lines (all verified via `strings megamud.exe`) —
+     * clear pi_in_flight so next pi can fire once this round-trip is done. */
+    if (dpw_line_startswith(line, "There is no benefit to picking")) {
+        InterlockedExchange(&dpw_pi_in_flight, 0);
+        return;
+    }
+    /* Bash-response lines (verified via `strings megamud.exe`). */
+    if (dpw_line_startswith(line, "You bashed the ") ||
+        dpw_line_startswith(line, "Your attempts to bash "))
+    {
+        InterlockedExchange(&dpw_ba_in_flight, 0);
+        return;
+    }
+    if (dpw_line_startswith(line, "The door is now open") ||
+        dpw_line_startswith(line, "The gate is now open") ||
+        dpw_line_startswith(line, "The door is already open") ||
+        dpw_line_startswith(line, "The gate is already open") ||
+        dpw_line_startswith(line, "You successfully opened"))
+    {
+        InterlockedExchange(&dpw_door_not_locked_pending, 0);
+        dpw_door_op_sent = 1;
+        logmsg("[dynpath] line: '%s' → door open\n", line);
+        return;
+    }
+
+    /* Level-up: "You gain ..." (e.g. "You gain a level!"). Server prompts for
+     * Enter; send one. Chat like "Xyz gossips: You gain fame" won't match
+     * because it doesn't start at col 0 with "You gain". */
+    if (dpw_line_startswith(line, "You gain")) {
+        type_into_megamud("");
+        return;
+    }
+
+    /* Sneak failed: "You don't think you can sneak..." — retry sneak if not
+     * busy. Chat version like "Xyz gossips: You don't think so" won't match. */
+    if (dpw_line_startswith(line, "You don't think") && dpw_state == DPW_SNEAK_WAIT) {
+        unsigned char *sb = (unsigned char *)struct_base;
+        int bl = sb ? *(int *)(sb + 0x4CFC) : 0;
+        int ap = sb ? *(int *)(sb + 0x5778) : 0;
+        if (!bl && !ap) api_inject_command("sn");
+        return;
+    }
+
+    /* Stealth broken mid-walk: "You make a sound..." fires when you sneak
+     * into a new room and fail the stealth check (also fires on wall bumps
+     * per user note). The short prefix catches any variant the server
+     * sends. Server sets is_sneaking=0 — we proactively re-sneak so the
+     * walker's next step goes through with stealth restored. */
+    if (dpw_line_startswith(line, "You make a sound as you enter") &&
+        dpw_saved_auto_sneak)
+    {
+        unsigned char *sb = (unsigned char *)struct_base;
+        int bl = sb ? *(int *)(sb + 0x4CFC) : 0;
+        int ap = sb ? *(int *)(sb + 0x5778) : 0;
+        if (!bl && !ap) api_inject_command("sn");
+        logmsg("[dynpath] line: 'make a sound' → re-sneak\n");
+        return;
+    }
+
+    /* Hidden-exit search success: "You found an exit <descriptor> <direction>"
+     * The LAST WORD of the line is the direction. Set that direction's bit
+     * in dpw_found_exit_mask so DOOR_WAIT consumes only its own. */
+    if (dpw_line_startswith(line, "You found an exit ")) {
+        /* Find last whitespace-delimited word. */
+        int n = (int)strlen(line);
+        while (n > 0 && (line[n-1]==' '||line[n-1]=='\t'||line[n-1]=='.'||
+                         line[n-1]=='!'||line[n-1]==','||line[n-1]==';'||
+                         line[n-1]=='"'||line[n-1]=='\''))
+            n--;
+        int wb = n;
+        while (wb > 0 && line[wb-1] != ' ' && line[wb-1] != '\t') wb--;
+        int wlen = n - wb;
+        int dir_idx = -1;
+        #define WEQ(s) (wlen == (int)(sizeof(s)-1) && !_strnicmp(line + wb, s, sizeof(s)-1))
+        if      (WEQ("north"))     dir_idx = 0;
+        else if (WEQ("south"))     dir_idx = 1;
+        else if (WEQ("east"))      dir_idx = 2;
+        else if (WEQ("west"))      dir_idx = 3;
+        else if (WEQ("northeast")) dir_idx = 4;
+        else if (WEQ("northwest")) dir_idx = 5;
+        else if (WEQ("southeast")) dir_idx = 6;
+        else if (WEQ("southwest")) dir_idx = 7;
+        else if (WEQ("up"))        dir_idx = 8;
+        else if (WEQ("down"))      dir_idx = 9;
+        #undef WEQ
+        if (dir_idx >= 0) {
+            LONG before, after;
+            do {
+                before = dpw_found_exit_mask;
+                after  = before | (1L << dir_idx);
+            } while (InterlockedCompareExchange(
+                        &dpw_found_exit_mask, after, before) != before);
+            logmsg("[dynpath] line: hidden exit found dir_idx=%d\n", dir_idx);
+        }
+        return;
+    }
+}
+
 /* Dispatch a completed line: raw → plugins → strip → clean → plugins → round.
  * `line` points into recv_line_buf (writable), so we strip ANSI in place. */
 static void recv_on_line_cb(const char *line, void *user)
@@ -1894,6 +2026,7 @@ static void recv_on_line_cb(const char *line, void *user)
     plugins_on_line(line);               /* raw, ANSI intact */
     char *mut = (char *)line;            /* owned by recv_fsm's backing store */
     strip_ansi(mut);
+    dpw_on_clean_line(mut);              /* walker's line-level parser */
     plugins_on_clean_line(mut);
     rd_process_line(mut);
 }
@@ -1946,84 +2079,39 @@ static void __cdecl hooked_process_incoming(int sbase, void *data, int len)
     process_incoming_fn real_fn = (process_incoming_fn)VA_PROCESS_INCOMING;
     real_fn(sbase, data, len);
 
-    /* Text-driven triggers during active dynpath walk.
-     * Matches MegaMUD's own response-based logic, not flag polling. */
-    if (dp_active && len > 0 && data) {
-        const char *p = (const char *)data;
-        int found_you_gain = 0, found_dont_think = 0;
-        for (int i = 0; i < len - 7; i++) {
-            if (p[i]=='Y' && p[i+1]=='o' && p[i+2]=='u' && p[i+3]==' ') {
-                if (i + 7 < len && p[i+4]=='g' && p[i+5]=='a' && p[i+6]=='i' && p[i+7]=='n')
-                    found_you_gain = 1;
-                if (i + 14 < len && p[i+4]=='d' && p[i+5]=='o' && p[i+6]=='n' && p[i+7]=='\'' &&
-                    p[i+8]=='t' && p[i+9]==' ' && p[i+10]=='t' && p[i+11]=='h' &&
-                    p[i+12]=='i' && p[i+13]=='n' && p[i+14]=='k')
-                    found_dont_think = 1;
-                /* "You found an exit <some descriptor> <direction>"
-                 *   e.g. "You found an exit beautiful passage to heaven east"
-                 *        "You found an exit glorious butthole up"
-                 * The LAST WORD of the line is the direction — that tells us
-                 * which hidden exit was revealed, and we set only that bit
-                 * in dpw_found_exit_mask so DOOR_WAIT only consumes its own. */
-                if (i + 17 < len &&
-                    p[i+4]=='f' && p[i+5]=='o' && p[i+6]=='u' && p[i+7]=='n' && p[i+8]=='d' &&
-                    p[i+9]==' ' && p[i+10]=='a' && p[i+11]=='n' && p[i+12]==' ' &&
-                    p[i+13]=='e' && p[i+14]=='x' && p[i+15]=='i' && p[i+16]=='t' &&
-                    p[i+17]==' ') {
-                    /* Scan to end-of-line, trimming any trailing punctuation.
-                     * Then walk backwards to isolate the last whitespace-delimited
-                     * word, match it (case-insensitively) against the ten direction
-                     * names, and set the corresponding bit. */
-                    int line_end = i + 18;
-                    while (line_end < len && p[line_end] != '\n' && p[line_end] != '\r')
-                        line_end++;
-                    /* Trim trailing punctuation/whitespace. */
-                    int w_end = line_end;
-                    while (w_end > i + 18 &&
-                           (p[w_end-1] == ' ' || p[w_end-1] == '\t' ||
-                            p[w_end-1] == '.' || p[w_end-1] == '!' ||
-                            p[w_end-1] == ',' || p[w_end-1] == ';' ||
-                            p[w_end-1] == '"' || p[w_end-1] == '\''))
-                        w_end--;
-                    int w_begin = w_end;
-                    while (w_begin > i + 18 && p[w_begin-1] != ' ' && p[w_begin-1] != '\t')
-                        w_begin--;
-                    int wlen = w_end - w_begin;
-                    int dir_idx = -1;
-                    /* Case-insensitive word compare helper. */
-                    #define WORD_EQ(s) (wlen == (int)(sizeof(s)-1) && \
-                        !_strnicmp(p + w_begin, s, (int)(sizeof(s)-1)))
-                    if      (WORD_EQ("north"))     dir_idx = 0;
-                    else if (WORD_EQ("south"))     dir_idx = 1;
-                    else if (WORD_EQ("east"))      dir_idx = 2;
-                    else if (WORD_EQ("west"))      dir_idx = 3;
-                    else if (WORD_EQ("northeast")) dir_idx = 4;
-                    else if (WORD_EQ("northwest")) dir_idx = 5;
-                    else if (WORD_EQ("southeast")) dir_idx = 6;
-                    else if (WORD_EQ("southwest")) dir_idx = 7;
-                    else if (WORD_EQ("up"))        dir_idx = 8;
-                    else if (WORD_EQ("down"))      dir_idx = 9;
-                    #undef WORD_EQ
-                    if (dir_idx >= 0) {
-                        LONG before, after;
-                        do {
-                            before = dpw_found_exit_mask;
-                            after  = before | (1L << dir_idx);
-                        } while (InterlockedCompareExchange(
-                                    &dpw_found_exit_mask, after, before) != before);
+    /* pi/ba in-flight gates are cleared by pi/ba-specific response lines
+     * in dpw_on_clean_line (e.g. "You successfully unlocked", "The door was
+     * not locked", "You bashed the ..."). The previous generic [HP= clear
+     * was WRONG — any server prompt (gossip, ambient, other players) cleared
+     * the gate even before our pi response came back, causing walker to fire
+     * extra picks in rapid succession. Don't match [HP= here anymore. */
+    /* First in-game prompt this session → fire an 'rm' so the mudmap knows
+     * where we are before the user does anything. Fires outside the dp_active
+     * check because the walker isn't running yet — this is the bootstrap. */
+    if (len > 0 && data) {
+        static volatile LONG first_rm_done = 0;
+        if (!first_rm_done) {
+            const char *pb = (const char *)data;
+            for (int i = 0; i + 4 <= len; i++) {
+                if (pb[i]=='[' && pb[i+1]=='H' && pb[i+2]=='P' && pb[i+3]=='=') {
+                    if (InterlockedCompareExchange(&first_rm_done, 1, 0) == 0) {
+                        InterlockedIncrement(&auto_rm_queue_count);
+                        type_into_megamud("rm");
+                        logmsg("[dynpath] first HP prompt seen — auto rm\n");
                     }
+                    break;
                 }
             }
         }
-        if (found_you_gain)
-            type_into_megamud("");
-        if (found_dont_think && dpw_state == DPW_SNEAK_WAIT) {
-            unsigned char *sb = (unsigned char *)struct_base;
-            int bl = sb ? *(int *)(sb + 0x4CFC) : 0;
-            int ap = sb ? *(int *)(sb + 0x5778) : 0;
-            if (!bl && !ap) api_inject_command("sn");
-        }
     }
+    /* "You gain", "You don't think", "You found an exit", "not locked",
+     * "successfully unlocked", "successfully opened", "is already open" —
+     * all moved to dpw_on_clean_line's line-start matcher (in recv_on_line_cb).
+     * Raw-packet substring scans here were injection-vulnerable via chat
+     * (e.g. a gossip line containing "The door is already open" would trip
+     * the walker). Line-start matching ensures only genuine server responses
+     * qualify. The only signal still parsed raw is "[HP=" for in-flight
+     * flag clearing — needed for latency, limited blast radius. */
 
     dpw_poll_guarded();
 
@@ -4170,6 +4258,12 @@ static int              dpw_door_pick_tries = 0;
 static int              dpw_door_bash_tries = 0;
 static int              dpw_door_search_tries = 0;
 static int              dpw_door_op_sent = 0;  /* one-shot — op fires once per DOOR_WAIT session */
+/* "in flight" flags — set when the walker sends the corresponding command,
+ * cleared when the server's next response arrives. Prevents walker from
+ * spamming the same command multiple times while waiting for the server
+ * round-trip to complete. */
+static volatile LONG    dpw_pi_in_flight;
+static volatile LONG    dpw_ba_in_flight;
 /* Which branch we're handling while in DOOR_WAIT:
  *   0 = closed door (op/pi/bash only — never search)
  *   1 = hidden exit  (search only  — never op/pi/bash, even after reveal)
@@ -4427,17 +4521,19 @@ static void dpw_tick(void)
             break;
         }
 
-        /* Enter COMBAT_WAIT on (in_combat || hostiles>0) so we catch real
-         * hostiles even before MegaMUD's auto_combat has set in_combat=1 —
-         * critical to avoid racing past mobs when the room parses in the
-         * same packet that moved us. Friend/Avoid mobs (ent[0]==2 but won't
-         * engage) are handled by the probe grace in COMBAT_WAIT below. */
-        if (auto_combat && (in_combat || hostiles > 0)) {
-            logmsg("[dynpath] combat at step %d: in_combat=%d hostiles=%d at %d,%d "
+        /* Enter COMBAT_WAIT ONLY on in_combat. ent[0]==2 is the combat-slot
+         * type, NOT "MegaMUD will engage" — Friend/Avoid NPCs (e.g. guardsman)
+         * also populate ent[0]==2 but MegaMUD silently ignores them. Relying
+         * on hostiles>0 here caused a re-entry loop on every Friend room:
+         * probe clears, READY sees hostiles>0, re-enters COMBAT_WAIT forever.
+         * We still kick FUN_00406b40 below so MegaMUD's own auto_combat sets
+         * in_combat on the same tick if the mob is actually hostile. */
+        if (auto_combat && in_combat) {
+            logmsg("[dynpath] combat at step %d: in_combat=1 hostiles=%d at %d,%d "
                    "— entering COMBAT_WAIT\n",
-                   dpw_step, in_combat, hostiles, loc_map, loc_room);
+                   dpw_step, hostiles, loc_map, loc_room);
             dpw_combat_enter_tick = GetTickCount();
-            dpw_combat_saw_engage = in_combat ? 1 : 0;
+            dpw_combat_saw_engage = 1;
             dpw_state = DPW_COMBAT_WAIT;
             /* Kick MegaMUD's automation dispatcher immediately so it engages
              * this tick instead of waiting for its next internal combat loop.
@@ -4551,12 +4647,54 @@ static void dpw_tick(void)
                     dpw_door_search_tries = 0;
                     dpw_door_op_sent = 0;
                     dpw_door_last_cmd_tick = 0;
+                    InterlockedExchange(&dpw_door_not_locked_pending, 0);
                     InterlockedAnd(&dpw_found_exit_mask, ~(1L << d_idx));
                     dpw_timeout = GetTickCount();
                     dpw_last_loc = DPW_PACK_LOC(loc_map, loc_room);
                     dpw_state = DPW_DOOR_WAIT;
                     break;
                 }
+            }
+        }
+
+        /* Defensive recalibrate before every direction send: if the player
+         * isn't actually at dpw_steps[dpw_step].map/room anymore (e.g. a pick
+         * or open command auto-walked them partway through a multi-step walk,
+         * or they got shoved by flee/fear/teleport between ticks), blindly
+         * firing dpw_steps[dpw_step].dir would send the WRONG direction and
+         * either walk off-path or bump a wall. Scan the full path for the
+         * current location and jump dpw_step there first. */
+        if (dpw_step < dpw_count &&
+            (loc_map != (int)dpw_steps[dpw_step].map ||
+             loc_room != (int)dpw_steps[dpw_step].room))
+        {
+            if (loc_map == dpw_dst_map && loc_room == dpw_dst_room) {
+                logmsg("[dynpath] pre-send recalibrate: arrived at destination "
+                       "%d,%d (was expecting step %d at %u,%u)\n",
+                       loc_map, loc_room, dpw_step,
+                       (unsigned)dpw_steps[dpw_step].map,
+                       (unsigned)dpw_steps[dpw_step].room);
+                dpw_step = dpw_count;
+                dpw_state = DPW_READY;
+                dpw_update_statusbar();
+                break;
+            }
+            int found = -1;
+            for (int i = 0; i < dpw_count; i++) {
+                if (dpw_steps[i].map == (unsigned short)loc_map &&
+                    dpw_steps[i].room == (unsigned short)loc_room) {
+                    found = i;
+                    break;
+                }
+            }
+            if (found >= 0 && found != dpw_step) {
+                logmsg("[dynpath] pre-send recalibrate: at %d,%d is step %d (was %d)\n",
+                       loc_map, loc_room, found, dpw_step);
+                dpw_step = found;
+                dpw_last_loc = DPW_PACK_LOC(loc_map, loc_room);
+                dpw_update_statusbar();
+                /* Re-run DPW_READY from top on next iter with the corrected step. */
+                break;
             }
         }
 
@@ -4673,12 +4811,12 @@ static void dpw_tick(void)
             }
             break;
         }
-        if (auto_combat && (in_combat || hostiles > 0)) {
-            logmsg("[dynpath] combat while waiting for move: in_combat=%d hostiles=%d "
+        if (auto_combat && in_combat) {
+            logmsg("[dynpath] combat while waiting for move: hostiles=%d "
                    "at %d,%d step %d — entering COMBAT_WAIT\n",
-                   in_combat, hostiles, loc_map, loc_room, dpw_step);
+                   hostiles, loc_map, loc_room, dpw_step);
             dpw_combat_enter_tick = GetTickCount();
-            dpw_combat_saw_engage = in_combat ? 1 : 0;
+            dpw_combat_saw_engage = 1;
             dpw_state = DPW_COMBAT_WAIT;
             /* Kick MegaMUD's automation dispatcher — engage this tick. */
             dpw_kick_automation();
@@ -4715,11 +4853,16 @@ static void dpw_tick(void)
                 (prev_hidden || prev_door))
             {
                 int es = *(int *)(sbp + 0x2E78 + prev_dir_idx * 4);
-                /* "Re-closed" depends on which type of exit:
+                /* "Re-closed" must be a genuine closed state, not stale/
+                 * transient data. Specifically:
                  *   hidden → state reverted to 0 (not revealed anymore)
-                 *   door   → state is anything other than 3 (not open)
-                 * Do NOT treat a hidden-revealed state (1/4) as a re-close. */
-                int reclosed = prev_hidden ? (es == 0) : (es != 3);
+                 *   door   → state is 2 (locked) or 5 (closed unlocked)
+                 *            — NOT state 0, which can flash transiently when
+                 *            MegaMUD hasn't re-parsed the new room yet.
+                 * Treating state 0 as re-closed caused false rewinds right
+                 * after a successful move through a door. */
+                int reclosed = prev_hidden ? (es == 0)
+                                           : (es == 2 || es == 5);
                 if (reclosed) {
                     logmsg("[dynpath] %s re-closed mid-move: dir='%s' "
                            "expected %u,%u exit_state=%d at %d,%d — rewinding "
@@ -4737,6 +4880,7 @@ static void dpw_tick(void)
                     dpw_door_search_tries = 0;
                     dpw_door_op_sent = 0;
                     dpw_door_last_cmd_tick = 0;
+                    InterlockedExchange(&dpw_door_not_locked_pending, 0);
                     InterlockedAnd(&dpw_found_exit_mask, ~(1L << prev_dir_idx));
                     dpw_timeout = GetTickCount();
                     dpw_state = DPW_DOOR_WAIT;
@@ -5030,18 +5174,54 @@ static void dpw_tick(void)
             logmsg("[dynpath] door: state=5 (closed unlocked) → '%s' (one-shot)\n", cmd);
             dpw_door_last_cmd_tick = GetTickCount();
         } else if (exit_state == 2) {
+            /* If op has already been issued (e.g. because a 'not locked'
+             * response redirected us), don't send any more pi/bash. Just
+             * wait for the state to flip to 3 — no more spam. */
+            if (dpw_door_op_sent) break;
             int pick_max = *(int *)(sbp + 0x54EC);
             int bash_max = *(int *)(sbp + 0x54E4);
             if (pick_max <= 0) pick_max = DPW_DOOR_PICK_MAX;
             if (bash_max <= 0) bash_max = 10;
-            int can_pick = (pick_req > 0) && (picklocks >= pick_req);
-            int can_bash = (bash_req > 0) && (strength >= bash_req);
+            /* "not locked" streamed in — pi was wasted. Immediately:
+             *   1. send one `op <dir>`
+             *   2. send a blank <enter> to refresh the exit list
+             * On the next tick DOOR_WAIT reads ROOM_EXITS again; if it's now
+             * state 3, the revealed_ok check exits DOOR_WAIT and READY sends
+             * the direction. No more picks. */
+            if (InterlockedCompareExchange(
+                    &dpw_door_not_locked_pending, 0, 1) == 1)
+            {
+                if (!dpw_door_op_sent) {
+                    wsprintfA(cmd, "op %s", dir_str);
+                    api_inject_command(cmd);
+                    api_inject_command("");  /* enter — force exit-list refresh */
+                    dpw_door_op_sent = 1;
+                    dpw_door_last_cmd_tick = GetTickCount();
+                    logmsg("[dynpath] door: 'not locked' → '%s' + <enter> to "
+                           "refresh (one-shot)\n", cmd);
+                }
+                break;
+            }
+            /* Respect MegaMUD's CanPickLocks config flag (0x37C8). If the
+             * user has disabled pick-locks at the UI level, don't attempt
+             * pi regardless of skill — go straight to bash. */
+            int cfg_can_pick = *(int *)(sbp + 0x37C8);
+            /* req==0 means the MDB export didn't populate a threshold — NOT
+             * that the door can't be picked/bashed. Treat it as "unknown,
+             * just try it" and only skip the branch when a positive req is
+             * published AND the player falls short. */
+            int can_pick = cfg_can_pick && (picklocks > 0) &&
+                           (pick_req == 0 || picklocks >= pick_req);
+            int can_bash = (bash_req == 0) || (strength >= bash_req);
             if (can_pick && dpw_door_pick_tries < pick_max) {
-                if (GetTickCount() - dpw_door_last_cmd_tick < DPW_FAST_CMD_COOLDOWN_MS)
-                    break;
+                /* One pi in flight at a time — wait for the server's response
+                 * (any incoming data clears the flag) before sending another.
+                 * Prevents queuing multiple picks while server round-trips. */
+                if (dpw_pi_in_flight) break;
                 wsprintfA(cmd, "pi %s", dir_str);
                 dpw_door_pick_tries++;
                 api_inject_command(cmd);
+                InterlockedExchange(&dpw_pi_in_flight, 1);
                 dpw_door_last_cmd_tick = GetTickCount();
                 logmsg("[dynpath] door: state=2 pick (skill=%d req=%d) → '%s' "
                        "(try %d/%d)\n",
@@ -5068,11 +5248,13 @@ static void dpw_tick(void)
                     dpw_kick_automation();
                     break;
                 }
-                if (GetTickCount() - dpw_door_last_cmd_tick < DPW_OPBASH_COOLDOWN_MS)
-                    break;
-                wsprintfA(cmd, "ba %s", dir_str);
+                /* One ba in flight at a time — wait for server response
+                 * before the next bash attempt. */
+                if (dpw_ba_in_flight) break;
+                wsprintfA(cmd, "bash %s", dir_str);
                 dpw_door_bash_tries++;
                 api_inject_command(cmd);
+                InterlockedExchange(&dpw_ba_in_flight, 1);
                 dpw_door_last_cmd_tick = GetTickCount();
                 logmsg("[dynpath] door: state=2 bash (str=%d req=%d) → '%s' "
                        "(try %d/%d, HP %d/%d)\n",
