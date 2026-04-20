@@ -4056,7 +4056,10 @@ static int              dpw_repath_count = 0;
 static int              dpw_saved_auto_sneak = 0;
 static int              dpw_saved_auto_hide  = 0;
 static int              dpw_saved_auto_bless = 0;
-static int              dpw_temp_auto_combat = 0;
+static int              dpw_walk_used_sneak  = 0;
+static int              dpw_walk_used_hide   = 0;
+static int              dpw_walk_used_bless  = 0;
+static int              dpw_saved_auto_combat = 0;
 static int              dpw_dst_map = 0;
 static int              dpw_dst_room = 0;
 static volatile LONG    dpw_needs_repath = 0;
@@ -4069,7 +4072,7 @@ static void dpw_update_statusbar(void)
     if (dpw_state != DPW_DONE && dpw_label[0]) {
         sprintf(dpw_statusbar_override, "%s (%d/%d)", dpw_label, dpw_step, dpw_count);
     } else if (dpw_state != DPW_DONE) {
-        sprintf(dpw_statusbar_override, "DynPath (%d/%d)", dpw_step, dpw_count);
+        sprintf(dpw_statusbar_override, "Dynamic Path (%d/%d)", dpw_step, dpw_count);
     } else {
         dpw_statusbar_override[0] = 0;
     }
@@ -4140,19 +4143,23 @@ static void dpw_clear_pathing_active(unsigned char *sbp)
 static void dpw_restore_auto_stealth(unsigned char *sbp)
 {
     if (!sbp) return;
-    *(int *)(sbp + 0x4D20) = dpw_saved_auto_sneak;
-    *(int *)(sbp + 0x4D24) = dpw_saved_auto_hide;
-    *(int *)(sbp + 0x4D0C) = dpw_saved_auto_bless;
-    logmsg("[dynpath] restored auto_sneak=%d auto_hide=%d auto_bless=%d\n",
-           dpw_saved_auto_sneak, dpw_saved_auto_hide, dpw_saved_auto_bless);
+    /* Anything that was purple during the walk → enable green at end. */
+    if (dpw_walk_used_sneak) *(int *)(sbp + 0x4D20) = 1;
+    if (dpw_walk_used_hide)  *(int *)(sbp + 0x4D24) = 1;
+    if (dpw_walk_used_bless) *(int *)(sbp + 0x4D0C) = 1;
+    logmsg("[dynpath] end-of-walk: sneak=%s hide=%s bless=%s\n",
+           dpw_walk_used_sneak ? "ON(green)" : "off",
+           dpw_walk_used_hide  ? "ON(green)" : "off",
+           dpw_walk_used_bless ? "ON(green)" : "off");
     dpw_saved_auto_sneak  = 0;
     dpw_saved_auto_hide   = 0;
     dpw_saved_auto_bless  = 0;
-    if (dpw_temp_auto_combat) {
-        *(int *)(sbp + 0x4D00) = 0;
-        dpw_temp_auto_combat = 0;
-        logmsg("[dynpath] restored auto_combat=0\n");
-    }
+    dpw_walk_used_sneak   = 0;
+    dpw_walk_used_hide    = 0;
+    dpw_walk_used_bless   = 0;
+    *(int *)(sbp + 0x4D00) = 1;
+    dpw_saved_auto_combat = 0;
+    logmsg("[dynpath] end-of-walk: auto_combat=ON\n");
 }
 
 static void dpw_tick(void)
@@ -4168,12 +4175,14 @@ static void dpw_tick(void)
     if (cur_mm_sneak != 0) {
         dpw_saved_auto_sneak = dpw_saved_auto_sneak ? 0 : cur_mm_sneak;
         *(int *)(sbp + 0x4D20) = 0;
+        if (dpw_saved_auto_sneak) dpw_walk_used_sneak = 1;
         logmsg("[dynpath] user toggled auto_sneak -> %d\n", dpw_saved_auto_sneak);
     }
     int cur_mm_hide = *(int *)(sbp + 0x4D24);
     if (cur_mm_hide != 0) {
         dpw_saved_auto_hide = dpw_saved_auto_hide ? 0 : cur_mm_hide;
         *(int *)(sbp + 0x4D24) = 0;
+        if (dpw_saved_auto_hide) dpw_walk_used_hide = 1;
         logmsg("[dynpath] user toggled auto_hide -> %d\n", dpw_saved_auto_hide);
     }
 
@@ -4215,8 +4224,8 @@ static void dpw_tick(void)
             dpw_update_statusbar();
             break;
         }
-        if (busy_lock && auto_combat) break;
-        if (action_pending && auto_combat) break;
+        if (busy_lock && dpw_saved_auto_combat) break;
+        if (action_pending && dpw_saved_auto_combat) break;
         if (cur_hp < 1) {
             dpw_clear_pathing_active(sbp);
             dpw_restore_auto_stealth(sbp);
@@ -4231,20 +4240,25 @@ static void dpw_tick(void)
             logmsg("[dynpath] CC at step %d: held=%d blind=%d at %d,%d "
                    "— entering COMBAT_WAIT\n",
                    dpw_step, is_held, is_blinded, loc_map, loc_room);
-            if (hostiles > 0 && !auto_combat) {
+            if (hostiles > 0 && dpw_saved_auto_combat) {
                 *(int *)(sbp + 0x4D00) = 1;
-                dpw_temp_auto_combat = 1;
-                logmsg("[dynpath] CC'd with %d hostiles, auto_combat OFF "
-                       "— temp-enabling auto_combat\n", hostiles);
+                logmsg("[dynpath] CC'd with %d hostiles — enabling auto_combat\n", hostiles);
             }
             dpw_state = DPW_COMBAT_WAIT;
             break;
         }
 
-        if (auto_combat && (in_combat || hostiles > 0)) {
-            logmsg("[dynpath] combat at step %d: in_combat=%d hostiles=%d at %d,%d "
-                   "— entering COMBAT_WAIT\n",
-                   dpw_step, in_combat, hostiles, loc_map, loc_room);
+        /* Trust MegaMUD's own in_combat decision.
+         * hostiles>0 (ent[0]==2) only means "room-slot is combat-class" — MegaMUD
+         * still checks the per-NPC category (Friend/Avoid/Enemy/Flee, see MEGAMUD_RE.md)
+         * and won't engage Friend/Avoid/Flee mobs. Using hostiles count here would
+         * lock up the walker at Friend-tagged mobs like default guardsmen.
+         * in_combat is MegaMUD's authoritative "we are actually fighting" signal. */
+        if (dpw_saved_auto_combat && in_combat) {
+            *(int *)(sbp + 0x4D00) = 1;
+            logmsg("[dynpath] combat at step %d: in_combat=1 hostiles=%d at %d,%d "
+                   "— entering COMBAT_WAIT (auto_combat enabled)\n",
+                   dpw_step, hostiles, loc_map, loc_room);
             dpw_state = DPW_COMBAT_WAIT;
             break;
         }
@@ -4306,7 +4320,12 @@ static void dpw_tick(void)
     case DPW_SNEAK_WAIT:
         if (in_combat) {
             logmsg("[dynpath] combat during sneak wait at %d,%d\n", loc_map, loc_room);
-            dpw_state = auto_combat ? DPW_COMBAT_WAIT : DPW_READY;
+            if (dpw_saved_auto_combat) {
+                *(int *)(sbp + 0x4D00) = 1;
+                dpw_state = DPW_COMBAT_WAIT;
+            } else {
+                dpw_state = DPW_READY;
+            }
             break;
         }
         if (is_sneaking) {
@@ -4331,7 +4350,12 @@ static void dpw_tick(void)
     case DPW_HIDE_WAIT:
         if (in_combat) {
             logmsg("[dynpath] combat during hide wait at %d,%d\n", loc_map, loc_room);
-            dpw_state = auto_combat ? DPW_COMBAT_WAIT : DPW_READY;
+            if (dpw_saved_auto_combat) {
+                *(int *)(sbp + 0x4D00) = 1;
+                dpw_state = DPW_COMBAT_WAIT;
+            } else {
+                dpw_state = DPW_READY;
+            }
             break;
         }
         if (is_hiding) {
@@ -4391,9 +4415,10 @@ static void dpw_tick(void)
             }
             break;
         }
-        if (auto_combat && in_combat) {
+        if (dpw_saved_auto_combat && in_combat && hostiles > 0) {
+            *(int *)(sbp + 0x4D00) = 1;
             logmsg("[dynpath] combat while waiting for move: in_combat=%d hostiles=%d "
-                   "at %d,%d step %d\n",
+                   "at %d,%d step %d — enabling auto_combat\n",
                    in_combat, hostiles, loc_map, loc_room, dpw_step);
             dpw_state = DPW_COMBAT_WAIT;
             break;
@@ -4439,7 +4464,11 @@ static void dpw_tick(void)
             *(int *)(sbp + 0x4D0C) = dpw_saved_auto_bless;
             logmsg("[dynpath] combat engaged: re-enabled auto_bless\n");
         }
-        if (!in_combat && hostiles <= 0 && !is_held &&
+        /* Exit when MegaMUD says combat is over (in_combat=0) and we aren't
+         * held/blinded. Don't require hostiles<=0 — a Friend/Avoid/Flee mob
+         * still in the room keeps ent[0]==2 forever, but MegaMUD already
+         * decided not to fight it (see MEGAMUD_RE.md NPC Categories). */
+        if (!in_combat && !is_held &&
             !(is_blinded && !ign_blind)) {
             logmsg("[dynpath] combat clear at %d,%d — resuming walk at step %d\n",
                    loc_map, loc_room, dpw_step);
@@ -4447,11 +4476,8 @@ static void dpw_tick(void)
                 *(int *)(sbp + 0x4D0C) = 0;
                 logmsg("[dynpath] suppressed auto_bless for movement\n");
             }
-            if (dpw_temp_auto_combat) {
-                *(int *)(sbp + 0x4D00) = 0;
-                dpw_temp_auto_combat = 0;
-                logmsg("[dynpath] restored auto_combat=0\n");
-            }
+            *(int *)(sbp + 0x4D00) = 0;
+            logmsg("[dynpath] combat clear: auto_combat disabled for walking\n");
             unsigned int post_combat_loc = DPW_PACK_LOC(loc_map, loc_room);
             if (post_combat_loc != dpw_last_loc && post_combat_loc != 0) {
                 int found = -1;
@@ -4488,7 +4514,12 @@ static void dpw_tick(void)
 
         if (in_combat) {
             logmsg("[dynpath] combat during rest at %d,%d\n", loc_map, loc_room);
-            dpw_state = auto_combat ? DPW_COMBAT_WAIT : DPW_READY;
+            if (dpw_saved_auto_combat) {
+                *(int *)(sbp + 0x4D00) = 1;
+                dpw_state = DPW_COMBAT_WAIT;
+            } else {
+                dpw_state = DPW_READY;
+            }
             break;
         }
         if (hp_done && mn_done) {
@@ -4555,24 +4586,38 @@ static void dynpath_do_inject(void)
     type_into_megamud("rm");
 
     dp_active_dst = dp_dst;
-    InterlockedExchange(&dp_active, 1);
 
-    /* Suppress MegaMUD's auto-sneak/hide/bless so only our walker controls
-     * stealth timing. Bless is suppressed during movement to prevent it from
-     * breaking sneak mid-transit — re-enabled during DPW_COMBAT_WAIT so
-     * MegaMUD can rebuff during fights, then re-suppressed when walking resumes. */
+    /* Save and suppress MegaMUD's auto-sneak/hide/bless BEFORE setting
+     * dp_active, so the icon thread never sees dp_active=1 with stale
+     * saved values (which would flash the icon OFF instead of purple).
+     * When chaining walks (new walk while already walking), the struct
+     * is already zeroed by the previous walk — inherit the saved values
+     * instead of reading zeroes from the struct. */
     unsigned char *sbp = (unsigned char *)struct_base;
-    dpw_saved_auto_sneak  = *(int *)(sbp + 0x4D20);
-    dpw_saved_auto_hide   = *(int *)(sbp + 0x4D24);
-    dpw_saved_auto_bless  = *(int *)(sbp + 0x4D0C);
-    *(int *)(sbp + 0x4D20) = 0;
-    *(int *)(sbp + 0x4D24) = 0;
-    *(int *)(sbp + 0x4D0C) = 0;
-    logmsg("[dynpath] suppressed auto_sneak=%d auto_hide=%d auto_bless=%d\n",
-           dpw_saved_auto_sneak, dpw_saved_auto_hide, dpw_saved_auto_bless);
+    if (dp_active) {
+        /* Already walking — keep current saved stealth/combat state (struct is zeroed) */
+        logmsg("[dynpath] chained walk: inheriting auto_sneak=%d auto_hide=%d auto_bless=%d auto_combat=%d\n",
+               dpw_saved_auto_sneak, dpw_saved_auto_hide, dpw_saved_auto_bless, dpw_saved_auto_combat);
+    } else {
+        dpw_saved_auto_sneak  = *(int *)(sbp + 0x4D20);
+        dpw_saved_auto_hide   = *(int *)(sbp + 0x4D24);
+        dpw_saved_auto_bless  = *(int *)(sbp + 0x4D0C);
+        dpw_saved_auto_combat = *(int *)(sbp + 0x4D00);
+        *(int *)(sbp + 0x4D20) = 0;
+        *(int *)(sbp + 0x4D24) = 0;
+        *(int *)(sbp + 0x4D0C) = 0;
+        *(int *)(sbp + 0x4D00) = 0;
+        logmsg("[dynpath] suppressed auto_sneak=%d auto_hide=%d auto_bless=%d auto_combat=%d\n",
+               dpw_saved_auto_sneak, dpw_saved_auto_hide, dpw_saved_auto_bless, dpw_saved_auto_combat);
+    }
+    dpw_walk_used_sneak = dpw_saved_auto_sneak ? 1 : 0;
+    dpw_walk_used_hide  = dpw_saved_auto_hide  ? 1 : 0;
+    dpw_walk_used_bless = dpw_saved_auto_bless ? 1 : 0;
     dpw_log_npc_list(sbp);
 
     dpw_set_pathing_active(sbp);
+
+    InterlockedExchange(&dp_active, 1);
     dpw_state = DPW_READY;
 
     logmsg("[dynpath] walk started: %d steps, from=%d,%d dst=%d,%d\n",
@@ -4622,6 +4667,52 @@ void WINAPI dynpath_get_progress(int *out_step, int *out_count, int *out_active)
     if (out_step)   *out_step   = dpw_step;
     if (out_count)  *out_count  = dpw_count;
     if (out_active) *out_active = (int)dp_active;
+}
+
+static int mdw_dir_code(const char *d) {
+    if (!d || !d[0]) return -1;
+    if (d[0]=='n'||d[0]=='N') {
+        if (d[1]=='e'||d[1]=='E') return 4;
+        if (d[1]=='w'||d[1]=='W') return 5;
+        return 0;
+    }
+    if (d[0]=='s'||d[0]=='S') {
+        if (d[1]=='e'||d[1]=='E') return 6;
+        if (d[1]=='w'||d[1]=='W') return 7;
+        return 1;
+    }
+    if (d[0]=='e'||d[0]=='E') return 2;
+    if (d[0]=='w'||d[0]=='W') return 3;
+    if (d[0]=='u'||d[0]=='U') return 8;
+    if (d[0]=='d'||d[0]=='D') return 9;
+    return -1;
+}
+
+int WINAPI dynpath_get_path_rooms(unsigned short *out_maps, unsigned short *out_rooms,
+                                  int *out_cur_step, int max_steps)
+{
+    if (!dp_active || !dpw_steps) return 0;
+    int n = dpw_count < max_steps ? dpw_count : max_steps;
+    for (int i = 0; i < n; i++) {
+        out_maps[i]  = dpw_steps[i].map;
+        out_rooms[i] = dpw_steps[i].room;
+    }
+    if (n < max_steps && dpw_dst != 0) {
+        out_maps[n]  = (unsigned short)((dpw_dst >> 16) & 0xFFFF);
+        out_rooms[n] = (unsigned short)(dpw_dst & 0xFFFF);
+        n++;
+    }
+    if (out_cur_step) *out_cur_step = dpw_step;
+    return n;
+}
+
+int WINAPI dynpath_get_path_dirs(signed char *out_dirs, int max_steps)
+{
+    if (!dp_active || !dpw_steps) return 0;
+    int n = dpw_count < max_steps ? dpw_count : max_steps;
+    for (int i = 0; i < n; i++)
+        out_dirs[i] = (signed char)mdw_dir_code(dpw_steps[i].dir);
+    return n;
 }
 
 int WINAPI dynpath_get_effective_auto(int cfg_off)

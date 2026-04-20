@@ -119,11 +119,47 @@ Reset script: `wine python scripts/reset_stats.py [exp|accuracy|other|all]`
 | 0x1EE0 | ptr | ENTITY_LIST_PTR | Pointer to entity array |
 
 Entity array element:
-- `+0x00` i32: type (1=player, 2=monster, 3=item)
+- `+0x00` i32: **room role** — what kind of slot this entry occupies in the room view
+  - `0` = empty/none
+  - `1` = FRIENDLY (non-combat NPC / "also here" roster)
+  - `2` = HOSTILE (monster listed in the combat-eligible roster — this is what MegaMUD's own `FUN_00453960_HOSTILE_MONSTER_COUNT` at VA 0x453960 counts)
+  - `3` = PLAYER
 - `+0x0C` i32: quantity
 - `+0x10` char[]: name
 - `+0x34` i32: known flag 1
 - `+0x38` i32: known flag 2
+
+**IMPORTANT:** `+0x00 == 2` is NOT the per-NPC "category" (Friend/Avoid/Enemy/Flee/Unknown) the user picks in the Game Data → Monsters menu. It only means "this room-slot is a hostile-class entry." The user-configurable category lives in the monster database entry (see **NPC Categories** below) and is what MegaMUD consults before deciding to auto-attack. So a Guardsman whose default DB category is **Friend** still appears as `ent[0]==2` in the room array — MegaMUD just refuses to engage it. Counting `ent[0]==2` to gate combat behavior gives false positives for Friend/Avoid/Flee monsters; trust `in_combat` (`+0x5698`) instead.
+
+### NPC Categories (Game Data → Monsters menu)
+
+Category string table at VA `0x0051d1f4` in `.data`, 12 bytes per entry:
+
+| VA | String ptr | Label | Internal ID |
+|---|---|---|---|
+| 0x0051d1f4 | 0x00503d24 | `Unknown` | 2 |
+| 0x0051d200 | 0x0050558c | `Friend`  | 3 |
+| 0x0051d20c | 0x00505594 | `Avoid`   | 4 |
+| 0x0051d218 | 0x0050559c | `Enemy`   | 5 |
+| 0x0051d224 | 0x004fe8d8 | `Flee`    | 6 |
+| 0x0051d230 | 0x005055a4 | `Hangup`  | 0 (terminator / action entry) |
+
+Semantics (per user, MajorMUD canon):
+- **Friend** — never attack, don't sneak while in room, don't flee. Walk through normally.
+- **Avoid** — treat exactly like Friend. Extra guarantee that this NPC won't be auto-attacked even if the player has `AttackNeutral=1`.
+- **Enemy** — attack on sight, **but respects the monster's own non-hostile flag**. If the monster entry is flagged non-hostile in MegaMUD's monster DB, the decision depends on the player's `AttackNeutral` setting (`+0x37DC`):
+  - `AttackNeutral=1` ("attack all monsters") → engage the Enemy-tagged non-hostile
+  - `AttackNeutral=0` → treat Enemy-tagged non-hostile like Avoid/Friend, don't engage
+  Pure hostile (non-neutral) Enemy-tagged mobs are always engaged regardless of AttackNeutral.
+- **Flee** — run away.
+- **Unknown** — default/fallback display when the monster isn't explicitly tagged.
+
+**Walker implication:** the combined decision (per-NPC category × monster non-hostile flag × player `AttackNeutral`) is what MegaMUD bakes into `in_combat` at `+0x5698`. Any walker or gating plugin should trust `in_combat` as the authoritative "we are going to fight this" signal instead of trying to re-derive it from `ent[0]` or the monster DB — the runtime state already encodes the correct answer.
+
+Standalone strings referenced elsewhere (not part of this table):
+- `Normal` at VA 0x005082dc
+- `Attack` at VA 0x0050bd24
+- `Ignore` at VA 0x005020e4
 
 ### Room / Navigation
 
